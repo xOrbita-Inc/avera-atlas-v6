@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: planner
+  namespace: avera-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: planner
+  template:
+    metadata:
+      labels:
+        app: planner
+    spec:
+      containers:
+      # --- 1. Ingest Service ---
+      - name: ingest
+        image: avera/ingest:v1
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8000
+        env:
+        - name: OUTPUT_DIR
+          value: "/data/planner_artifacts"
+        volumeMounts:
+        - name: shared-data
+          mountPath: /data/planner_artifacts
+
+      # --- 2. Propagator Service ---
+      - name: propagator
+        image: avera/propagator:v1
+        imagePullPolicy: Never
+        env:
+        - name: DATA_DIR
+          value: "/data/planner_artifacts"
+        volumeMounts:
+        - name: shared-data
+          mountPath: /data/planner_artifacts
+
+      # Map to physical storage on the Jetson
+      volumes:
+      - name: shared-data
+        hostPath:
+          path: /opt/avera/data
+          type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: planner-service
+  namespace: avera-system
+spec:
+  selector:
+    app: planner
+  ports:
+    - protocol: TCP
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP

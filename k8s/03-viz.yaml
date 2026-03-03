@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: viz
+  namespace: avera-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: viz
+  template:
+    metadata:
+      labels:
+        app: viz
+    spec:
+      containers:
+      - name: viz
+        image: avera/viz:v1
+        imagePullPolicy: Never
+        env:
+        - name: DATA_DIR
+          value: "/data/planner_artifacts"
+        volumeMounts:
+        - name: shared-data
+          mountPath: /data/planner_artifacts
+      volumes:
+      - name: shared-data
+        hostPath:
+          path: /opt/avera/data
+          type: DirectoryOrCreate

@@ -1,0 +1,918 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AVERA-ATLAS | Mission Control</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+<style>
+
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg-deep:#060611;--bg-panel:#0c0d1a;--bg-card:#111225;--bg-hover:#161836;--accent:#4ff8e8;--accent-dim:#2a9e94;--accent-glow:rgba(79,248,232,0.15);--red:#ff3b5c;--amber:#ffb020;--green:#3ddc84;--text:#e4e4ef;--text-dim:#6b6d8a;--border:#1e2044;--border-accent:#2a3060}
+html,body{height:100%;overflow:hidden}
+body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12px;display:flex;flex-direction:column}
+.header{height:48px;background:linear-gradient(180deg,#0a0b1e,var(--bg-deep));border-bottom:1px solid var(--border-accent);display:flex;align-items:center;justify-content:space-between;padding:0 20px;flex-shrink:0;position:relative;z-index:10}
+.header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--accent-dim),transparent)}
+.logo{display:flex;align-items:center;gap:10px}
+.xo-logo-wrap{display:flex;flex-direction:column;align-items:center;flex-shrink:0}
+.xo-logo{width:32px;height:32px;object-fit:contain}
+.xo-label{font-size:7px;color:#ffffff;background:#000;padding:1px 4px;border-radius:1px;letter-spacing:1.5px;margin-top:1px;font-family:'Helvetica Neue',Arial,sans-serif;font-weight:400}
+.spinner{display:inline-block;width:12px;height:12px;border:2px solid rgba(79,248,232,0.2);border-top-color:#4ff8e8;border-radius:50%;animation:spin 0.8s linear infinite;vertical-align:middle;margin-right:6px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.logo h1{font-family:'Outfit',sans-serif;font-size:18px;font-weight:700;letter-spacing:4px;color:var(--accent);text-shadow:0 0 20px rgba(79,248,232,0.3)}
+.logo .tag{font-size:9px;letter-spacing:2px;color:var(--text-dim);text-transform:uppercase;border-left:1px solid var(--border-accent);padding-left:12px}
+.header-right{display:flex;align-items:center;gap:16px}
+.clock{font-size:13px;color:var(--text-dim);font-weight:300;letter-spacing:1px}
+.sys-status{font-size:9px;letter-spacing:1.5px;font-weight:500;padding:4px 10px;border-radius:3px;background:rgba(61,220,132,0.1);color:var(--green);border:1px solid rgba(61,220,132,0.3)}
+.pipeline-bar{height:28px;background:var(--bg-panel);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 20px;gap:4px;flex-shrink:0}
+.pipe-node{display:flex;align-items:center;gap:6px;padding:2px 10px;font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--text-dim);transition:all 0.3s}
+.pipe-node.online{color:var(--green)}.pipe-node.offline{color:var(--red)}
+.pipe-node .dot{width:6px;height:6px;border-radius:50%;background:var(--text-dim);transition:background 0.3s}
+.pipe-node.online .dot{background:var(--green);box-shadow:0 0 6px var(--green)}
+.pipe-arrow{color:var(--border-accent);font-size:10px}
+.main{flex:1;display:flex;overflow:hidden}
+.sidebar-left{width:285px;flex-shrink:0;background:var(--bg-panel);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow-y:auto}
+.sidebar-right{width:340px;flex-shrink:0;background:var(--bg-panel);border-left:1px solid var(--border);display:flex;flex-direction:column;overflow-y:auto}
+.panel{margin:8px;border-radius:4px;background:var(--bg-card);border:1px solid var(--border)}
+.panel-hdr{padding:8px 12px;border-bottom:1px solid var(--border);font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--accent-dim);font-weight:500;display:flex;justify-content:space-between;align-items:center}
+.panel-body{padding:10px 12px}
+.scenario-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.scenario-btn{padding:8px 6px;border:1px solid var(--border);background:var(--bg-panel);color:var(--text-dim);border-radius:3px;cursor:pointer;font-family:inherit;font-size:10px;text-align:center;transition:all 0.2s}
+.scenario-btn:hover{border-color:var(--accent-dim);color:var(--text)}
+.scenario-btn.active{border-color:var(--accent);color:var(--accent);background:var(--accent-glow)}
+.run-btn{width:100%;margin-top:8px;padding:10px;background:linear-gradient(135deg,var(--accent-dim),#1a7068);border:1px solid var(--accent);color:#fff;font-family:inherit;font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;border-radius:3px;cursor:pointer;transition:all 0.2s}
+.run-btn:hover{box-shadow:0 0 20px rgba(79,248,232,0.3);transform:translateY(-1px)}
+.run-btn.running{background:linear-gradient(135deg,#b88a00,#8a6500);border-color:var(--amber);animation:pulse-a 2s infinite}
+@keyframes pulse-a{0%,100%{box-shadow:0 0 5px rgba(255,176,32,0.3)}50%{box-shadow:0 0 15px rgba(255,176,32,0.5)}}
+.metrics-row{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:6px}
+.metric{text-align:center;padding:8px 4px;background:var(--bg-panel);border:1px solid var(--border);border-radius:3px}
+.metric .val{font-size:18px;font-weight:700;color:var(--accent);line-height:1.2}
+.metric .val.red{color:var(--red)}.metric .val.amber{color:var(--amber)}.metric .val.green{color:var(--green)}
+.metric .lbl{font-size:8px;color:var(--text-dim);letter-spacing:1px;text-transform:uppercase;margin-top:2px}
+.encounter-container{flex:1;display:flex;flex-direction:column;background:var(--bg-deep);overflow:hidden;min-height:0}
+.encounter-header{display:flex;justify-content:space-between;align-items:center;padding:8px 16px;background:var(--bg-panel);border-bottom:1px solid var(--border)}
+.encounter-title{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--accent-dim)}
+.encounter-alert{font-size:10px;font-weight:700;letter-spacing:2px;padding:4px 12px;border-radius:3px;display:none}
+.encounter-alert.red{display:inline-block;background:rgba(255,59,92,0.15);border:1px solid var(--red);color:var(--red);animation:flash 1.5s infinite}
+.encounter-alert.amber{display:inline-block;background:rgba(255,176,32,0.15);border:1px solid var(--amber);color:var(--amber)}
+@keyframes flash{0%,100%{opacity:1}50%{opacity:0.6}}
+.encounter-canvas-wrap{flex:1;position:relative;min-height:0;overflow:hidden}
+#encounterCanvas{width:100%;height:100%;display:block}
+.risk-bar{display:flex;align-items:center;padding:8px 16px;background:var(--bg-panel);border-top:1px solid var(--border);gap:12px;flex-wrap:wrap}
+.risk-bar .label{font-size:9px;color:var(--text-dim);letter-spacing:1px;text-transform:uppercase;white-space:nowrap}
+.risk-meter{display:flex;align-items:center;gap:8px}
+.risk-val{font-size:11px;font-weight:700;min-width:50px}
+.risk-arrow{color:var(--green);font-size:14px}
+.decision-card{margin:8px;padding:14px;background:linear-gradient(135deg,var(--bg-card),#0e1030);border:1px solid var(--border-accent);border-radius:6px;position:relative;overflow:hidden}
+.decision-card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--accent-dim),transparent)}
+.decision-card.alert-red{border-color:rgba(255,59,92,0.4)}.decision-card.alert-red::before{background:linear-gradient(90deg,transparent,var(--red),transparent)}
+.decision-card.alert-amber{border-color:rgba(255,176,32,0.4)}.decision-card.alert-amber::before{background:linear-gradient(90deg,transparent,var(--amber),transparent)}
+.decision-label{font-size:9px;color:var(--text-dim);letter-spacing:2px;text-transform:uppercase;margin-bottom:6px}
+.decision-status{font-family:'Outfit',sans-serif;font-size:22px;font-weight:700;margin-bottom:4px}
+.decision-badge{display:inline-block;padding:3px 10px;border-radius:3px;font-size:10px;font-weight:700;letter-spacing:1.5px}
+.badge-go{background:rgba(61,220,132,0.15);color:var(--green);border:1px solid rgba(61,220,132,0.4)}
+.badge-standby{background:rgba(255,176,32,0.15);color:var(--amber);border:1px solid rgba(255,176,32,0.4)}
+.badge-nogo{background:rgba(107,109,138,0.15);color:var(--text-dim);border:1px solid var(--border)}
+.decision-meta{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)}
+.decision-meta .item .k{font-size:8px;color:var(--text-dim);letter-spacing:1px;text-transform:uppercase}
+.decision-meta .item .v{font-size:13px;font-weight:500;margin-top:2px}
+.planner-section{margin:0 8px 8px}
+.candidates-table,.conj-table{width:100%;border-collapse:collapse}
+.candidates-table th,.conj-table th{font-size:8px;color:var(--accent-dim);letter-spacing:1px;text-transform:uppercase;padding:5px 6px;text-align:left;border-bottom:1px solid var(--border);font-weight:400}
+.candidates-table td,.conj-table td{padding:5px 6px;font-size:10px;border-bottom:1px solid var(--border)}
+.candidates-table tr:hover,.conj-table tr:hover{background:var(--bg-hover)}
+.candidates-table .best{color:var(--accent);font-weight:500}
+.conj-table tr{cursor:pointer;transition:background 0.15s}
+.conj-table tr.selected{background:var(--accent-glow)}
+.conj-table th{position:sticky;top:0;background:var(--bg-card)}
+.risk-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px}
+.risk-RED{background:var(--red);box-shadow:0 0 6px var(--red)}.risk-AMBER{background:var(--amber);box-shadow:0 0 6px var(--amber)}.risk-GREEN{background:var(--green)}.risk-NOMINAL{background:var(--text-dim)}
+::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:var(--bg-panel)}::-webkit-scrollbar-thumb{background:var(--border-accent);border-radius:2px}
+.empty-state{text-align:center;padding:20px;color:var(--text-dim);font-size:10px;letter-spacing:0.5px}
+.refresh-btn{background:none;border:1px solid var(--border);color:var(--text-dim);padding:2px 8px;border-radius:2px;cursor:pointer;font-family:inherit;font-size:9px}
+.refresh-btn:hover{border-color:var(--accent-dim);color:var(--text)}
+.enc-legend{position:absolute;bottom:8px;left:8px;background:rgba(6,6,17,0.85);border:1px solid var(--border);border-radius:3px;padding:6px 10px;font-size:9px;display:flex;gap:14px;flex-wrap:wrap;z-index:2}
+.enc-legend .li{display:flex;align-items:center;gap:5px;color:var(--text-dim);white-space:nowrap}
+.enc-legend .sw{width:12px;height:3px;border-radius:1px;flex-shrink:0}
+
+.policy-control{margin-bottom:10px}
+.policy-label{display:flex;justify-content:space-between;font-size:9px;color:var(--text-dim);margin-bottom:3px}
+.policy-val{color:var(--accent);font-weight:500;font-family:'JetBrains Mono',monospace}
+.policy-range{display:flex;justify-content:space-between;font-size:7px;color:#3a3c5a;margin-top:1px}
+.policy-slider{width:100%;height:4px;-webkit-appearance:none;appearance:none;background:#1e2044;border-radius:2px;outline:none;cursor:pointer}
+.policy-slider::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:var(--accent);cursor:pointer;border:2px solid var(--bg-panel)}
+.policy-slider::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:var(--accent);cursor:pointer;border:2px solid var(--bg-panel)}
+.policy-slider.changed{background:linear-gradient(90deg,var(--accent-dim),#1e2044)}
+.policy-replan-btn{width:100%;padding:7px;background:transparent;border:1px solid var(--accent-dim);color:var(--accent-dim);font-size:9px;letter-spacing:1px;font-family:'JetBrains Mono',monospace;cursor:pointer;border-radius:3px;margin-top:6px;text-transform:uppercase;transition:all 0.2s}
+.policy-replan-btn:hover:not(:disabled){background:rgba(79,248,232,0.08);border-color:var(--accent);color:var(--accent)}
+.policy-replan-btn:disabled{opacity:0.35;cursor:default}
+.policy-replan-btn.active{border-color:var(--accent);color:var(--accent);background:rgba(79,248,232,0.1);animation:pulse-border 1.5s ease-in-out infinite}
+@keyframes pulse-border{0%,100%{border-color:var(--accent-dim)}50%{border-color:var(--accent)}}
+
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo"><div class="xo-logo-wrap"><img src="data:image/png;base64,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" alt="xOrbita" class="xo-logo"/><span class="xo-label">xOrbita</span></div><h1>AVERA-ATLAS</h1><span class="tag">APS v2.4 Conjunction Assessment</span></div>
+  <div class="header-right">
+    <span class="sys-status" id="sysStatus">SYSTEM ONLINE</span>
+    <span class="clock" id="clock">--:--:-- UTC</span>
+  </div>
+</div>
+<div class="pipeline-bar">
+  <div class="pipe-node" id="pIngest"><span class="dot"></span>Ingest</div><span class="pipe-arrow">&rarr;</span>
+  <div class="pipe-node" id="pDetect"><span class="dot"></span>Detect</div><span class="pipe-arrow">&rarr;</span>
+  <div class="pipe-node" id="pTrack"><span class="dot"></span>Track</div><span class="pipe-arrow">&rarr;</span>
+  <div class="pipe-node" id="pProp"><span class="dot"></span>Propagate</div><span class="pipe-arrow">&rarr;</span>
+  <div class="pipe-node" id="pPlan"><span class="dot"></span>Plan</div><span class="pipe-arrow">&rarr;</span>
+  <div class="pipe-node" id="pAtlas"><span class="dot"></span>ATLAS</div>
+</div>
+<div class="main">
+  <div class="sidebar-left">
+    <div class="panel">
+      <div class="panel-hdr">Scenario</div>
+      <div class="panel-body">
+        <div class="scenario-grid">
+          <button class="scenario-btn" data-scenario="nominal" onclick="selectScenario(this)">Nominal</button>
+          <button class="scenario-btn" data-scenario="warning" onclick="selectScenario(this)">Warning</button>
+          <button class="scenario-btn active" data-scenario="critical" onclick="selectScenario(this)">Critical</button>
+          <button class="scenario-btn" data-scenario="mixed" onclick="selectScenario(this)">Mixed</button>
+        </div>
+        <button class="run-btn" id="runBtn" onclick="runScenario()">RUN SCENARIO</button>
+        <div style="text-align:center;margin-top:6px;font-size:9px;color:var(--text-dim)" id="scenarioMsg">Select scenario and run</div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-hdr">Operator Policy</div>
+      <div class="panel-body" style="padding:10px 14px">
+        <div class="policy-control">
+          <div class="policy-label"><span>Fuel Weight (&lambda;<sub>v</sub>)</span><span class="policy-val" id="lvVal">0.010</span></div>
+          <input type="range" class="policy-slider" id="sliderLv" min="0" max="0.1" step="0.001" value="0.01" oninput="onPolicyChange()">
+          <div class="policy-range"><span>0</span><span>0.1</span></div>
+        </div>
+        <div class="policy-control">
+          <div class="policy-label"><span>Lifetime Weight (&lambda;<sub>L</sub>)</span><span class="policy-val" id="llVal">0.005</span></div>
+          <input type="range" class="policy-slider" id="sliderLl" min="0" max="0.05" step="0.001" value="0.005" oninput="onPolicyChange()">
+          <div class="policy-range"><span>0</span><span>0.05</span></div>
+        </div>
+        <div class="policy-control">
+          <div class="policy-label"><span>&Delta;v Limit (m/s)</span><span class="policy-val" id="dvLimVal">1.00</span></div>
+          <input type="range" class="policy-slider" id="sliderDv" min="0.1" max="5.0" step="0.1" value="1.0" oninput="onPolicyChange()">
+          <div class="policy-range"><span>0.1</span><span>5.0</span></div>
+        </div>
+        <button class="policy-replan-btn" id="replanBtn" onclick="replanWithPolicy()" disabled>RE-PLAN WITH NEW POLICY</button>
+        <div style="text-align:center;font-size:8px;color:var(--text-dim);margin-top:4px" id="policyMsg">Adjust weights to see ranking changes</div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-hdr">Tracking Summary</div>
+      <div class="panel-body">
+        <div class="metrics-row">
+          <div class="metric"><div class="val" id="mTotal">--</div><div class="lbl">Tracked</div></div>
+          <div class="metric"><div class="val red" id="mRed">0</div><div class="lbl">Red Alert</div></div>
+        </div>
+        <div class="metrics-row">
+          <div class="metric"><div class="val amber" id="mAmber">0</div><div class="lbl">Amber</div></div>
+          <div class="metric"><div class="val green" id="mGreen">0</div><div class="lbl">Green</div></div>
+        </div>
+        <div class="metrics-row">
+          <div class="metric"><div class="val" id="mClosest">--</div><div class="lbl">Closest (m)</div></div>
+          <div class="metric"><div class="val" id="mMaxPc">--</div><div class="lbl">Max Pc</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-hdr">APS v2.4 Output<span id="plannerVer" style="font-size:8px;color:var(--text-dim)">--</span></div>
+      <div class="panel-body" id="plannerDetails"><div class="empty-state">Run a scenario to see planner output</div></div>
+    </div>
+  </div>
+
+  <div class="encounter-container">
+    <div class="encounter-header">
+      <span class="encounter-title" id="encounterTitle">Encounter Geometry</span>
+      <span class="encounter-alert" id="encounterAlert">CONJUNCTION ALERT</span>
+    </div>
+    <div class="encounter-canvas-wrap"><canvas id="encounterCanvas"></canvas></div>
+    <div class="risk-bar">
+      <div class="label">Pc</div>
+      <div class="risk-meter">
+        <div class="risk-val" style="color:var(--red)" id="pcPre">--</div>
+        <div class="risk-arrow">&rarr;</div>
+        <div class="risk-val" style="color:var(--green)" id="pcPost">--</div>
+      </div>
+      <div style="width:1px;height:20px;background:var(--border)"></div>
+      <div class="label">m&sup2;</div>
+      <div class="risk-val" id="m2Pre" style="color:var(--text)">--</div>
+      <div class="risk-arrow">&rarr;</div>
+      <div class="risk-val" id="m2Post" style="color:var(--accent)">--</div>
+      <div style="width:1px;height:20px;background:var(--border)"></div>
+      <div class="label">Utility</div>
+      <div class="risk-val" id="utilBar" style="color:var(--accent)">--</div>
+    </div>
+  </div>
+
+  <div class="sidebar-right">
+    <div class="decision-card" id="decisionCard">
+      <div class="decision-label">Maneuver Decision</div>
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div class="decision-status" id="decisionStatus">MONITORING</div>
+        <span class="decision-badge badge-nogo" id="decisionBadge">NO ACTION</span>
+      </div>
+      <div class="decision-meta">
+        <div class="item"><div class="k">Target</div><div class="v" id="dTarget">--</div></div>
+        <div class="item"><div class="k">Time to TCA</div><div class="v" id="dTCA">--</div></div>
+        <div class="item"><div class="k">Burn Direction</div><div class="v" id="dDir">--</div></div>
+        <div class="item"><div class="k">||dv||</div><div class="v" id="dDv">--</div></div>
+      </div>
+    </div>
+    <div class="planner-section">
+      <div class="panel">
+        <div class="panel-hdr">Burn Candidates</div>
+        <div class="panel-body" style="padding:0">
+          <table class="candidates-table"><thead><tr><th>Direction</th><th>&Delta;C</th><th>dv (m/s)</th><th>Utility</th></tr></thead>
+          <tbody id="candidatesBody"><tr><td colspan="4" class="empty-state">No evaluation yet</td></tr></tbody></table>
+        </div>
+        <div id="fuelRiskChart" style="padding:8px 12px;border-top:1px solid var(--border)"></div>
+      </div>
+    </div>
+    <div class="planner-section" style="flex:1;display:flex;flex-direction:column;min-height:0">
+      <div class="panel" style="flex:1;display:flex;flex-direction:column;min-height:0">
+        <div class="panel-hdr">Active Conjunctions<span><button class="refresh-btn" onclick="clearAll()" style="margin-right:4px">CLEAR</button><button class="refresh-btn" onclick="refreshData()">REFRESH</button></span></div>
+        <div style="flex:1;overflow-y:auto;padding:0">
+          <table class="conj-table"><thead><tr><th>Object</th><th>Miss (m)</th><th>Pc</th><th>TCA</th><th>Risk</th></tr></thead>
+          <tbody id="conjBody"><tr><td colspan="5" class="empty-state">No data - run a scenario</td></tr></tbody></table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+
+let selectedScenario='critical',conjunctionData=null,selectedConjunction=null;
+let currentPlannerResult=null,currentConj=null;
+let encounterCtx=null,encounterW=0,encounterH=0,zoomLevel=2.5,panX=0,panY=0,isDragging=false,dragStartX=0,dragStartY=0;
+let selectedCandidateDir=null,currentCandidates=null;
+function fmtM2(v){if(Math.abs(v)>=10000)return v.toExponential(2);if(Math.abs(v)>=100)return v.toFixed(0);return v.toFixed(2)}
+
+
+function updateClock(){document.getElementById('clock').textContent=new Date().toISOString().substr(11,8)+' UTC'}
+setInterval(updateClock,1000);updateClock();
+
+function selectScenario(btn){
+  document.querySelectorAll('.scenario-btn').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');selectedScenario=btn.dataset.scenario;
+}
+
+async function runScenario(){
+  const btn=document.getElementById('runBtn'),msg=document.getElementById('scenarioMsg');
+  btn.classList.add('running');btn.textContent='RUNNING...';
+  msg.textContent='Generating '+selectedScenario+' scenario...';
+  try{
+    await fetch('/api/scenarios/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scenario:selectedScenario})});
+    msg.textContent='Waiting for propagation...';
+    setTimeout(()=>{refreshData();msg.textContent='Refreshing...'},4000);
+    setTimeout(()=>{refreshData();msg.textContent='Loading...'},8000);
+    setTimeout(()=>{refreshData();btn.classList.remove('running');btn.textContent='RUN SCENARIO';msg.textContent='Scenario complete'},12000);
+  }catch(e){msg.textContent='Error: '+e.message;btn.classList.remove('running');btn.textContent='RUN SCENARIO'}
+}
+
+async function refreshData(){
+  try{
+    const resp=await fetch('/api/conjunctions');const data=await resp.json();
+    if(data.status==='no_data')return;
+    conjunctionData=data;
+    updateMetrics(data.summary);updateConjunctionTable(data.conjunctions);
+    if(data.conjunctions&&data.conjunctions.length>0){
+      const idx=selectedConjunction||0;
+      const top=data.conjunctions[idx]||data.conjunctions[0];
+      evaluateConjunction(top,idx);
+    }
+  }catch(e){console.error('Refresh failed:',e)}
+}
+
+function updateMetrics(s){
+  if(!s)return;
+  document.getElementById('mTotal').textContent=s.total_tracked||'--';
+  document.getElementById('mRed').textContent=s.red_alerts||0;
+  document.getElementById('mAmber').textContent=s.amber_alerts||0;
+  document.getElementById('mGreen').textContent=s.green_alerts||0;
+  document.getElementById('mClosest').textContent=s.closest_approach_km!=null?(s.closest_approach_km*1000).toFixed(0):'--';
+  document.getElementById('mMaxPc').textContent=s.highest_pc>0?s.highest_pc.toExponential(1):'--';
+}
+
+function updateConjunctionTable(conjs){
+  const tbody=document.getElementById('conjBody');
+  if(!conjs||conjs.length===0){tbody.innerHTML='<tr><td colspan="5" class="empty-state">No conjunctions</td></tr>';return}
+  tbody.innerHTML=conjs.map((c,i)=>{
+    const tcaMin=c.time_to_tca_min;const tcaD=tcaMin<60?tcaMin.toFixed(0)+'m':(tcaMin/60).toFixed(1)+'h';
+    return'<tr onclick="selectConj('+i+')" class="'+(selectedConjunction===i?'selected':'')+'"><td>'+c.object_id+'</td><td>'+c.miss_distance_m.toFixed(0)+'</td><td>'+c.pc_display+'</td><td>T+'+tcaD+'</td><td><span class="risk-dot risk-'+c.risk_level+'"></span>'+c.risk_level+'</td></tr>'
+  }).join('');
+}
+
+function selectConj(idx){
+  selectedConjunction=idx;const conjs=conjunctionData?.conjunctions;
+  if(!conjs||!conjs[idx])return;updateConjunctionTable(conjs);evaluateConjunction(conjs[idx],idx);
+}
+
+async function evaluateConjunction(conj,idx){
+  panX=0;panY=0;zoomLevel=2.5;selectedCandidateDir=null;
+  document.getElementById('plannerDetails').innerHTML='<div class="empty-state"><span class="spinner"></span>Evaluating conjunction...</div>';
+  document.getElementById('candidatesBody').innerHTML='<tr><td colspan="4" class="empty-state"><span class="spinner"></span>Planning...</td></tr>';
+  document.getElementById('fuelRiskChart').innerHTML='';
+  const asset_r=conj.r_asset_km||[6878.0,0.0,0.0];
+  const request={
+    conjunction_id:'eval-'+conj.object_id,
+    satellite:{sat_id:'XORB-001',r_sat_km:asset_r,v_sat_km_s:[0.0,7.668,0.0],
+      t_burn_utc:new Date(Date.now()-3600000).toISOString(),v_remaining_m_s:25.0},
+    conjunction:{obj_id:conj.object_id,
+      t_ca_utc:new Date(Date.now()+conj.time_to_tca_s*1000).toISOString(),
+      r_rel_km:conj.r_obj_km?[conj.r_obj_km[0]-asset_r[0],conj.r_obj_km[1]-asset_r[1],conj.r_obj_km[2]-asset_r[2]]:[conj.miss_distance_km,0.0,0.0],
+      p_rel_km2:[0.01,0,0,0,0.01,0,0,0,0.01],
+      pc_precomputed:conj.pc>0?conj.pc:null},
+    policy:getPolicy()
+  };
+  try{
+    const resp=await fetch('/api/planner/evaluate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)});
+    const result=await resp.json();if(result.error)return;
+    currentPlannerResult=result;currentConj=conj;
+    updateDecisionCard(result,conj);
+    currentCandidates=result.metrics?.all_candidates||[];
+    updateCandidatesTable(currentCandidates,result.recommendation?.direction,result.metrics?.fuel_cost_m_s||0);
+    updatePlannerDetails(result);
+    updateRiskBar(result,conj);
+    drawEncounter(conj,result);
+  }catch(e){console.error('Planner call failed:',e)}
+}
+
+function updateDecisionCard(result,conj){
+  const card=document.getElementById('decisionCard'),status=document.getElementById('decisionStatus'),badge=document.getElementById('decisionBadge');
+  const utility=result.recommendation?.utility||0;
+  const pos=utility>0.001;
+  let dec='MONITORING',bc='badge-nogo',bt='NO ACTION',cc='';
+  if(conj.risk_level==='RED'&&pos){dec='EXECUTE MANEUVER';bc='badge-go';bt='GO';cc='alert-red'}
+  else if(conj.risk_level==='AMBER'&&pos){dec='PREPARE SYSTEMS';bc='badge-standby';bt='STANDBY';cc='alert-amber'}
+  else if(conj.risk_level==='RED'){dec='ASSESSING';bc='badge-standby';bt='ANALYZING';cc='alert-red'}
+  else if(conj.risk_level==='AMBER'){dec='MONITORING';bc='badge-nogo';bt='WATCH';cc='alert-amber'}
+  status.textContent=dec;badge.className='decision-badge '+bc;badge.textContent=bt;
+  card.className='decision-card '+cc;
+  document.getElementById('dTarget').textContent=conj.object_id;
+  const t=conj.time_to_tca_min;
+  document.getElementById('dTCA').textContent=t<60?t.toFixed(0)+' min':(t/60).toFixed(1)+' hr';
+  document.getElementById('dDir').textContent=(result.recommendation?.direction||'--').toUpperCase();
+  document.getElementById('dDv').textContent=(result.recommendation?.dv_magnitude_m_s||0).toFixed(2)+' m/s';
+}
+
+function updateCandidatesTable(candidates,bestDir,fuelCost){
+  const tbody=document.getElementById('candidatesBody');
+  if(!candidates||!candidates.length){
+    tbody.innerHTML='<tr><td colspan="4" class="empty-state">No candidates</td></tr>';
+    document.getElementById('fuelRiskChart').innerHTML='';return;
+  }
+  tbody.innerHTML=candidates.map(c=>{
+    const best=c.direction===bestDir;
+    const sel=c.direction===selectedCandidateDir;
+    const cls=sel?'best':(best?'best':'');
+    const prefix=sel?'\u25C9 ':(best?'\u25B6 ':'');
+    const dv=Math.sqrt(c.dv_eci_km_s.reduce((s,v)=>s+v*v,0))*1000;
+    const rowCls=sel?'selected':'';
+    return'<tr class="'+rowCls+'" onclick="selectCandidate(\''+c.direction+'\')" style="cursor:pointer"><td class="'+cls+'">'+prefix+c.direction+'</td><td class="'+cls+'">'+c.delta_C.toFixed(3)+'</td><td>'+dv.toFixed(1)+'</td><td class="'+cls+'">'+c.utility.toFixed(3)+'</td></tr>'
+  }).join('');
+  renderFuelRiskChart(candidates,bestDir,fuelCost);
+}
+
+function getPolicy(){
+  const lv=parseFloat(document.getElementById('sliderLv')?.value||0.01);
+  const ll=parseFloat(document.getElementById('sliderLl')?.value||0.005);
+  const dv=parseFloat(document.getElementById('sliderDv')?.value||1.0);
+  return{lambda_v:lv,lambda_L:ll,dv_mag_limit_m_s:dv,a_ref_km:6878.0};
+}
+
+let policyDefaults={lv:0.01,ll:0.005,dv:1.0};
+function onPolicyChange(){
+  const lv=parseFloat(document.getElementById('sliderLv').value);
+  const ll=parseFloat(document.getElementById('sliderLl').value);
+  const dv=parseFloat(document.getElementById('sliderDv').value);
+  document.getElementById('lvVal').textContent=lv.toFixed(3);
+  document.getElementById('llVal').textContent=ll.toFixed(3);
+  document.getElementById('dvLimVal').textContent=dv.toFixed(2);
+  const changed=Math.abs(lv-policyDefaults.lv)>0.0005||Math.abs(ll-policyDefaults.ll)>0.0005||Math.abs(dv-policyDefaults.dv)>0.05;
+  const btn=document.getElementById('replanBtn');
+  const hasConj=currentConj!==null;
+  btn.disabled=!(changed&&hasConj);
+  if(changed&&hasConj)btn.classList.add('active');
+  else btn.classList.remove('active');
+  document.getElementById('policyMsg').textContent=changed?'Policy modified \u2014 click RE-PLAN to apply':'Adjust weights to see ranking changes';
+}
+
+async function replanWithPolicy(){
+  if(!currentConj)return;
+  const btn=document.getElementById('replanBtn');
+  btn.disabled=true;btn.innerHTML='<span class="spinner"></span>RE-PLANNING...';btn.classList.remove('active');
+  document.getElementById('policyMsg').textContent='Calling planner with new policy...';
+  const p=getPolicy();
+  policyDefaults={lv:p.lambda_v,ll:p.lambda_L,dv:p.dv_mag_limit_m_s};
+  selectedCandidateDir=null;
+  await evaluateConjunction(currentConj,selectedConjunction);
+  btn.textContent='RE-PLAN WITH NEW POLICY';
+  document.getElementById('policyMsg').textContent='Policy applied \u2014 rankings updated';
+  onPolicyChange();
+}
+
+function selectCandidate(dir){
+  if(selectedCandidateDir===dir){selectedCandidateDir=null}
+  else{selectedCandidateDir=dir}
+  // Re-render table with new selection
+  if(currentPlannerResult&&currentCandidates){
+    const bestDir=currentPlannerResult.recommendation?.direction;
+    const fuelCost=currentPlannerResult.metrics?.fuel_cost_m_s||0;
+    updateCandidatesTable(currentCandidates,bestDir,fuelCost);
+  }
+  // Re-draw encounter with selected candidate's vector
+  if(currentConj&&currentPlannerResult){
+    drawEncounter(currentConj,currentPlannerResult);
+  }
+}
+
+function renderFuelRiskChart(candidates,bestDir,fuelCost){
+  const el=document.getElementById('fuelRiskChart');
+  if(!candidates||!candidates.length){el.innerHTML='';return}
+
+  // Find scale ranges
+  const allDC=candidates.map(c=>c.delta_C);
+  const maxAbsDC=Math.max(...allDC.map(Math.abs),0.001);
+  const barH=16,gap=8,topPad=22;
+  const rows=candidates.length;
+  const chartH=topPad+rows*(barH+gap)+4;
+
+  let html='<div style="font-size:8px;color:var(--accent-dim);letter-spacing:1px;text-transform:uppercase;margin-bottom:6px">FUEL vs CONFIDENCE GAIN</div>';
+  html+='<svg width="100%" height="'+chartH+'" style="display:block">';
+
+  // Column headers
+  html+='<text x="4" y="12" fill="#6b6d8a" font-size="7" font-family="JetBrains Mono">DIRECTION</text>';
+  html+='<text x="32%" y="12" fill="#ffb020" font-size="7" font-family="JetBrains Mono" text-anchor="middle">FUEL (m/s)</text>';
+  html+='<text x="72%" y="12" fill="#6b6d8a" font-size="7" font-family="JetBrains Mono" text-anchor="middle">\u25C0 \u0394C RISK REDUCTION \u25B6</text>';
+
+  candidates.forEach((c,i)=>{
+    const y=topPad+i*(barH+gap);
+    const isBest=c.direction===bestDir;
+    const lblClr=isBest?'#4ff8e8':'#e4e4ef';
+    const dv=Math.sqrt(c.dv_eci_km_s.reduce((s,v)=>s+v*v,0))*1000;
+    const ty=y+barH/2+4;
+
+    // Row background for best
+    if(isBest){
+      html+='<rect x="0" y="'+y+'" width="100%" height="'+barH+'" rx="2" fill="rgba(79,248,232,0.06)"/>';
+    }
+
+    // Direction label
+    html+='<text x="4" y="'+ty+'" fill="'+lblClr+'" font-size="9" font-family="JetBrains Mono" font-weight="'+(isBest?'700':'400')+'">'+(isBest?'\u25B6 ':'')+c.direction+'</text>';
+
+    // Fuel cost value
+    html+='<text x="32%" y="'+ty+'" fill="#ffb020" font-size="9" font-family="JetBrains Mono" text-anchor="middle" opacity="'+(isBest?'1':'0.6')+'">'+dv.toFixed(2)+'</text>';
+
+    // Delta-C bar - centered in the right portion
+    // Bar area from 48% to 96%, center at 72%
+    const barCx=0.72; // center fraction
+    const barHalfW=0.22; // half width fraction
+    const dcNorm=c.delta_C/maxAbsDC; // -1 to 1
+    const dcColor=c.delta_C>=0?'#3ddc84':'#ff3b5c';
+    const dcOp=isBest?'0.75':'0.3';
+
+    // Center tick
+    html+='<line x1="72%" y1="'+y+'" x2="72%" y2="'+(y+barH)+'" stroke="#2a3060" stroke-width="1"/>';
+
+    if(c.delta_C>=0){
+      const bw=Math.max(dcNorm*barHalfW*100,0.5);
+      html+='<rect x="72%" y="'+(y+2)+'" width="'+bw+'%" height="'+(barH-4)+'" rx="2" fill="'+dcColor+'" opacity="'+dcOp+'"/>';
+      html+='<text x="'+(72+bw+1)+'%" y="'+ty+'" fill="'+dcColor+'" font-size="8" font-family="JetBrains Mono" opacity="'+(isBest?'1':'0.7')+'">'+c.delta_C.toFixed(3)+'</text>';
+    }else{
+      const bw=Math.max(Math.abs(dcNorm)*barHalfW*100,0.5);
+      html+='<rect x="'+(72-bw)+'%" y="'+(y+2)+'" width="'+bw+'%" height="'+(barH-4)+'" rx="2" fill="'+dcColor+'" opacity="'+dcOp+'"/>';
+      html+='<text x="'+(72-bw-1)+'%" y="'+ty+'" fill="'+dcColor+'" font-size="8" font-family="JetBrains Mono" text-anchor="end" opacity="'+(isBest?'1':'0.7')+'">'+c.delta_C.toFixed(3)+'</text>';
+    }
+  });
+  html+='</svg>';
+  el.innerHTML=html;
+}
+
+function updatePlannerDetails(result){
+  const el=document.getElementById('plannerDetails'),m=result.metrics||{},r=result.recommendation||{};
+  const dv=r.dv_eci_km_s||[0,0,0];
+  el.innerHTML='<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:10px">'+
+    '<div><span style="color:var(--text-dim)">m\u00B2 pre:</span> '+fmtM2(m.m2_pre||0)+'</div>'+
+    '<div><span style="color:var(--text-dim)">m\u00B2 post:</span> '+fmtM2(m.m2_post||0)+'</div>'+
+    '<div><span style="color:var(--text-dim)">Fuel:</span> '+(m.fuel_cost_m_s||0).toFixed(2)+' m/s</div>'+
+    '<div><span style="color:var(--text-dim)">Life pen:</span> '+(m.lifetime_penalty||0).toFixed(4)+'</div></div>'+
+    '<div style="margin-top:8px;padding:6px;background:var(--bg-panel);border-radius:3px;font-size:9px">'+
+    '<div style="color:var(--text-dim);margin-bottom:3px">BURN VECTOR (ECI km/s)</div>'+
+    '<span style="color:var(--accent)">['+dv.map(v=>v.toFixed(6)).join(', ')+']</span>'+
+    '<div style="margin-top:4px;color:var(--text-dim)">||dv|| = <span style="color:var(--text)">'+(r.dv_magnitude_m_s||0).toFixed(2)+' m/s</span></div></div>';
+}
+
+function updateRiskBar(result,conj){
+  const m=result.metrics||{};
+  document.getElementById('pcPre').textContent=conj.pc>0?conj.pc.toExponential(1):'--';
+  document.getElementById('pcPost').textContent=(m.risk_surrogate_post||0)>0?(m.risk_surrogate_post).toExponential(1):'--';
+  document.getElementById('m2Pre').textContent=fmtM2(m.m2_pre||0);
+  document.getElementById('m2Post').textContent=fmtM2(m.m2_post||0);
+  document.getElementById('utilBar').textContent=(result.recommendation?.utility||0).toFixed(3);
+  const al=document.getElementById('encounterAlert');al.className='encounter-alert';
+  if(conj.risk_level==='RED'){al.className='encounter-alert red';al.textContent='RED ALERT \u2014 '+conj.object_id}
+  else if(conj.risk_level==='AMBER'){al.className='encounter-alert amber';al.textContent='AMBER \u2014 '+conj.object_id}
+  document.getElementById('encounterTitle').textContent='Encounter: '+conj.object_id+' \u2014 Miss '+conj.miss_distance_m.toFixed(0)+'m';
+}
+
+
+function clearAll(){
+  conjunctionData=null;selectedConjunction=null;currentPlannerResult=null;currentConj=null;zoomLevel=2.5;panX=0;panY=0;selectedCandidateDir=null;currentCandidates=null;
+  document.getElementById('conjBody').innerHTML='<tr><td colspan="5" class="empty-state">No data - run a scenario</td></tr>';
+  document.getElementById('fuelRiskChart').innerHTML='';
+  document.getElementById('candidatesBody').innerHTML='<tr><td colspan="4" class="empty-state">No evaluation yet</td></tr>';
+  document.getElementById('plannerDetails').innerHTML='<div class="empty-state">Run a scenario to see planner output</div>';
+  document.getElementById('decisionStatus').textContent='MONITORING';
+  document.getElementById('decisionBadge').className='decision-badge badge-nogo';
+  document.getElementById('decisionBadge').textContent='NO ACTION';
+  document.getElementById('decisionCard').className='decision-card';
+  ['dTarget','dTCA','dDir','dDv'].forEach(id=>document.getElementById(id).textContent='--');
+  ['mTotal','mClosest','mMaxPc'].forEach(id=>document.getElementById(id).textContent='--');
+  ['mRed','mAmber','mGreen'].forEach(id=>document.getElementById(id).textContent='0');
+  ['pcPre','pcPost','m2Pre','m2Post','utilBar'].forEach(id=>document.getElementById(id).textContent='--');
+  document.getElementById('encounterAlert').className='encounter-alert';
+  document.getElementById('encounterTitle').textContent='Encounter Geometry';
+  document.getElementById('scenarioMsg').textContent='Select scenario and run';
+  document.getElementById('sliderLv').value=0.01;document.getElementById('sliderLl').value=0.005;document.getElementById('sliderDv').value=1.0;
+  policyDefaults={lv:0.01,ll:0.005,dv:1.0};onPolicyChange();
+  if(encounterCtx)drawEncounterEmpty();
+}
+async function refreshPipeline(){
+  try{
+    const resp=await fetch('/api/pipeline/status');const data=await resp.json();const s=data.services||{};
+    setNode('pPlan',s.planner?.status==='online');setNode('pTrack',s.tracker?.status==='online');
+    setNode('pProp',s.propagator?.status!=='offline');setNode('pAtlas',true);setNode('pIngest',true);setNode('pDetect',true);
+    if(s.planner?.version)document.getElementById('plannerVer').textContent='v'+s.planner.version;
+  }catch(e){}
+}
+function setNode(id,on){const el=document.getElementById(id);el.classList.toggle('online',on);el.classList.toggle('offline',!on)}
+
+
+// ==========================================================
+// ENCOUNTER GEOMETRY RENDERER (Canvas 2D)
+// ==========================================================
+function initEncounter(){
+  const canvas=document.getElementById('encounterCanvas');
+  const wrap=canvas.parentElement;
+  function resize(){
+    encounterW=wrap.clientWidth;encounterH=wrap.clientHeight;
+    canvas.width=encounterW*window.devicePixelRatio;
+    canvas.height=encounterH*window.devicePixelRatio;
+    canvas.style.width=encounterW+'px';canvas.style.height=encounterH+'px';
+    encounterCtx=canvas.getContext('2d');
+    encounterCtx.scale(window.devicePixelRatio,window.devicePixelRatio);
+    if(currentConj&&currentPlannerResult)drawEncounter(currentConj,currentPlannerResult);
+    else drawEncounterEmpty();
+  }
+  window.addEventListener('resize',resize);
+  canvas.addEventListener('wheel',function(e){
+    e.preventDefault();
+    var d=e.deltaY>0?0.82:1.22;
+    zoomLevel=Math.max(0.15,Math.min(25,zoomLevel*d));
+    if(currentConj&&currentPlannerResult)drawEncounter(currentConj,currentPlannerResult);
+  },{passive:false});
+  canvas.addEventListener('dblclick',function(){
+    zoomLevel=2.5;panX=0;panY=0;
+    if(currentConj&&currentPlannerResult)drawEncounter(currentConj,currentPlannerResult);
+  });
+  canvas.addEventListener('mousedown',function(e){isDragging=true;dragStartX=e.clientX-panX;dragStartY=e.clientY-panY;canvas.style.cursor='grabbing'});
+  canvas.addEventListener('mousemove',function(e){
+    if(!isDragging)return;
+    panX=e.clientX-dragStartX;panY=e.clientY-dragStartY;
+    if(currentConj&&currentPlannerResult)drawEncounter(currentConj,currentPlannerResult);
+  });
+  canvas.addEventListener('mouseup',function(){isDragging=false;canvas.style.cursor='grab'});
+  canvas.addEventListener('mouseleave',function(){isDragging=false;canvas.style.cursor='grab'});
+  canvas.style.cursor='grab';
+  resize();
+}
+
+function drawEncounterEmpty(){
+  const ctx=encounterCtx;if(!ctx)return;
+  ctx.clearRect(0,0,encounterW,encounterH);
+  drawGrid(ctx,encounterW,encounterH);
+  ctx.fillStyle='#6b6d8a';ctx.font='11px "JetBrains Mono"';ctx.textAlign='center';
+  ctx.fillText('Run a scenario to visualize encounter geometry',encounterW/2,encounterH/2);
+  ctx.fillText('Select a conjunction from the table to inspect',encounterW/2,encounterH/2+20);
+}
+
+function drawGrid(ctx,W,H){
+  ctx.strokeStyle='rgba(30,32,68,0.4)';ctx.lineWidth=0.5;
+  for(let x=0;x<W;x+=40){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke()}
+  for(let y=0;y<H;y+=40){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke()}
+}
+
+function drawEncounter(conj,result){
+  const ctx=encounterCtx;if(!ctx)return;
+  const W=encounterW,H=encounterH;
+  // Asset sits left-of-center so burn arrow has room to the right
+  const cx=W*0.38+panX,cy=H*0.48+panY;
+  ctx.clearRect(0,0,W,H);
+  drawGrid(ctx,W,H);
+
+  const miss_m=conj.miss_distance_m;
+  const risk=conj.risk_level;
+  const rc=risk==='RED'?'#ff3b5c':risk==='AMBER'?'#ffb020':risk==='GREEN'?'#3ddc84':'#4466aa';
+
+  // Determine scale: fit miss distance nicely
+  const viewRange=miss_m<10?100:miss_m<100?800:miss_m<1000?6000:miss_m*5;
+  const scale=Math.min(W,H)*0.28/viewRange*zoomLevel;
+
+  // Relative position vector from conjunction data
+  let relX=miss_m,relY=0;
+  if(conj.r_obj_km&&conj.r_asset_km){
+    relX=(conj.r_obj_km[0]-conj.r_asset_km[0])*1000;
+    relY=(conj.r_obj_km[1]-conj.r_asset_km[1])*1000;
+  }
+  const relDist=Math.sqrt(relX*relX+relY*relY)||1;
+  const nx=relX/relDist,ny=relY/relDist; // unit vector asset->debris at TCA
+
+  // Debris position on canvas
+  const debX=cx+nx*miss_m*scale;
+  const debY=cy+ny*miss_m*scale;
+
+  // Perpendicular (approach direction) - debris flies perpendicular to miss vector
+  const px=-ny,py=nx;
+  const trailLen=Math.max(W,H)*0.7;
+
+  // ---- COVARIANCE ELLIPSE (uncertainty envelope around asset) ----
+  const covRadius=Math.max(100*scale,28);
+  const covRx=covRadius*1.8,covRy=covRadius;
+  // Gradient fill
+  const covGrad=ctx.createRadialGradient(cx,cy,0,cx,cy,covRx);
+  covGrad.addColorStop(0,'rgba(79,248,232,0.12)');covGrad.addColorStop(0.7,'rgba(79,248,232,0.06)');covGrad.addColorStop(1,'transparent');
+  ctx.beginPath();ctx.ellipse(cx,cy,covRx,covRy,0,0,Math.PI*2);
+  ctx.fillStyle=covGrad;ctx.fill();
+  // Outer glow
+  ctx.beginPath();ctx.ellipse(cx,cy,covRx+2,covRy+2,0,0,Math.PI*2);
+  ctx.strokeStyle='rgba(79,248,232,0.15)';ctx.lineWidth=4;ctx.stroke();
+  // Main stroke
+  ctx.beginPath();ctx.ellipse(cx,cy,covRx,covRy,0,0,Math.PI*2);
+  ctx.strokeStyle='rgba(79,248,232,0.55)';ctx.lineWidth=1.5;ctx.setLineDash([5,4]);ctx.stroke();ctx.setLineDash([]);
+  // Axis tick marks
+  ctx.strokeStyle='rgba(79,248,232,0.4)';ctx.lineWidth=1;
+  [[cx+covRx,cy,cx+covRx+6,cy],[cx-covRx,cy,cx-covRx-6,cy],[cx,cy+covRy,cx,cy+covRy+6],[cx,cy-covRy,cx,cy-covRy-6]].forEach(([x1,y1,x2,y2])=>{ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke()});
+  // Label
+  ctx.fillStyle='rgba(79,248,232,0.65)';ctx.font='bold 9px "JetBrains Mono"';ctx.textAlign='left';
+  ctx.fillText('1σ COV',cx+covRx+8,cy+4);
+
+  // ---- HARD BODY RADIUS (15m combined) ----
+  const hbrPx=Math.max(15*scale,16);
+  ctx.beginPath();ctx.arc(cx,cy,hbrPx,0,Math.PI*2);
+  ctx.fillStyle='rgba(255,59,92,0.1)';ctx.fill();
+  ctx.strokeStyle='rgba(255,59,92,0.6)';ctx.lineWidth=1.5;ctx.setLineDash([3,3]);ctx.stroke();ctx.setLineDash([]);
+  // HBR label
+  if(true){
+    ctx.fillStyle='rgba(255,59,92,0.7)';ctx.font='8px "JetBrains Mono"';ctx.textAlign='center';
+    ctx.fillText('HBR',cx,cy-hbrPx-4);
+  }
+
+  // ---- MISS DISTANCE CIRCLE ----
+  const missPx=Math.max(miss_m*scale,25);
+  ctx.beginPath();ctx.arc(cx,cy,missPx,0,Math.PI*2);
+  ctx.strokeStyle=rc+'44';ctx.lineWidth=1;ctx.setLineDash([5,5]);ctx.stroke();ctx.setLineDash([]);
+
+  // ---- DEBRIS APPROACH TRAIL ----
+  // Incoming trail (fading in toward TCA)
+  const inStartX=debX-px*trailLen,inStartY=debY-py*trailLen;
+  const grad1=ctx.createLinearGradient(inStartX,inStartY,debX,debY);
+  grad1.addColorStop(0,'transparent');grad1.addColorStop(0.6,rc+'44');grad1.addColorStop(1,rc);
+  ctx.beginPath();ctx.moveTo(inStartX,inStartY);ctx.lineTo(debX,debY);
+  ctx.strokeStyle=grad1;ctx.lineWidth=2.5;ctx.stroke();
+
+  // Outgoing trail (fading out past TCA)
+  const outEndX=debX+px*trailLen*0.6,outEndY=debY+py*trailLen*0.6;
+  const grad2=ctx.createLinearGradient(debX,debY,outEndX,outEndY);
+  grad2.addColorStop(0,rc);grad2.addColorStop(1,'transparent');
+  ctx.beginPath();ctx.moveTo(debX,debY);ctx.lineTo(outEndX,outEndY);
+  ctx.strokeStyle=grad2;ctx.lineWidth=1.5;ctx.setLineDash([5,7]);ctx.stroke();ctx.setLineDash([]);
+
+  // ---- DEBRIS MARKER at TCA ----
+  const debR=risk==='RED'?9:7;
+  // Outer glow
+  ctx.beginPath();ctx.arc(debX,debY,debR+10,0,Math.PI*2);
+  ctx.fillStyle=rc+'18';ctx.fill();
+  // Body
+  ctx.beginPath();ctx.arc(debX,debY,debR,0,Math.PI*2);
+  ctx.fillStyle=rc;ctx.fill();
+  ctx.strokeStyle='#fff';ctx.lineWidth=1.5;ctx.stroke();
+
+  // ---- MISS DISTANCE LINE (asset -> debris at TCA) ----
+  ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(debX,debY);
+  ctx.strokeStyle=rc;ctx.lineWidth=1.5;ctx.setLineDash([3,3]);ctx.stroke();ctx.setLineDash([]);
+
+  // Miss distance label on the line
+  const mx=(cx+debX)/2,my=(cy+debY)/2;
+  const missLabel=miss_m<1000?miss_m.toFixed(0)+' m':(miss_m/1000).toFixed(2)+' km';
+  const lAngle=Math.atan2(debY-cy,debX-cx);
+  ctx.save();ctx.translate(mx,my);ctx.rotate(lAngle);
+  // Background pill
+  const tw=ctx.measureText?70:70;
+  ctx.fillStyle='rgba(6,6,17,0.85)';
+  roundRect(ctx,-tw/2,-16,tw,14,3);ctx.fill();
+  ctx.fillStyle=rc;ctx.font='bold 10px "JetBrains Mono"';ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.fillText(missLabel,0,-9);
+  ctx.restore();
+
+  // ---- BURN VECTOR ARROW ----
+  const rec=result.recommendation;
+  // Resolve active burn: selected candidate preview or recommended
+  let activeDv=rec?.dv_eci_km_s;
+  let activeDir=rec?.direction||'';
+  let activeMag=rec?.dv_magnitude_m_s||0;
+  let isAltCandidate=false;
+  let activeM2Post=result.metrics?.m2_post||0;
+  if(typeof selectedCandidateDir!=='undefined'&&selectedCandidateDir&&typeof currentCandidates!=='undefined'&&currentCandidates){
+    const sel=currentCandidates.find(cd=>cd.direction===selectedCandidateDir);
+    if(sel){
+      activeDv=sel.dv_eci_km_s;activeDir=sel.direction;
+      activeMag=Math.sqrt(sel.dv_eci_km_s.reduce((s,v)=>s+v*v,0))*1000;
+      isAltCandidate=true;
+      const m2p=result.metrics?.m2_pre||0;
+      activeM2Post=Math.max(0,m2p-sel.delta_C);
+    }
+  }
+  const arrowColor=isAltCandidate?'#ffb020':'#4ff8e8';
+  const arrowGlow=isAltCandidate?'rgba(255,176,32,0.2)':'rgba(79,248,232,0.2)';
+  const arrowBdr=isAltCandidate?'rgba(255,176,32,0.3)':'rgba(79,248,232,0.3)';
+  if(activeDv){
+    const dv=activeDv;
+    const dvMag=Math.sqrt(dv[0]*dv[0]+dv[1]*dv[1]+dv[2]*dv[2]);
+    if(dvMag>1e-9){
+      const dvScale=Math.min(W,H)*0.18/(dvMag*1000);
+      const dvPxX=dv[0]*1000*dvScale;
+      const dvPxY=-dv[1]*1000*dvScale;
+      const screenMag=Math.sqrt(dvPxX*dvPxX+dvPxY*dvPxY);
+      const isOutOfPlane=screenMag<3; // Z-dominant burn (cross-track)
+
+      // Ghost the recommended arrow when previewing alt candidate
+      if(isAltCandidate&&rec&&rec.dv_eci_km_s){
+        const rdv=rec.dv_eci_km_s;const rm=Math.sqrt(rdv[0]*rdv[0]+rdv[1]*rdv[1]+rdv[2]*rdv[2]);
+        if(rm>1e-9){
+          const rs=Math.min(W,H)*0.18/(rm*1000);
+          const rx=cx+rdv[0]*1000*rs,ry=cy-rdv[1]*1000*rs;
+          const rScreen=Math.sqrt(Math.pow(rx-cx,2)+Math.pow(ry-cy,2));
+          if(rScreen>3){
+            ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(rx,ry);
+            ctx.strokeStyle='rgba(79,248,232,0.15)';ctx.lineWidth=2;ctx.setLineDash([4,4]);ctx.stroke();ctx.setLineDash([]);
+            ctx.fillStyle='rgba(79,248,232,0.3)';ctx.font='8px "JetBrains Mono"';ctx.textAlign='left';
+            ctx.fillText('rec: '+rec.direction,rx+6,ry);
+          }
+        }
+      }
+
+      let axEnd,ayEnd;
+      if(isOutOfPlane){
+        // OUT-OF-PLANE: draw a special symbol instead of an arrow
+        // Circle-with-dot = vector coming toward viewer, circle-with-X = going away
+        const oopR=20;
+        const goingUp=dv[2]>0;
+        axEnd=cx;ayEnd=cy-oopR-30; // place symbol above asset
+        // Outer circle
+        ctx.beginPath();ctx.arc(axEnd,ayEnd,oopR,0,Math.PI*2);
+        ctx.fillStyle='rgba(6,6,17,0.9)';ctx.fill();
+        ctx.strokeStyle=arrowColor;ctx.lineWidth=2.5;ctx.stroke();
+        // Glow
+        ctx.beginPath();ctx.arc(axEnd,ayEnd,oopR+4,0,Math.PI*2);
+        ctx.strokeStyle=arrowGlow;ctx.lineWidth=6;ctx.stroke();
+        if(goingUp){
+          // Dot in center = coming toward viewer (out of screen)
+          ctx.beginPath();ctx.arc(axEnd,ayEnd,4,0,Math.PI*2);
+          ctx.fillStyle=arrowColor;ctx.fill();
+        }else{
+          // X = going into screen
+          const xr=oopR*0.5;
+          ctx.beginPath();ctx.moveTo(axEnd-xr,ayEnd-xr);ctx.lineTo(axEnd+xr,ayEnd+xr);
+          ctx.moveTo(axEnd+xr,ayEnd-xr);ctx.lineTo(axEnd-xr,ayEnd+xr);
+          ctx.strokeStyle=arrowColor;ctx.lineWidth=2;ctx.stroke();
+        }
+        // Connecting line from asset to symbol
+        ctx.beginPath();ctx.moveTo(cx,cy-14);ctx.lineTo(axEnd,ayEnd+oopR);
+        ctx.strokeStyle=arrowColor;ctx.lineWidth=1.5;ctx.setLineDash([3,3]);ctx.stroke();ctx.setLineDash([]);
+        // "OUT OF PLANE" annotation
+        ctx.fillStyle=arrowColor;ctx.font='8px "JetBrains Mono"';ctx.textAlign='center';
+        ctx.fillText(goingUp?'OUT OF PLANE \u2299':'OUT OF PLANE \u2297',axEnd,ayEnd+oopR+12);
+      }else{
+        axEnd=cx+dvPxX;ayEnd=cy+dvPxY;
+        // Arrow glow
+        ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(axEnd,ayEnd);
+        ctx.strokeStyle=arrowGlow;ctx.lineWidth=8;ctx.stroke();
+        // Arrow shaft
+        ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(axEnd,ayEnd);
+        ctx.strokeStyle=arrowColor;ctx.lineWidth=3;ctx.stroke();
+        // Arrowhead
+        const aa=Math.atan2(ayEnd-cy,axEnd-cx);const hl=14;
+        ctx.beginPath();ctx.moveTo(axEnd,ayEnd);
+        ctx.lineTo(axEnd-hl*Math.cos(aa-0.35),ayEnd-hl*Math.sin(aa-0.35));
+        ctx.lineTo(axEnd-hl*Math.cos(aa+0.35),ayEnd-hl*Math.sin(aa+0.35));
+        ctx.closePath();ctx.fillStyle=arrowColor;ctx.fill();
+      }
+      // Label box
+      const lblW=isAltCandidate?160:130;
+      const blx=axEnd+12,bly=isOutOfPlane?ayEnd-26:ayEnd-16;
+      ctx.fillStyle='rgba(6,6,17,0.9)';
+      roundRect(ctx,blx-4,bly-10,lblW,36,4);ctx.fill();
+      ctx.strokeStyle=arrowBdr;ctx.lineWidth=1;
+      roundRect(ctx,blx-4,bly-10,lblW,36,4);ctx.stroke();
+      ctx.fillStyle=arrowColor;ctx.font='bold 11px "JetBrains Mono"';ctx.textAlign='left';
+      ctx.fillText('\u0394v '+activeDir.toUpperCase()+(isOutOfPlane?' \u2299':'')+(isAltCandidate?' (preview)':''),blx,bly);
+      ctx.fillStyle='#e4e4ef';ctx.font='10px "JetBrains Mono"';
+      ctx.fillText(activeMag.toFixed(2)+' m/s',blx,bly+14);
+
+      // ---- POST-MANEUVER MISS ENVELOPE ----
+      const m2Post=activeM2Post;
+      const m2Pre=result.metrics?.m2_pre||0;
+      if(m2Post>m2Pre&&m2Pre>0){
+        const ratio=Math.sqrt(m2Post/Math.max(0.01,m2Pre));
+        const postPx=missPx*Math.min(ratio,4);
+        if(postPx>missPx+5){
+          ctx.beginPath();ctx.arc(cx,cy,postPx,0,Math.PI*2);
+          ctx.strokeStyle='rgba(61,220,132,0.35)';ctx.lineWidth=1.5;ctx.setLineDash([6,4]);ctx.stroke();ctx.setLineDash([]);
+          // Label
+          ctx.fillStyle='#3ddc84';ctx.font='9px "JetBrains Mono"';ctx.textAlign='left';
+          const plx=cx+postPx*0.7+4,ply=cy-postPx*0.7-4;
+          ctx.fillText('post-burn',plx,ply);
+          ctx.fillText('miss envelope',plx,ply+12);
+        }
+      }
+    }
+  }
+
+  // ---- ASSET MARKER (center) ----
+  // Outer ring
+  ctx.beginPath();ctx.arc(cx,cy,12,0,Math.PI*2);
+  ctx.fillStyle='#0c0d1a';ctx.fill();
+  ctx.strokeStyle='#4ff8e8';ctx.lineWidth=2;ctx.stroke();
+  // Inner dot
+  ctx.beginPath();ctx.arc(cx,cy,3.5,0,Math.PI*2);
+  ctx.fillStyle='#4ff8e8';ctx.fill();
+  // Glow
+  ctx.beginPath();ctx.arc(cx,cy,22,0,Math.PI*2);
+  const ag=ctx.createRadialGradient(cx,cy,12,cx,cy,22);
+  ag.addColorStop(0,'rgba(79,248,232,0.12)');ag.addColorStop(1,'transparent');
+  ctx.fillStyle=ag;ctx.fill();
+
+  // ---- LABELS ----
+  ctx.fillStyle='#4ff8e8';ctx.font='bold 11px "JetBrains Mono"';ctx.textAlign='center';
+  ctx.fillText('XORB-001',cx,cy+30);
+  ctx.fillStyle=rc;ctx.font='bold 10px "JetBrains Mono"';
+  ctx.fillText(conj.object_id,debX,debY-debR-8);
+
+  // ---- INFO OVERLAY (top-right) ----
+  const ix=W-16,iy=16;
+  ctx.textAlign='right';ctx.font='9px "JetBrains Mono"';
+  ctx.fillStyle='#6b6d8a';
+  const lines=[
+    'APPROACH VEL: '+conj.relative_velocity_km_s.toFixed(2)+' km/s',
+    'TIME TO TCA: '+(conj.time_to_tca_min<60?conj.time_to_tca_min.toFixed(0)+' min':(conj.time_to_tca_min/60).toFixed(1)+' hr'),
+    'Pc: '+conj.pc_display,
+    'SCALE: 1px \u2248 '+(1/scale).toFixed(1)+'m',
+    'HBR: 15m (combined)',
+    'COVARIANCE: surrogate (identity)',
+    'ZOOM: '+zoomLevel.toFixed(1)+'x | scroll=zoom  drag=pan  dbl-click=reset'
+  ];
+  lines.forEach((l,i)=>ctx.fillText(l,ix,iy+i*14));
+
+  // ---- LEGEND (bottom-left, responsive) ----
+  if(H<320)return; // skip legend on small screens
+  const legCount=H>500?5:3;
+  const lx=16,ly=H-legCount*13-10;
+  ctx.textAlign='left';ctx.font='9px "JetBrains Mono"';
+  const legend=[
+    ['#4ff8e8','Asset / \u0394v burn vector'],
+    [rc,'Debris approach trajectory'],
+    ['rgba(255,59,92,0.7)','Hard Body Radius (15m)'],
+    ['rgba(79,248,232,0.3)','Covariance envelope'],
+    ['rgba(61,220,132,0.5)','Post-burn miss envelope']
+  ];
+  legend.slice(0,legCount).forEach(([c,t],i)=>{
+    ctx.fillStyle=c;ctx.fillRect(lx,ly+i*13,10,2);
+    ctx.fillStyle='#6b6d8a';ctx.fillText(t,lx+16,ly+i*13+4);
+  });
+}
+
+function roundRect(ctx,x,y,w,h,r){
+  ctx.beginPath();ctx.moveTo(x+r,y);ctx.lineTo(x+w-r,y);ctx.quadraticCurveTo(x+w,y,x+w,y+r);
+  ctx.lineTo(x+w,y+h-r);ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+  ctx.lineTo(x+r,y+h);ctx.quadraticCurveTo(x,y+h,x,y+h-r);
+  ctx.lineTo(x,y+r);ctx.quadraticCurveTo(x,y,x+r,y);ctx.closePath();
+}
+
+document.addEventListener('DOMContentLoaded',()=>{
+  initEncounter();refreshPipeline();refreshData();
+  setInterval(refreshPipeline,10000);setInterval(refreshData,15000);
+});
+
+</script>
+</body>
+</html>

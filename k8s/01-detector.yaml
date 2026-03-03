@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: detector
+  namespace: avera-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: detector
+  template:
+    metadata:
+      labels:
+        app: detector
+    spec:
+      containers:
+      - name: detector
+        image: avera/detector:v1
+        imagePullPolicy: Never # Uses local image
+        ports:
+        - containerPort: 8000
+        env:
+        - name: PLANNER_HOST
+          value: "planner-service"
+        - name: PLANNER_PORT
+          value: "8000"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: detector-service
+  namespace: avera-system
+spec:
+  selector:
+    app: detector
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8000
+  type: ClusterIP

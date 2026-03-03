@@ -1,0 +1,64 @@
+services:
+  ingest:
+    build: {context: ./services/ingest}
+    image: avera/ingest:v6
+    ports: ["8001:8000"]
+    environment: [OUTPUT_DIR=/data/planner_artifacts]
+    volumes: [planner_data:/data/planner_artifacts]
+    restart: unless-stopped
+
+  detector:
+    build: {context: ./services/detector}
+    image: avera/detector:v6
+    ports: ["8000:8000"]
+    depends_on: [tracker]
+    restart: unless-stopped
+
+  tracker:
+    build: {context: ./services/tracker}
+    image: avera/tracker:v6
+    ports: ["8002:8000"]
+    environment: [DATA_DIR=/data/planner_artifacts]
+    volumes: [planner_data:/data/planner_artifacts]
+    depends_on: [ingest]
+    restart: unless-stopped
+
+  propagator:
+    build: {context: ./services/propagator}
+    image: avera/propagator:v6
+    environment: [DATA_DIR=/data/planner_artifacts]
+    volumes: [planner_data:/data/planner_artifacts]
+    depends_on: [tracker]
+    restart: unless-stopped
+
+  planner:
+    build: {context: ./services/planner}
+    image: avera/planner:v6
+    ports: ["8060:8060"]
+    depends_on: [propagator]
+    restart: unless-stopped
+
+  viz:
+    build: {context: ./services/viz}
+    image: avera/viz:v6
+    environment: [DATA_DIR=/data/planner_artifacts]
+    volumes: [planner_data:/data/planner_artifacts]
+    depends_on: [propagator]
+    restart: unless-stopped
+
+  ui:
+    build: {context: ./services/ui}
+    image: avera/ui:v6
+    ports: ["8080:8000"]
+    environment:
+      - SWIR_SERVICE_URL=http://detector:8000/predict
+      - TRACKER_SERVICE_URL=http://tracker:8000
+      - PLANNER_SERVICE_URL=http://planner:8060
+      - DATA_DIR=/data/planner_artifacts
+    depends_on: [detector, tracker, planner]
+    volumes: [planner_data:/data/planner_artifacts]
+    restart: unless-stopped
+
+volumes:
+  planner_data:
+    driver: local
