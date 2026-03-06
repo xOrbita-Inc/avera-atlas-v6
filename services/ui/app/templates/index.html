@@ -131,6 +131,23 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 #pDetect.clickable{cursor:pointer}
 #pDetect.clickable:hover{color:var(--accent);text-shadow:0 0 8px rgba(79,248,232,0.4)}
 
+.info-modal-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:1000;align-items:center;justify-content:center}
+.info-modal-backdrop.open{display:flex}
+.info-modal{background:var(--bg-card);border:1px solid var(--border-accent);border-radius:6px;width:520px;max-width:90vw;max-height:85vh;display:flex;flex-direction:column;position:relative;overflow:hidden}
+.info-modal::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--accent-dim),transparent)}
+.info-modal-hdr{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid var(--border);font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--accent-dim);font-weight:500}
+.info-modal-close{background:none;border:1px solid var(--border);color:var(--text-dim);width:24px;height:24px;border-radius:3px;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;transition:all 0.2s}
+.info-modal-close:hover{border-color:var(--red);color:var(--red)}
+.info-modal-body{padding:16px;overflow-y:auto;flex:1}
+.info-field{padding:10px 0;border-bottom:1px solid var(--border)}
+.info-field:last-child{border-bottom:none}
+.info-field-label{font-size:10px;font-weight:700;color:var(--accent);letter-spacing:1px;margin-bottom:4px}
+.info-field-desc{font-size:10px;color:var(--text-dim);line-height:1.5}
+.panel-hdr-clickable{cursor:pointer;transition:color 0.2s}
+.panel-hdr-clickable:hover{color:var(--accent)}
+.info-icon{font-style:normal;margin-left:6px;font-size:10px;color:var(--text-dim);transition:color 0.2s}
+.panel-hdr-clickable:hover .info-icon{color:var(--accent)}
+
 </style>
 </head>
 <body>
@@ -166,7 +183,7 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
       </div>
     </div>
     <div class="panel">
-      <div class="panel-hdr">Operator Policy</div>
+      <div class="panel-hdr panel-hdr-clickable" onclick="openOperatorPolicyInfoModal()">Operator Policy<i class="info-icon">&#x24D8;</i></div>
       <div class="panel-body" style="padding:10px 14px">
         <div class="policy-control">
           <div class="policy-label"><span>Fuel Weight (&lambda;<sub>v</sub>)</span><span class="policy-val" id="lvVal">0.010</span></div>
@@ -188,7 +205,7 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
       </div>
     </div>
     <div class="panel">
-      <div class="panel-hdr">Tracking Summary</div>
+      <div class="panel-hdr panel-hdr-clickable" onclick="openTrackingSummaryInfoModal()">Tracking Summary<i class="info-icon">&#x24D8;</i></div>
       <div class="panel-body">
         <div class="metrics-row">
           <div class="metric"><div class="val" id="mTotal">--</div><div class="lbl">Tracked</div></div>
@@ -205,14 +222,14 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
       </div>
     </div>
     <div class="panel">
-      <div class="panel-hdr">APS v2.4 Output<span id="plannerVer" style="font-size:8px;color:var(--text-dim)">--</span></div>
+      <div class="panel-hdr panel-hdr-clickable" onclick="openApsInfoModal()">APS v2.4 Output<i class="info-icon">&#x24D8;</i><span id="plannerVer" style="font-size:8px;color:var(--text-dim)">--</span></div>
       <div class="panel-body" id="plannerDetails"><div class="empty-state">Run a scenario to see planner output</div></div>
     </div>
   </div>
 
   <div class="encounter-container">
     <div class="encounter-header">
-      <span class="encounter-title" id="encounterTitle">Encounter Geometry</span>
+      <span class="encounter-title panel-hdr-clickable" id="encounterTitle" onclick="openEncounterInfoModal()"><span id="encounterTitleText">Encounter Geometry</span><i class="info-icon">&#x24D8;</i></span>
       <span class="encounter-alert" id="encounterAlert">CONJUNCTION ALERT</span>
     </div>
     <div class="encounter-canvas-wrap"><canvas id="encounterCanvas"></canvas></div>
@@ -236,7 +253,7 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 
   <div class="sidebar-right">
     <div class="decision-card" id="decisionCard">
-      <div class="decision-label">Maneuver Decision</div>
+      <div class="decision-label panel-hdr-clickable" onclick="openManeuverDecisionInfoModal()">Maneuver Decision<i class="info-icon">&#x24D8;</i></div>
       <div style="display:flex;justify-content:space-between;align-items:center">
         <div class="decision-status" id="decisionStatus">MONITORING</div>
         <span class="decision-badge badge-nogo" id="decisionBadge">NO ACTION</span>
@@ -250,7 +267,7 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
     </div>
     <div class="planner-section">
       <div class="panel">
-        <div class="panel-hdr">Burn Candidates</div>
+        <div class="panel-hdr panel-hdr-clickable" onclick="openBurnCandidatesInfoModal()">Burn Candidates<i class="info-icon">&#x24D8;</i></div>
         <div class="panel-body" style="padding:0">
           <table class="candidates-table"><thead><tr><th>Direction</th><th>&Delta;C</th><th>dv (m/s)</th><th>Utility</th></tr></thead>
           <tbody id="candidatesBody"><tr><td colspan="4" class="empty-state">No evaluation yet</td></tr></tbody></table>
@@ -260,7 +277,7 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
     </div>
     <div class="planner-section" style="flex:1;display:flex;flex-direction:column;min-height:0">
       <div class="panel" style="flex:1;display:flex;flex-direction:column;min-height:0">
-        <div class="panel-hdr">Active Conjunctions<span><button class="refresh-btn" onclick="clearAll()" style="margin-right:4px">CLEAR</button><button class="refresh-btn" onclick="refreshData()">REFRESH</button></span></div>
+        <div class="panel-hdr"><span class="panel-hdr-clickable" onclick="openConjunctionsInfoModal()">Active Conjunctions<i class="info-icon">&#x24D8;</i></span><span><button class="refresh-btn" onclick="clearAll()" style="margin-right:4px">CLEAR</button><button class="refresh-btn" onclick="refreshData()">REFRESH</button></span></div>
         <div style="flex:1;overflow-y:auto;padding:0">
           <table class="conj-table"><thead><tr><th>Object</th><th>Miss (m)</th><th>Pc</th><th>TCA</th><th>Risk</th></tr></thead>
           <tbody id="conjBody"><tr><td colspan="5" class="empty-state">No data - run a scenario</td></tr></tbody></table>
@@ -487,7 +504,7 @@ function renderFuelRiskChart(candidates,bestDir,fuelCost){
   const rows=candidates.length;
   const chartH=topPad+rows*(barH+gap)+4;
 
-  let html='<div style="font-size:8px;color:var(--accent-dim);letter-spacing:1px;text-transform:uppercase;margin-bottom:6px">FUEL vs CONFIDENCE GAIN</div>';
+  let html='<div class="panel-hdr-clickable" onclick="openFuelConfidenceInfoModal()" style="font-size:8px;color:var(--accent-dim);letter-spacing:1px;text-transform:uppercase;margin-bottom:6px">FUEL vs CONFIDENCE GAIN<i class="info-icon">&#x24D8;</i></div>';
   html+='<svg width="100%" height="'+chartH+'" style="display:block">';
 
   // Column headers
@@ -562,7 +579,7 @@ function updateRiskBar(result,conj){
   const al=document.getElementById('encounterAlert');al.className='encounter-alert';
   if(conj.risk_level==='RED'){al.className='encounter-alert red';al.textContent='RED ALERT \u2014 '+conj.object_id}
   else if(conj.risk_level==='AMBER'){al.className='encounter-alert amber';al.textContent='AMBER \u2014 '+conj.object_id}
-  document.getElementById('encounterTitle').textContent='Encounter: '+conj.object_id+' \u2014 Miss '+conj.miss_distance_m.toFixed(0)+'m';
+  document.getElementById('encounterTitleText').textContent='Encounter: '+conj.object_id+' \u2014 Miss '+conj.miss_distance_m.toFixed(0)+'m';
 }
 
 
@@ -582,7 +599,7 @@ function clearAll(){
   ['mRed','mAmber','mGreen'].forEach(id=>document.getElementById(id).textContent='0');
   ['pcPre','pcPost','m2Pre','m2Post','utilBar'].forEach(id=>document.getElementById(id).textContent='--');
   document.getElementById('encounterAlert').className='encounter-alert';
-  document.getElementById('encounterTitle').textContent='Encounter Geometry';
+  document.getElementById('encounterTitleText').textContent='Encounter Geometry';
   document.getElementById('scenarioMsg').textContent='Select scenario and run';
   document.getElementById('sliderLv').value=0.01;document.getElementById('sliderLl').value=0.005;document.getElementById('sliderDv').value=1.0;
   policyDefaults={lv:0.01,ll:0.005,dv:1.0};onPolicyChange();
@@ -947,6 +964,107 @@ function roundRect(ctx,x,y,w,h,r){
   ctx.lineTo(x+w,y+h-r);ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
   ctx.lineTo(x+r,y+h);ctx.quadraticCurveTo(x,y+h,x,y+h-r);
   ctx.lineTo(x,y+r);ctx.quadraticCurveTo(x,y,x+r,y);ctx.closePath();
+}
+
+// ==========================================================
+// INFO MODAL (reusable)
+// ==========================================================
+function openInfoModal(title,fields){
+  let backdrop=document.getElementById('infoModalBackdrop');
+  if(backdrop)backdrop.remove();
+  backdrop=document.createElement('div');
+  backdrop.id='infoModalBackdrop';
+  backdrop.className='info-modal-backdrop open';
+  backdrop.onclick=function(e){if(e.target===backdrop)closeInfoModal()};
+  backdrop.innerHTML='<div class="info-modal"><div class="info-modal-hdr"><span>'+title+'</span><button class="info-modal-close" onclick="closeInfoModal()">&times;</button></div><div class="info-modal-body">'+
+    fields.map(f=>'<div class="info-field"><div class="info-field-label">'+f.label+'</div><div class="info-field-desc">'+f.description+'</div></div>').join('')+
+    '</div></div>';
+  document.body.appendChild(backdrop);
+}
+function closeInfoModal(){
+  const el=document.getElementById('infoModalBackdrop');
+  if(el)el.remove();
+}
+document.addEventListener('keydown',function(e){
+  if(e.key==='Escape'&&document.getElementById('infoModalBackdrop'))closeInfoModal();
+});
+
+function openApsInfoModal(){
+  openInfoModal('APS v2.4 Output \u2014 Field Reference',[
+    {label:'m\u00B2 pre',description:'Mahalanobis distance before maneuver. Unitless measure of conjunction severity relative to covariance geometry. Higher = greater separation relative to uncertainty.'},
+    {label:'m\u00B2 post',description:'Mahalanobis distance after the planned burn. Should exceed m\u00B2 pre for an effective maneuver.'},
+    {label:'Fuel',description:'Delta-v cost of the maneuver in m/s. Propellant consumed to execute the burn.'},
+    {label:'Life pen',description:'Lifetime penalty. Fractional reduction in remaining maneuver authority from executing this burn.'},
+    {label:'Burn Vector (ECI km/s)',description:'Planned velocity change in Earth-Centered Inertial coordinates [X, Y, Z].'},
+    {label:'||dv||',description:'Scalar magnitude of the burn vector in m/s.'}
+  ]);
+}
+
+function openBurnCandidatesInfoModal(){
+  openInfoModal('Burn Candidates \u2014 Field Reference',[
+    {label:'Direction',description:'Burn direction candidate: Prograde (along velocity vector), Radial (toward/away from Earth center), or Cross-track (perpendicular to orbital plane).'},
+    {label:'\u0394C',description:'Change in conjunction metric after executing this burn. Positive values indicate improved separation; negative values worsen the conjunction.'},
+    {label:'Dv (m/s)',description:'Delta-v cost of this burn candidate in meters per second. Constrained by the \u0394v Limit set in Operator Policy.'},
+    {label:'Utility',description:'Composite score combining \u0394C improvement and fuel cost, weighted by \u03BBv and \u03BBL from Operator Policy. The highest utility candidate is the recommended maneuver.'}
+  ]);
+}
+
+function openConjunctionsInfoModal(){
+  openInfoModal('Active Conjunctions \u2014 Field Reference',[
+    {label:'Object',description:'Catalog identifier of the conjuncting object detected or tracked by the system.'},
+    {label:'Miss (m)',description:'Predicted closest approach distance in meters at Time of Closest Approach (TCA).'},
+    {label:'Pc',description:'Probability of Collision. Computed using relative state and combined covariance at TCA. Thresholds: Green < 1e-5, Amber 1e-5 to 1e-4, Red > 1e-4.'},
+    {label:'TCA',description:'Time to Closest Approach. Expressed as time remaining (e.g. T+17m). Drives urgency weighting in the GO/NO-GO decision matrix.'},
+    {label:'Risk',description:'Composite risk tier (GREEN / AMBER / RED) derived from Pc and time remaining. Red does not solely mean high Pc \u2014 time pressure amplifies lower Pc events.'}
+  ]);
+}
+
+function openFuelConfidenceInfoModal(){
+  openInfoModal('Fuel vs Confidence Gain \u2014 Field Reference',[
+    {label:'Direction',description:'Burn direction being evaluated: Prograde, Radial, or Cross-track.'},
+    {label:'Fuel (m/s)',description:'Delta-v cost to execute this burn, in m/s. All candidates shown here use the same \u0394v Limit from Operator Policy.'},
+    {label:'\u0394C Risk Reduction',description:'The bar represents how much this burn reduces conjunction risk. Longer bar = greater risk reduction per unit of fuel. Negative values indicate this direction worsens the conjunction.'}
+  ]);
+}
+
+function openOperatorPolicyInfoModal(){
+  openInfoModal('Operator Policy \u2014 Field Reference',[
+    {label:'Fuel Weight (\u03BBv)',description:'Weighting applied to delta-v cost in the utility function. Higher values make the optimizer prefer fuel-efficient burns, potentially accepting lower risk reduction.'},
+    {label:'Lifetime Weight (\u03BBL)',description:'Weighting applied to lifetime penalty in the utility function. Higher values penalize burns that significantly reduce remaining maneuver authority.'},
+    {label:'\u0394v Limit (m/s)',description:'Hard upper bound on burn magnitude. No candidate burn will exceed this value regardless of utility score. Drives the feasible solution space for the planner.'}
+  ]);
+}
+
+function openTrackingSummaryInfoModal(){
+  openInfoModal('Tracking Summary \u2014 Field Reference',[
+    {label:'Tracked',description:'Total number of objects currently being tracked by the system across all risk tiers.'},
+    {label:'Red Alert',description:'Objects classified RED: Pc exceeds 1e-4 or time-pressure elevates risk to critical. Immediate maneuver consideration required.'},
+    {label:'Amber',description:'Objects classified AMBER: Pc between 1e-5 and 1e-4. Monitoring required; maneuver decision depends on time to TCA.'},
+    {label:'Green',description:'Objects classified GREEN: Pc below 1e-5. No action required under current policy.'},
+    {label:'Closest (m)',description:'Miss distance in meters for the highest-priority conjunction at current TCA.'},
+    {label:'Max Pc',description:'Highest probability of collision across all actively tracked conjunctions.'}
+  ]);
+}
+
+function openManeuverDecisionInfoModal(){
+  openInfoModal('Maneuver Decision \u2014 Field Reference',[
+    {label:'Target',description:'Catalog ID of the primary threat object driving the recommended maneuver.'},
+    {label:'Time to TCA',description:'Remaining time until closest approach with the target object. Urgency increases as this value decreases.'},
+    {label:'Burn Direction',description:'Recommended burn orientation (Prograde, Radial, or Cross-track) selected by the optimizer as highest utility.'},
+    {label:'||Dv||',description:'Scalar magnitude of the recommended burn in m/s. Represents actual propellant cost to execute the maneuver decision.'},
+    {label:'GO button',description:'Confirms and executes the planned maneuver. Action is irreversible once confirmed.'}
+  ]);
+}
+
+function openEncounterInfoModal(){
+  openInfoModal('Encounter Visualization \u2014 Field Reference',[
+    {label:'Approach Vel (km/s)',description:'Relative velocity of the conjuncting object at closest approach. Determines collision energy if miss distance falls within the Hard Body Radius.'},
+    {label:'Time to TCA',description:'Remaining time until Time of Closest Approach. As this decreases, burn options become more constrained and delta-v cost increases.'},
+    {label:'Pc',description:'Probability of Collision computed from relative state and combined covariance at TCA. Values above 1e-4 trigger RED alert status.'},
+    {label:'Scale',description:'Current visualization scale in meters per pixel. Updates dynamically with zoom level to help interpret displayed distances.'},
+    {label:'HBR (combined)',description:'Hard Body Radius: the combined physical radius of both objects in meters. A conjunction becomes a collision if miss distance is less than HBR.'},
+    {label:'Covariance',description:'Source of the uncertainty ellipse displayed in the visualization. "Surrogate (identity)" indicates real CDM covariance has not yet been ingested \u2014 the ellipse represents equal uncertainty in all directions. This will be replaced by live CCSDS 508.0-B-1 CDM covariance when Space-Track integration is active.'}
+  ]);
 }
 
 // ==========================================================
