@@ -18,6 +18,7 @@ app = FastAPI(title="AVERA-ATLAS Dashboard", version="6.0.0")
 
 PLANNER_SERVICE_URL = os.getenv("PLANNER_SERVICE_URL", "http://planner:8060")
 TRACKER_SERVICE_URL = os.getenv("TRACKER_SERVICE_URL", "http://tracker:8000")
+DETECTOR_SERVICE_URL = os.getenv("SWIR_SERVICE_URL", "http://detector:8000/predict")
 DATA_DIR = os.getenv("DATA_DIR", "/data/planner_artifacts")
 PROP_ARTIFACT_PATH = os.path.join(DATA_DIR, "prop_multi.npz")
 
@@ -77,6 +78,23 @@ async def planner_health():
         return JSONResponse(status_code=503, content={
             "status": "unreachable", "version": "unknown"
         })
+
+
+# ---------- Detector proxy ----------
+
+@app.post("/api/detect")
+async def detect_image(request: Request):
+    """Proxy an image detection request to the Detector service."""
+    body = await request.json()
+    try:
+        resp = requests.post(DETECTOR_SERVICE_URL, json=body, timeout=30)
+        return JSONResponse(status_code=resp.status_code, content=resp.json())
+    except requests.exceptions.ConnectionError:
+        return JSONResponse(status_code=503, content={
+            "error": "Detector service unavailable"
+        })
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 # ---------- Conjunction data from propagator artifacts ----------
