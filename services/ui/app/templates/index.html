@@ -148,6 +148,25 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 .info-icon{font-style:normal;margin-left:6px;font-size:10px;color:var(--text-dim);transition:color 0.2s}
 .panel-hdr-clickable:hover .info-icon{color:var(--accent)}
 
+.payload-modal-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:1000;align-items:center;justify-content:center}
+.payload-modal-backdrop.open{display:flex}
+.payload-modal{background:var(--bg-card);border:1px solid var(--border-accent);border-radius:6px;width:620px;max-width:90vw;max-height:85vh;display:flex;flex-direction:column;position:relative;overflow:hidden}
+.payload-modal::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--accent-dim),transparent)}
+.payload-modal-hdr{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid var(--border);font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--accent-dim);font-weight:500}
+.payload-modal-hdr-actions{display:flex;align-items:center;gap:6px}
+.payload-modal-copy{background:none;border:1px solid var(--border);color:var(--text-dim);padding:3px 8px;border-radius:3px;cursor:pointer;font-family:inherit;font-size:9px;letter-spacing:0.5px;transition:all 0.2s}
+.payload-modal-copy:hover{border-color:var(--accent-dim);color:var(--text)}
+.payload-modal-copy.copied{border-color:var(--green);color:var(--green)}
+.payload-modal-close{background:none;border:1px solid var(--border);color:var(--text-dim);width:24px;height:24px;border-radius:3px;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;transition:all 0.2s}
+.payload-modal-close:hover{border-color:var(--red);color:var(--red)}
+.payload-modal-body{padding:16px;overflow-y:auto;flex:1}
+.payload-json{font-family:'JetBrains Mono',monospace;font-size:10px;line-height:1.6;white-space:pre;tab-size:2;color:var(--text);background:var(--bg-panel);border:1px solid var(--border);border-radius:4px;padding:12px;overflow-x:auto}
+.payload-json .j-key{color:var(--accent)}
+.payload-json .j-str{color:var(--green)}
+.payload-json .j-num{color:var(--amber)}
+.payload-json .j-bool{color:#c792ea}
+.payload-json .j-null{color:var(--text-dim)}
+
 </style>
 </head>
 <body>
@@ -170,7 +189,7 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 <div class="main">
   <div class="sidebar-left">
     <div class="panel">
-      <div class="panel-hdr">Scenario</div>
+      <div class="panel-hdr"><span class="panel-hdr-clickable" onclick="openPayloadModal()">Scenario<i class="info-icon">&#x24D8;</i></span></div>
       <div class="panel-body">
         <div class="scenario-grid">
           <button class="scenario-btn" data-scenario="nominal" onclick="selectScenario(this)">Nominal</button>
@@ -307,6 +326,21 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
   </div>
 </div>
 
+<div class="payload-modal-backdrop" id="payloadBackdrop" onclick="if(event.target===this)closePayloadModal()">
+  <div class="payload-modal">
+    <div class="payload-modal-hdr">
+      <span id="payloadModalTitle">SCENARIO &mdash; APS INPUT PAYLOAD</span>
+      <div class="payload-modal-hdr-actions">
+        <button class="payload-modal-copy" id="payloadCopyBtn" onclick="copyPayloadJson()">COPY</button>
+        <button class="payload-modal-close" onclick="closePayloadModal()">&times;</button>
+      </div>
+    </div>
+    <div class="payload-modal-body">
+      <div id="payloadModalContent"></div>
+    </div>
+  </div>
+</div>
+
 <script>
 
 let selectedScenario='critical',conjunctionData=null,selectedConjunction=null;
@@ -322,6 +356,7 @@ setInterval(updateClock,1000);updateClock();
 function selectScenario(btn){
   document.querySelectorAll('.scenario-btn').forEach(b=>b.classList.remove('active'));
   btn.classList.add('active');selectedScenario=btn.dataset.scenario;
+  updatePayloadModalIfOpen();
 }
 
 async function runScenario(){
@@ -347,6 +382,7 @@ async function refreshData(){
     if(userCleared)return;
     conjunctionData=data;
     updateMetrics(data.summary);updateConjunctionTable(data.conjunctions);
+    updatePayloadModalIfOpen();
   }catch(e){console.error('Refresh failed:',e)}
 }
 
@@ -391,6 +427,7 @@ async function evaluateConjunction(conj,idx){
       pc_precomputed:conj.pc>0?conj.pc:null},
     policy:getPolicy()
   };
+  updatePayloadModalIfOpen();
   try{
     const resp=await fetch('/api/planner/evaluate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)});
     const result=await resp.json();if(result.error)return;
@@ -1066,6 +1103,92 @@ function openEncounterInfoModal(){
     {label:'Covariance',description:'Source of the uncertainty ellipse displayed in the visualization. "Surrogate (identity)" indicates real CDM covariance has not yet been ingested \u2014 the ellipse represents equal uncertainty in all directions. This will be replaced by live CCSDS 508.0-B-1 CDM covariance when Space-Track integration is active.'}
   ]);
 }
+
+// ==========================================================
+// PAYLOAD MODAL
+// ==========================================================
+let payloadModalOpen=false;
+function syntaxHighlightJson(s){
+  // Keys: "key":
+  s=s.replace(/(&quot;|")((?:\\.|[^"\\])*)(\1)\s*:/g,'<span class="j-key">"$2"</span>:');
+  // String values (not already wrapped in span)
+  s=s.replace(/"(?:\\.|[^"\\])*"/g,function(m){return m.indexOf('j-key')!==-1?m:'<span class="j-str">'+m+'</span>'});
+  // Numbers, booleans, null
+  s=s.replace(/:\s*(-?\d+\.?\d*(?:e[+-]?\d+)?)/gi,function(m,n){return m.replace(n,'<span class="j-num">'+n+'</span>')});
+  s=s.replace(/[\[,]\s*(-?\d+\.?\d*(?:e[+-]?\d+)?)/gi,function(m,n){return m.replace(n,'<span class="j-num">'+n+'</span>')});
+  s=s.replace(/\b(true|false)\b/g,'<span class="j-bool">$1</span>');
+  s=s.replace(/\bnull\b/g,'<span class="j-null">null</span>');
+  return s;
+}
+function getPayloadContent(){
+  if(!conjunctionData||!conjunctionData.conjunctions||conjunctionData.conjunctions.length===0)return null;
+  const conjs=conjunctionData.conjunctions;
+  const asset_r=conjs[0].r_asset_km||[6878.0,0.0,0.0];
+  return{
+    scenario:selectedScenario,
+    satellite:{sat_id:'XORB-001',r_sat_km:asset_r,v_sat_km_s:[0.0,7.668,0.0],
+      t_burn_utc:new Date(Date.now()-3600000).toISOString(),v_remaining_m_s:25.0},
+    conjunctions:conjs.map(function(c){
+      var ar=c.r_asset_km||asset_r;
+      return{
+        conjunction_id:'eval-'+c.object_id,
+        obj_id:c.object_id,
+        t_ca_utc:new Date(Date.now()+c.time_to_tca_s*1000).toISOString(),
+        r_rel_km:c.r_obj_km?[c.r_obj_km[0]-ar[0],c.r_obj_km[1]-ar[1],c.r_obj_km[2]-ar[2]]:[c.miss_distance_km,0.0,0.0],
+        p_rel_km2:[0.01,0,0,0,0.01,0,0,0,0.01],
+        pc_precomputed:c.pc>0?c.pc:null,
+        miss_distance_km:c.miss_distance_km,
+        risk_level:c.risk_level,
+        time_to_tca_s:c.time_to_tca_s
+      };
+    }),
+    policy:getPolicy(),
+    summary:conjunctionData.summary||{}
+  };
+}
+function renderPayloadModal(){
+  const titleEl=document.getElementById('payloadModalTitle');
+  const contentEl=document.getElementById('payloadModalContent');
+  const copyBtn=document.getElementById('payloadCopyBtn');
+  const payload=getPayloadContent();
+  if(!payload){
+    titleEl.textContent='SCENARIO \u2014 APS INPUT PAYLOAD';
+    contentEl.innerHTML='<div class="empty-state">No scenario selected \u2014 select a scenario type to inspect its payload</div>';
+    copyBtn.style.display='none';
+    return;
+  }
+  titleEl.textContent=selectedScenario.toUpperCase()+' SCENARIO \u2014 APS INPUT PAYLOAD';
+  const json=JSON.stringify(payload,null,2);
+  contentEl.innerHTML='<pre class="payload-json">'+syntaxHighlightJson(json.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'))+'</pre>';
+  copyBtn.style.display='';
+}
+function openPayloadModal(){
+  payloadModalOpen=true;
+  renderPayloadModal();
+  document.getElementById('payloadBackdrop').classList.add('open');
+}
+function closePayloadModal(){
+  payloadModalOpen=false;
+  document.getElementById('payloadBackdrop').classList.remove('open');
+  const btn=document.getElementById('payloadCopyBtn');
+  btn.classList.remove('copied');btn.textContent='COPY';
+}
+function updatePayloadModalIfOpen(){
+  if(payloadModalOpen)renderPayloadModal();
+}
+function copyPayloadJson(){
+  const payload=getPayloadContent();
+  if(!payload)return;
+  const json=JSON.stringify(payload,null,2);
+  navigator.clipboard.writeText(json).then(function(){
+    const btn=document.getElementById('payloadCopyBtn');
+    btn.classList.add('copied');btn.textContent='COPIED';
+    setTimeout(function(){btn.classList.remove('copied');btn.textContent='COPY'},2000);
+  });
+}
+document.addEventListener('keydown',function(e){
+  if(e.key==='Escape'&&document.getElementById('payloadBackdrop').classList.contains('open'))closePayloadModal();
+});
 
 // ==========================================================
 // DETECTION MODAL
