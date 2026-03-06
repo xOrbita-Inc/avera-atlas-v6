@@ -254,7 +254,7 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 let selectedScenario='critical',conjunctionData=null,selectedConjunction=null;
 let currentPlannerResult=null,currentConj=null;
 let encounterCtx=null,encounterW=0,encounterH=0,zoomLevel=2.5,panX=0,panY=0,isDragging=false,dragStartX=0,dragStartY=0;
-let selectedCandidateDir=null,currentCandidates=null;
+let selectedCandidateDir=null,currentCandidates=null,userCleared=false;
 function fmtM2(v){if(Math.abs(v)>=10000)return v.toExponential(2);if(Math.abs(v)>=100)return v.toFixed(0);return v.toFixed(2)}
 
 
@@ -270,12 +270,15 @@ async function runScenario(){
   const btn=document.getElementById('runBtn'),msg=document.getElementById('scenarioMsg');
   btn.classList.add('running');btn.textContent='RUNNING...';
   msg.textContent='Generating '+selectedScenario+' scenario...';
+  userCleared=false;selectedCandidateDir=null;
   try{
     await fetch('/api/scenarios/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scenario:selectedScenario})});
     msg.textContent='Waiting for propagation...';
     setTimeout(()=>{refreshData();msg.textContent='Refreshing...'},4000);
     setTimeout(()=>{refreshData();msg.textContent='Loading...'},8000);
-    setTimeout(()=>{refreshData();btn.classList.remove('running');btn.textContent='RUN SCENARIO';msg.textContent='Scenario complete'},12000);
+    setTimeout(async()=>{await refreshData();btn.classList.remove('running');btn.textContent='RUN SCENARIO';msg.textContent='Scenario complete';
+      if(conjunctionData?.conjunctions?.length>0){const idx=selectedConjunction||0;evaluateConjunction(conjunctionData.conjunctions[idx]||conjunctionData.conjunctions[0],idx)}
+    },12000);
   }catch(e){msg.textContent='Error: '+e.message;btn.classList.remove('running');btn.textContent='RUN SCENARIO'}
 }
 
@@ -283,13 +286,9 @@ async function refreshData(){
   try{
     const resp=await fetch('/api/conjunctions');const data=await resp.json();
     if(data.status==='no_data')return;
+    if(userCleared)return;
     conjunctionData=data;
     updateMetrics(data.summary);updateConjunctionTable(data.conjunctions);
-    if(data.conjunctions&&data.conjunctions.length>0){
-      const idx=selectedConjunction||0;
-      const top=data.conjunctions[idx]||data.conjunctions[0];
-      evaluateConjunction(top,idx);
-    }
   }catch(e){console.error('Refresh failed:',e)}
 }
 
@@ -318,7 +317,7 @@ function selectConj(idx){
 }
 
 async function evaluateConjunction(conj,idx){
-  panX=0;panY=0;zoomLevel=2.5;selectedCandidateDir=null;
+  panX=0;panY=0;zoomLevel=2.5;
   document.getElementById('plannerDetails').innerHTML='<div class="empty-state"><span class="spinner"></span>Evaluating conjunction...</div>';
   document.getElementById('candidatesBody').innerHTML='<tr><td colspan="4" class="empty-state"><span class="spinner"></span>Planning...</td></tr>';
   document.getElementById('fuelRiskChart').innerHTML='';
@@ -527,6 +526,7 @@ function updateRiskBar(result,conj){
 
 
 function clearAll(){
+  userCleared=true;
   conjunctionData=null;selectedConjunction=null;currentPlannerResult=null;currentConj=null;zoomLevel=2.5;panX=0;panY=0;selectedCandidateDir=null;currentCandidates=null;
   document.getElementById('conjBody').innerHTML='<tr><td colspan="5" class="empty-state">No data - run a scenario</td></tr>';
   document.getElementById('fuelRiskChart').innerHTML='';
@@ -908,8 +908,9 @@ function roundRect(ctx,x,y,w,h,r){
   ctx.lineTo(x,y+r);ctx.quadraticCurveTo(x,y,x+r,y);ctx.closePath();
 }
 
-document.addEventListener('DOMContentLoaded',()=>{
-  initEncounter();refreshPipeline();refreshData();
+document.addEventListener('DOMContentLoaded',async()=>{
+  initEncounter();refreshPipeline();await refreshData();
+  if(conjunctionData?.conjunctions?.length>0){const idx=selectedConjunction||0;evaluateConjunction(conjunctionData.conjunctions[idx]||conjunctionData.conjunctions[0],idx)}
   setInterval(refreshPipeline,10000);setInterval(refreshData,15000);
 });
 
