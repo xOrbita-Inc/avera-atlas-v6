@@ -328,7 +328,7 @@ async function generate() {
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 1000,
-        system: 'You write natural spoken-word scripts. Output ONLY the spoken text — no stage directions, labels, or markdown. Just natural flowing speech. IMPORTANT: whenever you write the word 'Avera' or 'AVERA', spell it phonetically as 'uh-VER-uh' so the text-to-speech system pronounces it correctly.',
+        system: `You write natural spoken-word scripts. Output ONLY the spoken text — no stage directions, labels, or markdown. Just natural flowing speech. IMPORTANT: whenever you write the word "Avera" or "AVERA", spell it phonetically as "uh-VER-uh" so the text-to-speech system pronounces it correctly.`,
         messages: [{ role: 'user', content: tonePrompts[selectedTone] + '\n\nKey facts:\n- Platform: AVERA-ATLAS, 7-microservice pipeline (ingest → detect → track → propagate → plan → visualize)\n- Sensor: licensed CQD-CMOS SWIR on CubeSats — detects objects ground radar misses\n- Intelligence layer: APS decides when to maneuver, not just reports conjunctions\n- ~1/6 the fleet size of comparable systems\n- Live demo at: averaatlas.space\n- Current state: pipeline validation with surrogate covariance; real CDM integration is next milestone' }]
       })
     });
