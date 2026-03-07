@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AVERA-ATLAS — Voice Overview</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #050810;
+    --surface: #0c1120;
+    --surface2: #101828;
+    --border: #1a2744;
+    --accent: #00d4ff;
+    --accent2: #4af0b0;
+    --text: #c8d8f0;
+    --muted: #4a6080;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Syne', sans-serif;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 32px 16px;
+  }
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background-image:
+      radial-gradient(1px 1px at 12% 18%, rgba(255,255,255,0.35) 0%, transparent 100%),
+      radial-gradient(1px 1px at 35% 65%, rgba(255,255,255,0.25) 0%, transparent 100%),
+      radial-gradient(1px 1px at 60% 22%, rgba(255,255,255,0.40) 0%, transparent 100%),
+      radial-gradient(1px 1px at 80% 75%, rgba(255,255,255,0.25) 0%, transparent 100%),
+      radial-gradient(1px 1px at 92% 42%, rgba(255,255,255,0.35) 0%, transparent 100%),
+      radial-gradient(1px 1px at 22% 88%, rgba(255,255,255,0.20) 0%, transparent 100%),
+      radial-gradient(1px 1px at 68% 50%, rgba(255,255,255,0.30) 0%, transparent 100%);
+    pointer-events: none; z-index: 0;
+  }
+  .card {
+    position: relative; z-index: 1;
+    width: 100%; max-width: 640px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .card-top {
+    background: linear-gradient(135deg, #0a1530 0%, #0c1120 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 28px 32px 24px;
+    position: relative;
+  }
+  .card-top::after {
+    content: '';
+    position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, var(--accent), var(--accent2) 60%, transparent);
+  }
+  .logo { font-size: 22px; font-weight: 800; color: #fff; letter-spacing: 0.04em; }
+  .logo span { color: var(--accent); }
+  .sub { font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.2em; color: var(--muted); text-transform: uppercase; margin-top: 4px; }
+  .orbit-wrap { position: absolute; right: 24px; top: 50%; transform: translateY(-50%); width: 64px; height: 64px; }
+  .orbit-ring { position: absolute; inset: 0; border: 1px solid rgba(0,212,255,0.15); border-radius: 50%; }
+  .orbit-ring2 { position: absolute; inset: 10px; border: 1px solid rgba(0,212,255,0.08); border-radius: 50%; }
+  .orbit-dot {
+    position: absolute; width: 5px; height: 5px;
+    background: var(--accent); border-radius: 50%;
+    top: 50%; left: 50%; margin: -2.5px;
+    box-shadow: 0 0 6px var(--accent);
+    animation: orb 5s linear infinite;
+  }
+  @keyframes orb { from { transform: rotate(0deg) translateX(28px); } to { transform: rotate(360deg) translateX(28px); } }
+  .card-body { padding: 28px 32px; }
+  .step { margin-bottom: 22px; }
+  .step-label {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10px; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--muted);
+    margin-bottom: 8px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .step-label .num {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 18px; height: 18px; border-radius: 50%;
+    background: var(--border); color: var(--accent);
+    font-size: 9px; flex-shrink: 0;
+  }
+  input[type="password"] {
+    width: 100%;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px;
+    padding: 11px 14px;
+    outline: none;
+    transition: border-color 0.15s;
+    letter-spacing: 0.05em;
+  }
+  input:focus { border-color: var(--accent); }
+  input::placeholder { color: var(--muted); }
+  .voice-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .voice-card {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 10px 12px; cursor: pointer; transition: all 0.15s;
+  }
+  .voice-card:hover { border-color: var(--muted); }
+  .voice-card.selected { border-color: var(--accent); background: rgba(0,212,255,0.06); }
+  .voice-name { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 2px; }
+  .voice-desc { font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--muted); }
+  .tone-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .tone-btn {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 4px; color: var(--muted);
+    font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.08em;
+    padding: 7px 14px; cursor: pointer; transition: all 0.15s; text-transform: uppercase;
+  }
+  .tone-btn:hover { color: var(--text); border-color: var(--text); }
+  .tone-btn.selected { color: var(--accent); border-color: var(--accent); background: rgba(0,212,255,0.06); }
+  .btn-generate {
+    width: 100%; padding: 15px;
+    background: var(--accent); color: #050810;
+    border: none; border-radius: 6px;
+    font-family: 'Syne', sans-serif; font-size: 14px; font-weight: 700;
+    letter-spacing: 0.08em; text-transform: uppercase;
+    cursor: pointer; transition: all 0.18s;
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+  }
+  .btn-generate:hover:not(:disabled) { background: #33ddff; transform: translateY(-1px); }
+  .btn-generate:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+  .status-area {
+    margin-top: 20px; background: var(--surface2);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 14px 16px; display: none;
+  }
+  .status-row {
+    display: flex; align-items: center; gap: 10px;
+    font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--muted);
+  }
+  .spinner {
+    width: 14px; height: 14px;
+    border: 2px solid var(--border); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin 0.7s linear infinite; flex-shrink: 0;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .script-preview {
+    margin-top: 16px; background: rgba(0,0,0,0.3);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 14px 16px; font-size: 13px; line-height: 1.7; color: var(--text);
+    max-height: 160px; overflow-y: auto; display: none;
+  }
+  .script-preview::-webkit-scrollbar { width: 4px; }
+  .script-preview::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  .player-area { margin-top: 16px; display: none; flex-direction: column; gap: 12px; }
+  .player-controls { display: flex; align-items: center; gap: 12px; }
+  .btn-play-audio {
+    width: 44px; height: 44px; border-radius: 50%;
+    background: var(--accent); border: none; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0; transition: all 0.15s; color: #050810;
+  }
+  .btn-play-audio:hover { background: #33ddff; transform: scale(1.05); }
+  .audio-track { flex: 1; display: flex; flex-direction: column; gap: 6px; }
+  .audio-bar-wrap { height: 4px; background: var(--border); border-radius: 2px; cursor: pointer; overflow: hidden; }
+  .audio-bar-fill {
+    height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2));
+    border-radius: 2px; width: 0%; transition: width 0.1s linear;
+  }
+  .audio-times {
+    display: flex; justify-content: space-between;
+    font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--muted);
+  }
+  .btn-download {
+    background: transparent; border: 1px solid var(--border); color: var(--muted);
+    font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.1em;
+    text-transform: uppercase; padding: 9px 16px; border-radius: 4px;
+    cursor: pointer; transition: all 0.15s;
+    display: flex; align-items: center; gap: 7px; width: 100%; justify-content: center;
+  }
+  .btn-download:hover { border-color: var(--accent2); color: var(--accent2); }
+  .error-msg {
+    background: rgba(240,80,80,0.08); border: 1px solid rgba(240,80,80,0.3);
+    border-radius: 6px; padding: 12px 16px;
+    font-family: 'IBM Plex Mono', monospace; font-size: 12px;
+    color: rgba(255,150,140,0.9); margin-top: 16px; display: none; line-height: 1.6;
+  }
+  .divider { border: none; border-top: 1px solid var(--border); margin: 22px 0; }
+  .info-box {
+    background: rgba(0,212,255,0.05); border: 1px solid rgba(0,212,255,0.15);
+    border-radius: 6px; padding: 12px 16px;
+    font-family: 'IBM Plex Mono', monospace; font-size: 11px;
+    color: rgba(0,212,255,0.7); margin-bottom: 22px; line-height: 1.6;
+  }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="card-top">
+    <div class="logo">AVERA<span>-</span>ATLAS</div>
+    <div class="sub">Natural Voice Overview Generator</div>
+    <div class="orbit-wrap">
+      <div class="orbit-ring"></div><div class="orbit-ring2"></div><div class="orbit-dot"></div>
+    </div>
+  </div>
+
+  <div class="card-body">
+    <div class="info-box">
+      ℹ  API keys are used only in your browser session — never stored or sent to xOrbita servers.
+    </div>
+
+    <div class="step">
+      <div class="step-label"><span class="num">1</span> ElevenLabs API Key</div>
+      <input type="password" id="elKey" placeholder="sk_..." autocomplete="off" />
+    </div>
+    <div class="step">
+      <div class="step-label"><span class="num">2</span> Anthropic API Key</div>
+      <input type="password" id="anKey" placeholder="sk-ant-..." autocomplete="off" />
+    </div>
+
+    <hr class="divider" />
+
+    <div class="step">
+      <div class="step-label"><span class="num">3</span> Voice</div>
+      <div class="voice-grid">
+        <div class="voice-card selected" onclick="selectVoice(this,'EXAVITQu4vr4xnSDxMaL')"><div class="voice-name">Sarah</div><div class="voice-desc">Warm · Clear</div></div>
+        <div class="voice-card" onclick="selectVoice(this,'onwK4e9ZLuTAKqWW03F9')"><div class="voice-name">Daniel</div><div class="voice-desc">Professional · Deep</div></div>
+        <div class="voice-card" onclick="selectVoice(this,'N2lVS1w4EtoT3dr4eOWO')"><div class="voice-name">Callum</div><div class="voice-desc">Authoritative</div></div>
+        <div class="voice-card" onclick="selectVoice(this,'XB0fDUnXU5powFXDhCwa')"><div class="voice-name">Charlotte</div><div class="voice-desc">Conversational</div></div>
+        <div class="voice-card" onclick="selectVoice(this,'nPczCjzI2devNBz1zQrb')"><div class="voice-name">Brian</div><div class="voice-desc">Steady · Trusted</div></div>
+        <div class="voice-card" onclick="selectVoice(this,'cgSgspJ2msm6clMCkdW9')"><div class="voice-name">Jessica</div><div class="voice-desc">Energetic · Crisp</div></div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-label"><span class="num">4</span> Audience</div>
+      <div class="tone-row">
+        <button class="tone-btn selected" onclick="selectTone(this,'investor')">Investor</button>
+        <button class="tone-btn" onclick="selectTone(this,'technical')">Technical</button>
+        <button class="tone-btn" onclick="selectTone(this,'government')">Government</button>
+        <button class="tone-btn" onclick="selectTone(this,'leolabs')">LeoLabs</button>
+      </div>
+    </div>
+
+    <hr class="divider" />
+
+    <button class="btn-generate" id="genBtn" onclick="generate()">
+      ▶ &nbsp;Generate Natural Audio
+    </button>
+
+    <div class="status-area" id="statusArea">
+      <div class="status-row">
+        <div class="spinner"></div>
+        <span id="statusMsg">Writing script with Claude...</span>
+      </div>
+    </div>
+
+    <div class="script-preview" id="scriptPreview"></div>
+    <div class="error-msg" id="errorMsg"></div>
+
+    <div class="player-area" id="playerArea">
+      <div class="player-controls">
+        <button class="btn-play-audio" onclick="toggleAudio()">
+          <svg id="playIcon" width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><polygon points="4,2 14,8 4,14"/></svg>
+          <svg id="pauseIcon" width="16" height="16" viewBox="0 0 16 16" fill="currentColor" style="display:none"><rect x="3" y="2" width="4" height="12"/><rect x="9" y="2" width="4" height="12"/></svg>
+        </button>
+        <div class="audio-track">
+          <div class="audio-bar-wrap" id="audioBarWrap" onclick="seekAudio(event)">
+            <div class="audio-bar-fill" id="audioBarFill"></div>
+          </div>
+          <div class="audio-times">
+            <span id="timeElapsed">0:00</span>
+            <span id="timeDuration">0:00</span>
+          </div>
+        </div>
+      </div>
+      <button class="btn-download" onclick="downloadAudio()">↓ &nbsp;Download MP3</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let selectedVoice = 'EXAVITQu4vr4xnSDxMaL';
+let selectedTone = 'investor';
+let audioBlob = null;
+let audioEl = null;
+let isPlaying = false;
+
+function selectVoice(el, id) {
+  document.querySelectorAll('.voice-card').forEach(c => c.classList.remove('selected'));
+  el.classList.add('selected'); selectedVoice = id;
+}
+function selectTone(el, tone) {
+  document.querySelectorAll('.tone-btn').forEach(b => b.classList.remove('selected'));
+  el.classList.add('selected'); selectedTone = tone;
+}
+
+const tonePrompts = {
+  investor: `You are presenting xOrbita's AVERA-ATLAS platform to venture capital investors. Write a natural, conversational 75-90 second spoken overview — like you're talking across a table, not reading from a script. Grab attention with the debris problem, explain what AVERA-ATLAS does and why it's different, close with why xOrbita is the right bet. Tone: confident, direct, human. No bullet points, no jargon. Spoken word only.`,
+  technical: `You are a space engineer presenting xOrbita's AVERA-ATLAS to a technical peer. Write a natural 75-90 second spoken overview covering the 7-service pipeline architecture, the CQD-CMOS SWIR sensor advantage, and the intelligence-first planning layer. Technically honest — validated with surrogate covariance today, real CDM integration on the roadmap. Conversational but precise. Spoken word only.`,
+  government: `You are presenting xOrbita's AVERA-ATLAS to Canadian DND or US SDA audience. Write a confident 75-90 second spoken overview. Emphasize SWIR sensor detecting untracked debris below radar thresholds, autonomous decision layer reducing operator burden, capital-efficient deployment, and sovereign SSA capability. Measured, credible tone. Spoken word only.`,
+  leolabs: `You are presenting xOrbita to LeoLabs as a potential data partner. Write a conversational 75-90 second spoken overview. Acknowledge LeoLabs' ground-based tracking and CDM production strength, explain how AVERA-ATLAS complements it with on-orbit SWIR detections for sub-radar objects and an intelligence layer architected to consume CDMs directly. Collegial, peer tone. Spoken word only.`
+};
+
+async function generate() {
+  const elKey = document.getElementById('elKey').value.trim();
+  const anKey = document.getElementById('anKey').value.trim();
+  if (!elKey || !anKey) { showError('Please enter both API keys.'); return; }
+
+  document.getElementById('errorMsg').style.display = 'none';
+  document.getElementById('scriptPreview').style.display = 'none';
+  document.getElementById('playerArea').style.display = 'none';
+  document.getElementById('genBtn').disabled = true;
+
+  setStatus('Writing conversational script with Claude...');
+  let script = '';
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': anKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-ipc': 'true'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1000,
+        system: 'You write natural spoken-word scripts. Output ONLY the spoken text — no stage directions, labels, or markdown. Just natural flowing speech.',
+        messages: [{ role: 'user', content: tonePrompts[selectedTone] + '\n\nKey facts:\n- Platform: AVERA-ATLAS, 7-microservice pipeline (ingest → detect → track → propagate → plan → visualize)\n- Sensor: licensed CQD-CMOS SWIR on CubeSats — detects objects ground radar misses\n- Intelligence layer: APS decides when to maneuver, not just reports conjunctions\n- ~1/6 the fleet size of comparable systems\n- Live demo at: averaatlas.space\n- Current state: pipeline validation with surrogate covariance; real CDM integration is next milestone' }]
+      })
+    });
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      throw new Error(e.error?.message || 'Anthropic API error ' + res.status);
+    }
+    const data = await res.json();
+    script = data.content.find(b => b.type === 'text')?.text || '';
+    if (!script) throw new Error('No text returned from Claude.');
+    document.getElementById('scriptPreview').textContent = script;
+    document.getElementById('scriptPreview').style.display = 'block';
+  } catch(e) {
+    showError('Claude error: ' + e.message);
+    document.getElementById('genBtn').disabled = false;
+    return;
+  }
+
+  setStatus('Converting to natural speech with ElevenLabs...');
+  try {
+    const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${selectedVoice}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'xi-api-key': elKey },
+      body: JSON.stringify({
+        text: script,
+        model_id: 'eleven_turbo_v2_5',
+        voice_settings: { stability: 0.45, similarity_boost: 0.80, style: 0.25, use_speaker_boost: true }
+      })
+    });
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      throw new Error(e.detail?.message || e.detail || 'ElevenLabs error ' + res.status);
+    }
+    audioBlob = await res.blob();
+    setupPlayer(URL.createObjectURL(audioBlob));
+  } catch(e) {
+    showError('ElevenLabs error: ' + e.message + '\n\nCheck that "Text to Speech" is set to Access on your API key and that you have credits remaining.');
+    document.getElementById('genBtn').disabled = false;
+    return;
+  }
+
+  document.getElementById('statusArea').style.display = 'none';
+  document.getElementById('genBtn').disabled = false;
+  document.getElementById('genBtn').textContent = '↺  Regenerate';
+}
+
+function setupPlayer(url) {
+  audioEl = new Audio(url);
+  audioEl.addEventListener('timeupdate', () => {
+    if (!audioEl.duration) return;
+    document.getElementById('audioBarFill').style.width = (audioEl.currentTime / audioEl.duration * 100) + '%';
+    document.getElementById('timeElapsed').textContent = fmt(audioEl.currentTime);
+  });
+  audioEl.addEventListener('loadedmetadata', () => {
+    document.getElementById('timeDuration').textContent = fmt(audioEl.duration);
+  });
+  audioEl.addEventListener('ended', () => {
+    isPlaying = false;
+    document.getElementById('playIcon').style.display = '';
+    document.getElementById('pauseIcon').style.display = 'none';
+  });
+  document.getElementById('playerArea').style.display = 'flex';
+}
+
+function toggleAudio() {
+  if (!audioEl) return;
+  if (isPlaying) {
+    audioEl.pause(); isPlaying = false;
+    document.getElementById('playIcon').style.display = '';
+    document.getElementById('pauseIcon').style.display = 'none';
+  } else {
+    audioEl.play(); isPlaying = true;
+    document.getElementById('playIcon').style.display = 'none';
+    document.getElementById('pauseIcon').style.display = '';
+  }
+}
+
+function seekAudio(e) {
+  if (!audioEl?.duration) return;
+  const r = document.getElementById('audioBarWrap').getBoundingClientRect();
+  audioEl.currentTime = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * audioEl.duration;
+}
+
+function downloadAudio() {
+  if (!audioBlob) return;
+  const a = document.createElement('a'); a.href = URL.createObjectURL(audioBlob);
+  a.download = 'avera-atlas-overview.mp3'; a.click();
+}
+
+function fmt(s) { return Math.floor(s/60) + ':' + String(Math.floor(s%60)).padStart(2,'0'); }
+function setStatus(msg) { document.getElementById('statusArea').style.display = 'block'; document.getElementById('statusMsg').textContent = msg; }
+function showError(msg) { const el = document.getElementById('errorMsg'); el.textContent = msg; el.style.display = 'block'; document.getElementById('statusArea').style.display = 'none'; }
+</script>
+</body>
+</html>
