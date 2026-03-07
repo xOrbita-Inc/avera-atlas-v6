@@ -318,7 +318,7 @@ async function generate() {
   setStatus('Writing conversational script with Claude...');
   let script = '';
   try {
-    const res = await fetch('/api/claude/v1/messages', {
+    const res = await fetch('/voice/api/claude/v1/messages', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -349,7 +349,7 @@ async function generate() {
 
   setStatus('Converting to natural speech with ElevenLabs...');
   try {
-    const res = await fetch(`/api/elevenlabs/v1/text-to-speech/${selectedVoice}`, {
+    const res = await fetch(`/voice/api/elevenlabs/v1/text-to-speech/${selectedVoice}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'xi-api-key': elKey },
       body: JSON.stringify({
