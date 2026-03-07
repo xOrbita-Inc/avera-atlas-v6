@@ -318,13 +318,12 @@ async function generate() {
   setStatus('Writing conversational script with Claude...');
   let script = '';
   try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
+    const res = await fetch('/api/claude/v1/messages', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': anKey,
         'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-ipc': 'true'
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
@@ -350,7 +349,7 @@ async function generate() {
 
   setStatus('Converting to natural speech with ElevenLabs...');
   try {
-    const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${selectedVoice}`, {
+    const res = await fetch(`/api/elevenlabs/v1/text-to-speech/${selectedVoice}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'xi-api-key': elKey },
       body: JSON.stringify({
