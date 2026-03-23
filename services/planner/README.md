@@ -45,7 +45,7 @@ If the satellite is attitude-restricted, only prograde is evaluated.
 
 ## API
 
-All endpoints defined in `openapi/planner-v2.4.yaml`.
+All endpoints defined in `openapi/planner.yaml` (v2.4.2).
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|

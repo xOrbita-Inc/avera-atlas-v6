@@ -1,0 +1,365 @@
+openapi: 3.0.3
+info:
+  title: AVERA-ATLAS Ingest Service
+  description: |
+    Data ingest and CDM persistence service for the AVERA-ATLAS pipeline.
+
+    **Position in the xOrbita stack**
+    - Upstream: Space-Track.org CDM feed (CCSDS 508.0-B-1 format).
+    - Downstream: Planner service queries this service for CDM covariance
+      before running the APS v2.4 decision model. Future consumers
+      (ML/IOD track, visualization) follow the same pattern.
+
+    **Architecture rule (ADR-001)**
+    This service is the sole writer to the CDM store. All other services
+    are readers via this API only. No service accesses the database directly.
+
+    **Unit conventions**
+    - Miss distance: metres (m)
+    - Covariance stored in DB: m² (raw CCSDS 508.0-B-1 values)
+    - Covariance returned by this API: km² (divided by 1e6 on assembly)
+      to match the planner EvaluateRequest convention (p_rel_km2)
+    - Times: UTC, ISO-8601
+    - Covariance frame: RTN (Radial / Transverse / Normal) per CCSDS 508.0-B-1
+
+    **RTN frame note**
+    covariance_combined_rtn is returned in RTN frame. The planner service is
+    responsible for rotating RTN to ECI using the satellite r/v at TCA before
+    passing to decision_model.py. The ingest service does not have satellite
+    state data and cannot perform this rotation.
+
+    **Covariance assembly**
+    The DB stores six lower-triangle RTN elements per object (primary and
+    secondary). The GET /cdm endpoint assembles:
+      C_combined = C_primary + C_secondary (both converted to km²)
+    and returns a nested 3x3 array.
+  contact:
+    name: xOrbita APS Team
+  version: 1.0.0
+servers:
+- url: http://localhost:8001
+  description: Local / Jetson dev
+- url: http://ingest:8000
+  description: Docker Compose service name
+paths:
+  /health:
+    get:
+      summary: Liveness probe
+      operationId: healthCheck
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /cdm/{primary_norad}/{secondary_norad}:
+    get:
+      summary: Retrieve the most recent CDM record for an object pair
+      description: |
+        Returns the most recent ingested CDM for the specified primary/secondary
+        NORAD ID pair, including the assembled combined RTN covariance matrix
+        in km².
+
+        The planner service calls this endpoint to replace the surrogate
+        identity matrix with real covariance before running the APS decision
+        model.
+
+        **Fallback behaviour (caller responsibility)**
+        If this endpoint returns 404 (no CDM on record) or 503 (service
+        unavailable), the caller must fall back to a surrogate identity matrix
+        and set covariance_source to "surrogate_identity" in its own output.
+        The caller must log a WARNING with the NORAD pair and reason.
+      operationId: getCdmRecord
+      parameters:
+      - name: primary_norad
+        in: path
+        description: NORAD catalog ID of the primary (protected) object
+        required: true
+        schema:
+          type: string
+        example: "25544"
+      - name: secondary_norad
+        in: path
+        description: NORAD catalog ID of the secondary (threat) object
+        required: true
+        schema:
+          type: string
+        example: "43657"
+      - name: limit
+        in: query
+        description: |
+          Number of CDM records to return, ordered by tca descending.
+          Default 1 (most recent only). Maximum 10.
+        required: false
+        schema:
+          maximum: 10
+          minimum: 1
+          type: integer
+          default: 1
+      responses:
+        "200":
+          description: CDM record(s) found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CdmRecordResponse"
+        "404":
+          description: No CDM record found for this object pair
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotFoundResponse"
+        "422":
+          description: Validation error (malformed NORAD IDs)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: CDM store temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableResponse"
+  /planner_output:
+    post:
+      summary: Record a planner decision against a CDM record
+      description: |
+        Called by the planner service after each APS decision to write an
+        audit record. Provides the decision history required for LeoLabs
+        and Satlyt demo validation.
+
+        The cdm_record_id must reference a valid id in cdm_records.
+        Returns 404 if the referenced CDM record does not exist.
+      operationId: recordPlannerOutput
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlannerOutputRequest"
+        required: true
+      responses:
+        "201":
+          description: Planner output recorded successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlannerOutputResponse"
+        "404":
+          description: Referenced cdm_record_id does not exist
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotFoundResponse"
+        "422":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+components:
+  schemas:
+    CdmRecordResponse:
+      required:
+      - covariance_combined_rtn
+      - covariance_source
+      - ingested_at
+      - miss_distance_m
+      - primary_norad
+      - secondary_norad
+      - tca
+      type: object
+      properties:
+        id:
+          type: integer
+          description: Primary key of the cdm_records row (use as cdm_record_id in PlannerOutputRequest)
+          example: 142
+        primary_norad:
+          type: string
+          description: NORAD catalog ID of the primary object
+          example: "25544"
+        secondary_norad:
+          type: string
+          description: NORAD catalog ID of the secondary object
+          example: "43657"
+        tca:
+          type: string
+          description: "Time of closest approach (UTC, ISO-8601)"
+          format: date-time
+          example: 2026-04-01T14:32:00Z
+        miss_distance_m:
+          type: number
+          description: Miss distance at TCA in metres
+          example: 412.3
+        pc_space_track:
+          type: number
+          description: |
+            Collision probability published by Space-Track, if present in
+            the source CDM. Null if not provided by Space-Track.
+            This is NOT the Pc computed by the APS model.
+          nullable: true
+          example: 0.000123
+        covariance_combined_rtn:
+          maxItems: 3
+          minItems: 3
+          type: array
+          description: |
+            Combined 3x3 RTN covariance matrix in km².
+            Assembled as C_combined = C_primary + C_secondary.
+            Frame: RTN (Radial / Transverse / Normal) per CCSDS 508.0-B-1.
+
+            Unit note: raw CCSDS values are stored in m². This field returns
+            km² (divided by 1e6) to match the planner p_rel_km2 convention.
+
+            RTN frame note: this matrix is NOT in ECI. The planner service
+            must apply the RTN-to-ECI rotation using the satellite r/v at TCA
+            before passing as p_rel_km2 to the APS decision model.
+          example:
+          - - 0.000025
+            - 0
+            - 0
+          - - 0
+            - 0.000025
+            - 0
+          - - 0
+            - 0
+            - 0.000025
+          items:
+            maxItems: 3
+            minItems: 3
+            type: array
+            items:
+              type: number
+        covariance_source:
+          $ref: "#/components/schemas/CovarianceSourceEnum"
+        ingested_at:
+          type: string
+          description: "Timestamp when this CDM was ingested (UTC, ISO-8601)"
+          format: date-time
+          example: 2026-03-31T22:10:00Z
+    PlannerOutputRequest:
+      required:
+      - cdm_record_id
+      - covariance_source
+      - lambda_l
+      - lambda_v
+      - pc_computed
+      - recommendation
+      - utility_value
+      type: object
+      properties:
+        cdm_record_id:
+          type: integer
+          description: Foreign key referencing cdm_records.id
+          example: 142
+        recommendation:
+          $ref: "#/components/schemas/RecommendationEnum"
+        delta_v_ms:
+          type: number
+          description: |
+            Recommended delta-v magnitude in m/s.
+            Null when recommendation is "no_maneuver" or "monitor".
+          nullable: true
+          example: 0.85
+        pc_computed:
+          type: number
+          description: Collision probability as computed by the APS model
+          example: 0.000312
+        utility_value:
+          type: number
+          description: "Utility function output: U = delta_C - lambda_v * dv - lambda_L * dL"
+          example: 4.23
+        lambda_v:
+          type: number
+          description: Operator fuel-cost weight at the time of this decision
+          example: 0.01
+        lambda_l:
+          type: number
+          description: Operator lifetime-penalty weight at the time of this decision
+          example: 0.005
+        covariance_source:
+          $ref: "#/components/schemas/CovarianceSourceEnum"
+    PlannerOutputResponse:
+      required:
+      - cdm_record_id
+      - created_at
+      - id
+      type: object
+      properties:
+        id:
+          type: integer
+          description: Primary key of the newly created planner_outputs row
+          example: 88
+        cdm_record_id:
+          type: integer
+          example: 142
+        created_at:
+          type: string
+          description: "Timestamp of record creation (UTC, ISO-8601)"
+          format: date-time
+          example: 2026-04-01T14:32:05Z
+    CovarianceSourceEnum:
+      type: string
+      description: |
+        Provenance of the covariance data used in a planner evaluation.
+        - real_cdm: covariance assembled from a live Space-Track CDM record.
+        - surrogate_identity: identity matrix substitute, used when no CDM
+          is available for the object pair. Results are pipeline-valid but
+          not operationally accurate. The ATLAS UI must display a visible
+          warning to the operator when this value is present.
+      example: real_cdm
+      enum:
+      - real_cdm
+      - surrogate_identity
+    RecommendationEnum:
+      type: string
+      description: APS decision output for the conjunction event
+      example: maneuver
+      enum:
+      - maneuver
+      - no_maneuver
+      - monitor
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        version:
+          type: string
+          example: 1.0.0
+    NotFoundResponse:
+      required:
+      - detail
+      - error
+      type: object
+      properties:
+        error:
+          type: string
+          example: CDM record not found
+        detail:
+          type: string
+          description: Human-readable context including NORAD pair or record ID
+          example: "No CDM record found for primary_norad=25544, secondary_norad=43657"
+    ServiceUnavailableResponse:
+      required:
+      - error
+      type: object
+      properties:
+        error:
+          type: string
+          example: CDM store temporarily unavailable
+        detail:
+          type: string
+          example: SQLite database locked or volume unmounted
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Human-readable error message
+          example: primary_norad must be a non-empty string
+        detail:
+          type: object
+          description: Machine-readable validation detail

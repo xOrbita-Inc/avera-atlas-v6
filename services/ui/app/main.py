@@ -19,6 +19,7 @@ app = FastAPI(title="AVERA-ATLAS Dashboard", version="6.0.0")
 PLANNER_SERVICE_URL = os.getenv("PLANNER_SERVICE_URL", "http://planner:8060")
 TRACKER_SERVICE_URL = os.getenv("TRACKER_SERVICE_URL", "http://tracker:8000")
 DETECTOR_SERVICE_URL = os.getenv("SWIR_SERVICE_URL", "http://detector:8000/predict")
+INGEST_SERVICE_URL = os.getenv("INGEST_SERVICE_URL", "http://ingest:8000")
 DATA_DIR = os.getenv("DATA_DIR", "/data/planner_artifacts")
 PROP_ARTIFACT_PATH = os.path.join(DATA_DIR, "prop_multi.npz")
 
@@ -78,6 +79,73 @@ async def planner_health():
         return JSONResponse(status_code=503, content={
             "status": "unreachable", "version": "unknown"
         })
+
+
+# ---------- Ingest CDM proxy ----------
+
+@app.post("/api/ingest/poll")
+async def ingest_poll(request: Request):
+    """Proxy a CDM poll request to the ingest service.
+
+    Triggers a Space-Track fetch and persists results to the CDM store.
+    Body: { "norad_id": int } or { "pc_threshold": float, "days_lookahead": int }
+    """
+    body = await request.json()
+    try:
+        resp = requests.post(
+            f"{INGEST_SERVICE_URL}/cdm/poll",
+            json=body, timeout=30
+        )
+        return JSONResponse(status_code=resp.status_code, content=resp.json())
+    except requests.exceptions.ConnectionError:
+        return JSONResponse(status_code=503, content={
+            "error": "Ingest service unavailable"
+        })
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/ingest/cdm/{primary_norad}/{secondary_norad}")
+async def ingest_cdm_lookup(primary_norad: str, secondary_norad: str):
+    """Proxy a CDM record lookup to the ingest service.
+
+    Returns the most recent CDM record for the object pair including
+    assembled RTN covariance and covariance_source provenance.
+    """
+    try:
+        resp = requests.get(
+            f"{INGEST_SERVICE_URL}/cdm/{primary_norad}/{secondary_norad}",
+            timeout=5
+        )
+        return JSONResponse(status_code=resp.status_code, content=resp.json())
+    except requests.exceptions.ConnectionError:
+        return JSONResponse(status_code=503, content={
+            "error": "Ingest service unavailable"
+        })
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/api/ingest/inject")
+async def ingest_inject(request: Request):
+    """Proxy a CDM inject request to the ingest service.
+
+    Used for demo and testing when Space-Track CDM access is unavailable.
+    Injects the real TIROS 4 / IRIDIUM 33 DEB example CDM from CCSDS 508.0-B-1.
+    """
+    body = await request.json()
+    try:
+        resp = requests.post(
+            f"{INGEST_SERVICE_URL}/cdm/inject",
+            json=body, timeout=10
+        )
+        return JSONResponse(status_code=resp.status_code, content=resp.json())
+    except requests.exceptions.ConnectionError:
+        return JSONResponse(status_code=503, content={
+            "error": "Ingest service unavailable"
+        })
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 # ---------- Detector proxy ----------

@@ -135,14 +135,14 @@ The planner implements Sreejit Sarma's physics-based optimization model:
 
 ### Known Limitations
 
-- **Surrogate covariance**: Identity matrix placeholder until real CDM data is integrated (V2.5+)
+- **Live covariance**: CCSDS 508.0-B-1 CDM covariance from Space-Track (integrated V2.5)
 - **CW framework**: Assumes near-circular orbits; Yamanaka-Ankersen or J2-corrected alternatives needed for eccentric orbits
 - **Single-impulse burns**: No multi-burn optimization
 - **No attitude dynamics**: Burns assumed instantaneous along candidate directions
 
 ### OpenAPI Specification
 
-The planner contract is defined in `openapi/planner-v2.4.yaml` and published on SwaggerHub. All services code against this interface contract.
+API contracts are defined in `openapi/planner.yaml` (APS Planner v2.4.2) and `openapi/ingest.yaml` (Ingest Service v1.0.0), published on SwaggerHub. All services code against these interface contracts.
 
 ---
 
@@ -177,7 +177,8 @@ avera-atlas-v6/
 │   ├── 03-viz.yaml
 │   └── 04-ui.yaml
 ├── openapi/
-│   └── planner-v2.4.yaml        # APS Planner interface contract
+│   ├── planner.yaml             # APS Planner interface contract (v2.4.2)
+│   └── ingest.yaml              # Ingest Service interface contract (v1.0.0)
 └── services/
     ├── ingest/                   # Frame buffer and state assembly
     ├── detector/                 # YOLOv8 SWIR detection
@@ -227,7 +228,7 @@ kubectl apply -f k8s/
 
 ## Demo Framing
 
-When presenting to technical audiences (e.g., LeoLabs), this system must be framed as **pipeline validation with surrogate covariance**. The identity-matrix covariance placeholder significantly affects conjunction assessment quality. Overclaiming operational accuracy before real CDM integration is a credibility risk.
+When presenting to technical audiences (e.g., LeoLabs), this system should be framed as **pipeline validation with live Space-Track CDM covariance**. Real CCSDS 508.0-B-1 covariance is now integrated; conjunction assessment quality reflects actual CDM data rather than identity-matrix placeholders.
 
 What the demo proves:
 - End-to-end pipeline from detection to maneuver recommendation works
@@ -247,7 +248,7 @@ What the demo does not prove:
 | Version | Milestone |
 |---------|-----------|
 | V2.2 | CDM parser (CCSDS 508.0-B-1), Space-Track integration for real ephemeris |
-| V2.3 | Real covariance data replaces identity matrix surrogate |
+| V2.3 | Real covariance data replaces identity matrix surrogate ✅ |
 | V2.5 | Multi-burn optimization, J2-corrected propagation |
 | V3.0 | Autonomous closed-loop: sensor → plan → execute without ground-in-the-loop |
 

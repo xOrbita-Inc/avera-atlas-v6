@@ -3,8 +3,13 @@ services:
     build: {context: ./services/ingest}
     image: avera/ingest:v6
     ports: ["8001:8000"]
-    environment: [OUTPUT_DIR=/data/planner_artifacts]
-    volumes: [planner_data:/data/planner_artifacts]
+    environment:
+      - OUTPUT_DIR=/data/planner_artifacts
+      - SPACETRACK_USER=${SPACETRACK_USER}
+      - SPACETRACK_PASS=${SPACETRACK_PASS}
+    volumes:
+      - planner_data:/data/planner_artifacts
+      - cdm_data:/data/cdm_store
     restart: unless-stopped
 
   detector:
@@ -35,6 +40,8 @@ services:
     build: {context: ./services/planner}
     image: avera/planner:v6
     ports: ["8060:8060"]
+    environment:
+      - INGEST_SERVICE_URL=http://ingest:8000
     depends_on: [propagator]
     restart: unless-stopped
 
@@ -54,6 +61,7 @@ services:
       - SWIR_SERVICE_URL=http://detector:8000/predict
       - TRACKER_SERVICE_URL=http://tracker:8000
       - PLANNER_SERVICE_URL=http://planner:8060
+      - INGEST_SERVICE_URL=http://ingest:8000
       - DATA_DIR=/data/planner_artifacts
     depends_on: [detector, tracker, planner]
     volumes: [planner_data:/data/planner_artifacts]
@@ -61,4 +69,6 @@ services:
 
 volumes:
   planner_data:
+    driver: local
+  cdm_data:
     driver: local

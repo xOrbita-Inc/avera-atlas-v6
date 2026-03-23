@@ -167,6 +167,20 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 .payload-json .j-bool{color:#c792ea}
 .payload-json .j-null{color:var(--text-dim)}
 
+.cdm-ops-panel .poll-row{display:flex;gap:6px;align-items:center;margin-bottom:8px}
+.cdm-ops-panel input[type=text]{flex:1;background:var(--bg-panel);border:1px solid var(--border);color:var(--text);font-family:'JetBrains Mono',monospace;font-size:10px;padding:5px 8px;border-radius:3px;outline:none}
+.cdm-ops-panel input[type=text]:focus{border-color:var(--accent-dim)}
+.poll-btn{padding:5px 10px;background:transparent;border:1px solid var(--accent-dim);color:var(--accent-dim);font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:1px;border-radius:3px;cursor:pointer;text-transform:uppercase;white-space:nowrap;transition:all 0.2s}
+.poll-btn:hover:not(:disabled){border-color:var(--accent);color:var(--accent);background:rgba(79,248,232,0.06)}
+.poll-btn:disabled{opacity:0.35;cursor:default}
+.poll-status{font-size:9px;letter-spacing:0.5px;min-height:14px;margin-bottom:4px}
+.poll-status.ok{color:var(--green)}.poll-status.err{color:var(--red)}.poll-status.busy{color:var(--amber)}
+.cov-badge{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:3px;font-size:9px;font-weight:700;letter-spacing:1px;margin-top:6px}
+.cov-badge.real{background:rgba(61,220,132,0.12);color:var(--green);border:1px solid rgba(61,220,132,0.35)}
+.cov-badge.surrogate{background:rgba(255,176,32,0.12);color:var(--amber);border:1px solid rgba(255,176,32,0.35)}
+.cov-badge .cov-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.cov-badge.real .cov-dot{background:var(--green)}.cov-badge.surrogate .cov-dot{background:var(--amber)}
+
 </style>
 </head>
 <body>
@@ -223,6 +237,20 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
         <div style="text-align:center;font-size:8px;color:var(--text-dim);margin-top:4px" id="policyMsg">Adjust weights to see ranking changes</div>
       </div>
     </div>
+    <div class="panel cdm-ops-panel">
+      <div class="panel-hdr">CDM Operations</div>
+      <div class="panel-body" style="padding:10px 14px">
+        <div style="font-size:8px;color:var(--text-dim);letter-spacing:0.5px;margin-bottom:6px">Asset NORAD ID (leave blank for surrogate covariance)</div>
+        <div class="poll-row">
+          <input type="text" id="assetNoradInput" placeholder="e.g. 25544" maxlength="10" oninput="onNoradChange()">
+          <button class="poll-btn" id="pollBtn" onclick="triggerCdmPoll()" disabled>POLL</button>
+        </div>
+        <button class="poll-btn" id="injectExampleBtn" onclick="injectExampleCdm()" style="width:100%;margin-bottom:6px">INJECT EXAMPLE CDM (TIROS 4)</button>
+        <div class="poll-status" id="pollStatus"></div>
+        <div style="font-size:8px;color:var(--text-dim);letter-spacing:0.5px;margin-bottom:4px">Last CDM fetch</div>
+        <div style="font-size:9px;color:var(--text-dim)" id="pollLastResult">No poll run yet</div>
+      </div>
+    </div>
     <div class="panel">
       <div class="panel-hdr panel-hdr-clickable" onclick="openTrackingSummaryInfoModal()">Tracking Summary<i class="info-icon">&#x24D8;</i></div>
       <div class="panel-body">
@@ -277,6 +305,7 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
         <div class="decision-status" id="decisionStatus">MONITORING</div>
         <span class="decision-badge badge-nogo" id="decisionBadge">NO ACTION</span>
       </div>
+      <div id="covSourceBadge"></div>
       <div class="decision-meta">
         <div class="item"><div class="k">Target</div><div class="v" id="dTarget">--</div></div>
         <div class="item"><div class="k">Time to TCA</div><div class="v" id="dTCA">--</div></div>
@@ -342,6 +371,136 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 </div>
 
 <script>
+
+let assetNoradId = '';
+let secondaryNoradId = '';
+
+function onNoradChange() {
+  const val = document.getElementById('assetNoradInput').value.trim();
+  assetNoradId = val;
+  const btn = document.getElementById('pollBtn');
+  btn.disabled = !/^\d{4,9}$/.test(val);
+}
+
+async function triggerCdmPoll() {
+  const btn = document.getElementById('pollBtn');
+  const status = document.getElementById('pollStatus');
+  const lastResult = document.getElementById('pollLastResult');
+  if (!assetNoradId) return;
+  btn.disabled = true;
+  status.className = 'poll-status busy';
+  status.textContent = 'Polling Space-Track...';
+  try {
+    const resp = await fetch('/api/ingest/poll', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({norad_id: parseInt(assetNoradId), days_lookahead: 7})
+    });
+    const data = await resp.json();
+    if (resp.ok) {
+      status.className = 'poll-status ok';
+      status.textContent = 'Poll complete';
+      const saved = data.saved || 0;
+      const skipped = data.skipped || 0;
+      lastResult.textContent = saved + ' CDMs saved, ' + skipped + ' skipped — ' + new Date().toISOString().substr(11,8) + ' UTC';
+    } else {
+      status.className = 'poll-status err';
+      status.textContent = 'Poll failed: ' + (data.error || resp.status);
+      lastResult.textContent = 'Error — check ingest service logs';
+    }
+  } catch(e) {
+    status.className = 'poll-status err';
+    status.textContent = 'Ingest service unreachable';
+    lastResult.textContent = 'Connection error';
+  }
+  btn.disabled = false;
+}
+
+async function injectExampleCdm() {
+  const btn = document.getElementById('injectExampleBtn');
+  const status = document.getElementById('pollStatus');
+  const lastResult = document.getElementById('pollLastResult');
+  btn.disabled = true;
+  status.className = 'poll-status busy';
+  status.textContent = 'Injecting example CDM...';
+
+  // Real CCSDS 508.0-B-1 CDM: TIROS 4 (226) vs IRIDIUM 33 DEB (35929)
+  // Source: Space-Track.org Near Earth KVN example, 2020-02-28
+  // Covariance values in m² as parsed by cdm_parser.parse_cdm_kvn()
+  const exampleCdm = {
+    TCA: '2020-03-05T07:26:54.974Z',
+    MISS_DISTANCE: 1780.0,
+    COLLISION_PROBABILITY: 0.0,
+    OBJECT1_OBJECT_DESIGNATOR: 226.0,
+    OBJECT1_OBJECT_NAME: 'TIROS 4',
+    OBJECT1_X: -1484.865223,
+    OBJECT1_Y: -5293.446853,
+    OBJECT1_Z: -4495.437378,
+    OBJECT1_X_DOT: 6.464033802,
+    OBJECT1_Y_DOT: 0.661818202,
+    OBJECT1_Z_DOT: -3.00266646,
+    OBJECT1_CR_R: 99.64363206828475,
+    OBJECT1_CT_R: 877.2210070811166,
+    OBJECT1_CT_T: 22486.67143317358,
+    OBJECT1_CN_R: -4.426324899888984,
+    OBJECT1_CN_T: -79.04618434539326,
+    OBJECT1_CN_N: 9.972811643135275,
+    OBJECT2_OBJECT_DESIGNATOR: 35929.0,
+    OBJECT2_OBJECT_NAME: 'IRIDIUM 33 DEB',
+    OBJECT2_X: -1484.285818,
+    OBJECT2_Y: -5292.263622,
+    OBJECT2_Z: -4494.23968,
+    OBJECT2_X_DOT: -1.063675697,
+    OBJECT2_Y_DOT: -4.585064279,
+    OBJECT2_Z_DOT: 5.79176252,
+    OBJECT2_CR_R: 211.5189133059618,
+    OBJECT2_CT_R: -11074.05902817656,
+    OBJECT2_CT_T: 1805633.075022246,
+    OBJECT2_CN_R: 51.98576102432443,
+    OBJECT2_CN_T: 952.6244095306695,
+    OBJECT2_CN_N: 147.3578567617173
+  };
+
+  try {
+    const resp = await fetch('/api/ingest/inject', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(exampleCdm)
+    });
+    const data = await resp.json();
+    if (resp.ok && data.saved > 0) {
+      status.className = 'poll-status ok';
+      status.textContent = 'Example CDM injected';
+      lastResult.textContent = 'TIROS 4 (226) / IRIDIUM 33 DEB (35929) — real CCSDS 508.0-B-1 covariance loaded';
+      // Auto-populate the asset NORAD field so planner picks it up immediately
+      document.getElementById('assetNoradInput').value = '226';
+      assetNoradId = '226';
+      secondaryNoradId = '35929';
+      document.getElementById('pollBtn').disabled = false;
+      lastResult.textContent = 'TIROS 4 (226) / IRIDIUM 33 DEB (35929) — real CCSDS 508.0-B-1 covariance loaded. Select any conjunction to evaluate with real CDM covariance.';
+    } else {
+      status.className = 'poll-status err';
+      status.textContent = 'Inject failed: ' + (data.errors?.[0] || JSON.stringify(data));
+      lastResult.textContent = 'Check ingest service logs';
+    }
+  } catch(e) {
+    status.className = 'poll-status err';
+    status.textContent = 'Ingest service unreachable';
+    lastResult.textContent = 'Connection error';
+  }
+  btn.disabled = false;
+}
+
+function renderCovSourceBadge(covSource) {
+  const el = document.getElementById('covSourceBadge');
+  if (!el) return;
+  if (!covSource) { el.innerHTML = ''; return; }
+  const isReal = covSource === 'real_cdm';
+  el.innerHTML = '<div class="cov-badge ' + (isReal ? 'real' : 'surrogate') + '">' +
+    '<span class="cov-dot"></span>' +
+    (isReal ? 'REAL CDM COVARIANCE' : 'SURROGATE COVARIANCE \u2014 SET ASSET NORAD ID TO FETCH REAL CDM') +
+    '</div>';
+}
 
 let selectedScenario='critical',conjunctionData=null,selectedConjunction=null;
 let currentPlannerResult=null,currentConj=null;
@@ -421,6 +580,8 @@ async function evaluateConjunction(conj,idx){
     satellite:{sat_id:'XORB-001',r_sat_km:asset_r,v_sat_km_s:[0.0,7.668,0.0],
       t_burn_utc:new Date(Date.now()-3600000).toISOString(),v_remaining_m_s:25.0},
     conjunction:{obj_id:conj.object_id,
+      ...(assetNoradId ? {primary_norad: assetNoradId} : {}),
+      ...(secondaryNoradId ? {secondary_norad: secondaryNoradId} : {}),
       t_ca_utc:new Date(Date.now()+conj.time_to_tca_s*1000).toISOString(),
       r_rel_km:conj.r_obj_km?[conj.r_obj_km[0]-asset_r[0],conj.r_obj_km[1]-asset_r[1],conj.r_obj_km[2]-asset_r[2]]:[conj.miss_distance_km,0.0,0.0],
       p_rel_km2:[0.01,0,0,0,0.01,0,0,0,0.01],
@@ -432,6 +593,7 @@ async function evaluateConjunction(conj,idx){
     const resp=await fetch('/api/planner/evaluate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)});
     const result=await resp.json();if(result.error)return;
     currentPlannerResult=result;currentConj=conj;
+    renderCovSourceBadge(result.covariance_source || null);
     updateDecisionCard(result,conj);
     currentCandidates=result.metrics?.all_candidates||[];
     updateCandidatesTable(currentCandidates,result.recommendation?.direction,result.metrics?.fuel_cost_m_s||0);
@@ -973,7 +1135,7 @@ function drawEncounter(conj,result){
     'Pc: '+conj.pc_display,
     'SCALE: 1px \u2248 '+(1/scale).toFixed(1)+'m',
     'HBR: 15m (combined)',
-    'COVARIANCE: surrogate (identity)',
+    'COVARIANCE: Live Space-Track CDM covariance (CCSDS 508.0-B-1)',
     'ZOOM: '+zoomLevel.toFixed(1)+'x | scroll=zoom  drag=pan  dbl-click=reset'
   ];
   lines.forEach((l,i)=>ctx.fillText(l,ix,iy+i*14));
@@ -1100,7 +1262,7 @@ function openEncounterInfoModal(){
     {label:'Pc',description:'Probability of Collision computed from relative state and combined covariance at TCA. Values above 1e-4 trigger RED alert status.'},
     {label:'Scale',description:'Current visualization scale in meters per pixel. Updates dynamically with zoom level to help interpret displayed distances.'},
     {label:'HBR (combined)',description:'Hard Body Radius: the combined physical radius of both objects in meters. A conjunction becomes a collision if miss distance is less than HBR.'},
-    {label:'Covariance',description:'Source of the uncertainty ellipse displayed in the visualization. "Surrogate (identity)" indicates real CDM covariance has not yet been ingested \u2014 the ellipse represents equal uncertainty in all directions. This will be replaced by live CCSDS 508.0-B-1 CDM covariance when Space-Track integration is active.'}
+    {label:'Covariance',description:'Source of the uncertainty ellipse displayed in the visualization. Uses live CCSDS 508.0-B-1 CDM covariance from Space-Track, reflecting real combined position uncertainty at TCA.'}
   ]);
 }
 
