@@ -12,9 +12,11 @@ import requests
 from datetime import datetime
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 app = FastAPI(title="AVERA-ATLAS Dashboard", version="6.0.0")
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 PLANNER_SERVICE_URL = os.getenv("PLANNER_SERVICE_URL", "http://planner:8060")
 TRACKER_SERVICE_URL = os.getenv("TRACKER_SERVICE_URL", "http://tracker:8000")
@@ -275,6 +277,120 @@ async def get_conjunctions():
         })
 
 
+@app.get("/api/orbits")
+async def get_orbits():
+    """Propagate full Keplerian orbital arcs for globe visualization.
+
+    Reads initial state vectors from states_multi.npz and propagates
+    each object through one complete orbit using two-body dynamics.
+    Returns ~90 points per object at ~60-second intervals covering
+    one full LEO revolution (~92 minutes).
+
+    This is independent of the short-window prop_multi.npz artifact
+    and is used exclusively by the 3D globe view.
+    """
+    STATES_PATH = os.path.join(DATA_DIR, "states_multi.npz.processed")
+    if not os.path.exists(STATES_PATH):
+        STATES_PATH = os.path.join(DATA_DIR, "states_multi.npz")
+    MU = 398600.4418  # km^3/s^2
+
+    def propagate_two_body(r0, v0, n_steps=90, dt_s=None):
+        # Compute exact orbital period from vis-viva so the track closes perfectly.
+        # T = 2π * sqrt(a³/μ) where a = |r0| for near-circular orbit.
+        a = float(np.linalg.norm(r0))
+        period_s = 2 * np.pi * np.sqrt(a**3 / MU)
+        if dt_s is None:
+            dt_s = period_s / n_steps
+        """Simple two-body RK4 propagation. Returns list of [x,y,z] km."""
+        r = np.array(r0, dtype=float)
+        v = np.array(v0, dtype=float)
+        points = [r.tolist()]
+
+        def accel(r):
+            rmag = np.linalg.norm(r)
+            return -MU / rmag**3 * r
+
+        for _ in range(n_steps):
+            # RK4
+            k1v = accel(r)
+            k1r = v
+            k2v = accel(r + 0.5*dt_s*k1r)
+            k2r = v + 0.5*dt_s*k1v
+            k3v = accel(r + 0.5*dt_s*k2r)
+            k3r = v + 0.5*dt_s*k2v
+            k4v = accel(r + dt_s*k3r)
+            k4r = v + dt_s*k3v
+            r = r + (dt_s/6.0)*(k1r + 2*k2r + 2*k3r + k4r)
+            v = v + (dt_s/6.0)*(k1v + 2*k2v + 2*k3v + k4v)
+            points.append(r.tolist())
+
+        return points
+
+    if not os.path.exists(STATES_PATH):
+        return JSONResponse(content={"status": "no_data", "asset": [], "objects": {}})
+
+    try:
+        data = np.load(STATES_PATH, allow_pickle=True)
+
+        # Asset state from metadata if available, else use first object as fallback
+        asset_r = [6871.0, 0.0, 0.0]
+        asset_v = [0.0, 7.6246, 0.0]
+        try:
+            meta = json.loads(str(data.get("metadata", "{}")))
+            if "asset_state" in meta:
+                asset_r = meta["asset_state"]["r_eci_km"]
+                asset_v = meta["asset_state"]["v_eci_km_s"]
+        except Exception:
+            pass
+
+        asset_track = propagate_two_body(asset_r, asset_v)
+
+        obj_ids = data["object_ids"]
+        r_objects = data["r_eci_km"]
+        v_objects = data["v_eci_km_s"]
+
+        # Inclinations applied here for visualization only.
+        # The scenario generator uses equatorial orbits for correct
+        # propagator conjunction geometry. The globe applies different
+        # inclinations per object so orbit tracks cross visually.
+        VIZ_INCLINATIONS = [97.8, 51.6, 28.0, 135.0, 72.0, 45.0, 63.0, 98.0]
+
+        object_tracks = {}
+        for i in range(min(len(obj_ids), 8)):
+            oid = str(obj_ids[i])
+            try:
+                r0 = r_objects[i].tolist()
+                v0 = v_objects[i].tolist()
+
+                # Rotate velocity around the x-axis by the assigned inclination.
+                # This tilts the orbital plane for visual variety while keeping
+                # the orbital speed consistent with the altitude.
+                inc_rad = np.radians(VIZ_INCLINATIONS[i % len(VIZ_INCLINATIONS)])
+                v_mag = float(np.linalg.norm(v0))
+                # Preserve speed, apply inclination rotation
+                v_viz = [
+                    v0[0],
+                    v_mag * np.cos(inc_rad),
+                    v_mag * np.sin(inc_rad),
+                ]
+
+                track = propagate_two_body(r0, v_viz)
+                object_tracks[oid] = track
+            except Exception:
+                pass
+
+        return JSONResponse(content={
+            "status": "ok",
+            "asset": asset_track,
+            "objects": object_tracks,
+        })
+
+    except Exception as e:
+        return JSONResponse(status_code=500, content={
+            "status": "error", "error": str(e)
+        })
+
+
 # ---------- Artifacts (video, images) ----------
 
 @app.get("/api/video")
@@ -373,7 +489,7 @@ def _generate_synthetic_scenario(scenario):
     MU = 398600.4418
     R_EARTH = 6371.0
     r_mag = R_EARTH + 500.0
-    v_circ = (MU / r_mag) ** 0.5
+    v_circ = float(np.sqrt(MU / r_mag))
 
     asset_r = [r_mag, 0.0, 0.0]
     asset_v = [0.0, v_circ, 0.0]

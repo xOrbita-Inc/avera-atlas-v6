@@ -181,7 +181,21 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 .cov-badge .cov-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
 .cov-badge.real .cov-dot{background:var(--green)}.cov-badge.surrogate .cov-dot{background:var(--amber)}
 
+.view-toggle-btn{padding:3px 10px;background:transparent;border:1px solid var(--border-accent);color:var(--text-dim);font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:1px;border-radius:3px;cursor:pointer;text-transform:uppercase;transition:all 0.2s;margin-left:8px}
+.view-toggle-btn:hover{border-color:var(--accent-dim);color:var(--text)}
+.view-toggle-btn.active{border-color:var(--accent);color:var(--accent);background:rgba(79,248,232,0.08)}
+#globeWrap{flex:1;position:relative;min-height:0;overflow:hidden;display:none}
+#globeCanvas{width:100%;height:100%;display:block}
+.speed-control{display:none;align-items:center;gap:6px;margin-left:12px}
+.speed-control.visible{display:flex}
+.speed-control label{font-size:8px;color:var(--text-dim);letter-spacing:1px;text-transform:uppercase;white-space:nowrap}
+.speed-control input[type=range]{width:70px;height:4px;-webkit-appearance:none;appearance:none;background:#1e2044;border-radius:2px;outline:none;cursor:pointer}
+.speed-control input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;border-radius:50%;background:var(--accent);cursor:pointer;border:2px solid var(--bg-panel)}
+.speed-val{font-size:9px;color:var(--accent);font-family:'JetBrains Mono',monospace;min-width:28px}
+
 </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 </head>
 <body>
 
@@ -277,9 +291,20 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
   <div class="encounter-container">
     <div class="encounter-header">
       <span class="encounter-title panel-hdr-clickable" id="encounterTitle" onclick="openEncounterInfoModal()"><span id="encounterTitleText">Encounter Geometry</span><i class="info-icon">&#x24D8;</i></span>
-      <span class="encounter-alert" id="encounterAlert">CONJUNCTION ALERT</span>
+      <div style="display:flex;align-items:center;gap:4px">
+        <span class="encounter-alert" id="encounterAlert">CONJUNCTION ALERT</span>
+        <button class="view-toggle-btn active" id="btn2D" onclick="setView('2d')">2D</button>
+        <button class="view-toggle-btn" id="btn3D" onclick="setView('3d')">3D GLOBE</button>
+        <div class="speed-control" id="speedControl">
+          <label>Orbit Speed</label>
+          <input type="range" id="speedSlider" min="1" max="10" step="1" value="5"
+            oninput="onSpeedChange(this.value)">
+          <span class="speed-val" id="speedVal">5x</span>
+        </div>
+      </div>
     </div>
     <div class="encounter-canvas-wrap"><canvas id="encounterCanvas"></canvas></div>
+    <div id="globeWrap"><canvas id="globeCanvas"></canvas></div>
     <div class="risk-bar">
       <div class="label">Pc</div>
       <div class="risk-meter">
@@ -541,6 +566,7 @@ async function refreshData(){
     if(userCleared)return;
     conjunctionData=data;
     updateMetrics(data.summary);updateConjunctionTable(data.conjunctions);
+    if(currentView==='3d')fetchAndUpdateGlobeOrbits();
     updatePayloadModalIfOpen();
   }catch(e){console.error('Refresh failed:',e)}
 }
@@ -567,6 +593,7 @@ function updateConjunctionTable(conjs){
 function selectConj(idx){
   selectedConjunction=idx;const conjs=conjunctionData?.conjunctions;
   if(!conjs||!conjs[idx])return;updateConjunctionTable(conjs);evaluateConjunction(conjs[idx],idx);
+  globeFocusOnConj(conjs[idx]);
 }
 
 async function evaluateConjunction(conj,idx){
@@ -593,6 +620,7 @@ async function evaluateConjunction(conj,idx){
     const resp=await fetch('/api/planner/evaluate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)});
     const result=await resp.json();if(result.error)return;
     currentPlannerResult=result;currentConj=conj;
+    if(currentView==='3d')updateConjunctionArc(conj);
     renderCovSourceBadge(result.covariance_source || null);
     updateDecisionCard(result,conj);
     currentCandidates=result.metrics?.all_candidates||[];
@@ -1460,6 +1488,450 @@ document.addEventListener('DOMContentLoaded',async()=>{
   if(conjunctionData?.conjunctions?.length>0){const idx=selectedConjunction||0;evaluateConjunction(conjunctionData.conjunctions[idx]||conjunctionData.conjunctions[0],idx)}
   setInterval(refreshPipeline,10000);setInterval(refreshData,15000);
 });
+
+// ==========================================================
+// 3D GLOBE VIEW (Three.js r128)
+// ==========================================================
+let globeScene=null,globeCamera=null,globeRenderer=null,globeControls=null;
+let globeAnimId=null,globeInitialized=false;
+let currentView='2d';
+let assetMarker=null,assetTrackLine=null,objectTrackLines=[],debrisMarkers=[];
+let assetTrackPoints=[];
+let debrisTrackPoints=[],debrisMarkerOffsets=[];
+const debrisPhaseMap={};  // persistent phase offsets keyed by object ID
+let globeStartTime=null;
+let ORBIT_PERIOD_MS=15*1000; // default 5x speed = 15s per orbit; adjustable via slider
+const DEBRIS_SPEED_FACTOR=0.95;   // slightly slower than asset for visual separation
+let conjArcLine=null,tcaPulseT=0;
+let threatLines=[],cameraFollowActive=false,cameraFollowT=0;
+let debrisLabelSprites=[];
+
+const EARTH_RADIUS_KM=6371;
+
+function onSpeedChange(val){
+  // Slider 1-10 maps to 30s (slow) down to 3s (fast) per orbit
+  // val=1 -> 30s, val=5 -> 15s, val=10 -> 3s
+  const v=parseInt(val);
+  ORBIT_PERIOD_MS=Math.round(30000/(v*0.5));
+  document.getElementById('speedVal').textContent=v+'x';
+  // Reset start time so speed change takes effect immediately without a jump
+  globeStartTime=performance.now();
+}
+
+function setView(v){
+  currentView=v;
+  const wrap2d=document.querySelector('.encounter-canvas-wrap');
+  const wrap3d=document.getElementById('globeWrap');
+  const btn2d=document.getElementById('btn2D');
+  const btn3d=document.getElementById('btn3D');
+  if(v==='3d'){
+    wrap2d.style.display='none';wrap3d.style.display='block';
+    btn2d.classList.remove('active');btn3d.classList.add('active');
+    document.getElementById('speedControl').classList.add('visible');
+    if(!globeInitialized)initGlobe();
+    else resizeGlobe();
+    fetchAndUpdateGlobeOrbits();
+    if(currentConj)updateConjunctionArc(currentConj);
+    cameraFollowActive=true;
+    startGlobeLoop();
+  } else {
+    wrap2d.style.display='';wrap3d.style.display='none';
+    btn2d.classList.add('active');btn3d.classList.remove('active');
+    document.getElementById('speedControl').classList.remove('visible');
+    stopGlobeLoop();
+    cameraFollowActive=false;
+    if(currentConj&&currentPlannerResult)drawEncounter(currentConj,currentPlannerResult);
+    else drawEncounterEmpty();
+  }
+}
+
+function initGlobe(){
+  const canvas=document.getElementById('globeCanvas');
+  const wrap=document.getElementById('globeWrap');
+
+  globeRenderer=new THREE.WebGLRenderer({canvas,antialias:true,alpha:false});
+  globeRenderer.setPixelRatio(window.devicePixelRatio);
+  globeRenderer.setClearColor(0x030611,1);
+
+  globeScene=new THREE.Scene();
+
+  globeCamera=new THREE.PerspectiveCamera(45,wrap.clientWidth/wrap.clientHeight,0.01,1000);
+  globeCamera.position.set(0,0,3.5);
+
+  globeControls=new THREE.OrbitControls(globeCamera,canvas);
+  globeControls.enableDamping=true;
+  globeControls.dampingFactor=0.05;
+  globeControls.minDistance=1.3;
+  globeControls.maxDistance=20;
+
+  // Stars
+  const starGeo=new THREE.BufferGeometry();
+  const starVerts=[];
+  for(let i=0;i<3000;i++){
+    const theta=Math.random()*Math.PI*2;
+    const phi=Math.acos(2*Math.random()-1);
+    const r=80+Math.random()*40;
+    starVerts.push(r*Math.sin(phi)*Math.cos(theta),r*Math.sin(phi)*Math.sin(theta),r*Math.cos(phi));
+  }
+  starGeo.setAttribute('position',new THREE.Float32BufferAttribute(starVerts,3));
+  globeScene.add(new THREE.Points(starGeo,new THREE.PointsMaterial({color:0xffffff,size:0.15,transparent:true,opacity:0.7})));
+
+  // Earth with Blue Marble texture
+  const earthGeo=new THREE.SphereGeometry(1,48,48);
+  const earthMesh=new THREE.Mesh(earthGeo,new THREE.MeshBasicMaterial({color:0x173b5f}));
+  globeScene.add(earthMesh);
+  new THREE.TextureLoader().load(
+    '/static/textures/earth/blue-marble-day.jpg',
+    function(tex){
+      tex.colorSpace=THREE.SRGBColorSpace;
+      tex.anisotropy=Math.min(8,globeRenderer.capabilities.getMaxAnisotropy());
+      earthMesh.material=new THREE.MeshBasicMaterial({map:tex,toneMapped:false});
+      earthMesh.material.needsUpdate=true;
+    },
+    undefined,
+    function(){
+      // Texture failed to load -- keep flat color fallback
+    }
+  );
+
+  // Atmosphere glow
+  const atmGeo=new THREE.SphereGeometry(1.015,48,48);
+  const atmMat=new THREE.MeshBasicMaterial({color:0x4488ff,transparent:true,opacity:0.08,side:THREE.BackSide});
+  globeScene.add(new THREE.Mesh(atmGeo,atmMat));
+
+  // Graticule (lat/lon grid)
+  const gridMat=new THREE.LineBasicMaterial({color:0x1e2a44,transparent:true,opacity:0.5});
+  [-60,-30,0,30,60].forEach(lat=>{
+    const pts=[];
+    for(let lon=-180;lon<=180;lon+=3){
+      const p=latLonToVec(lat,lon,0);
+      pts.push(new THREE.Vector3(p.x*1.002,p.y*1.002,p.z*1.002));
+    }
+    globeScene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),gridMat));
+  });
+  [-150,-120,-90,-60,-30,0,30,60,90,120,150].forEach(lon=>{
+    const pts=[];
+    for(let lat=-90;lat<=90;lat+=3){
+      const p=latLonToVec(lat,lon,0);
+      pts.push(new THREE.Vector3(p.x*1.002,p.y*1.002,p.z*1.002));
+    }
+    globeScene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),gridMat));
+  });
+
+  // Asset marker (cyan sphere)
+  assetMarker=new THREE.Mesh(
+    new THREE.SphereGeometry(0.018,10,10),
+    new THREE.MeshBasicMaterial({color:0x4ff8e8})
+  );
+  globeScene.add(assetMarker);
+
+  // Conjunction arc -- reused line object, updated on conjunction selection
+  conjArcLine=new THREE.Line(
+    new THREE.BufferGeometry(),
+    new THREE.LineBasicMaterial({color:0xff3b5c,transparent:true,opacity:0,linewidth:3,depthTest:false})
+  );
+  conjArcLine.renderOrder=2;
+  globeScene.add(conjArcLine);
+
+  window.addEventListener('resize',resizeGlobe);
+  resizeGlobe();
+  globeInitialized=true;
+  globeStartTime=performance.now();
+}
+
+function latLonToVec(lat,lon,altKm){
+  const r=1+(altKm/EARTH_RADIUS_KM);
+  const phi=(90-lat)*Math.PI/180;
+  const theta=(lon+180)*Math.PI/180;
+  return {
+    x:-r*Math.sin(phi)*Math.cos(theta),
+    y:r*Math.cos(phi),
+    z:r*Math.sin(phi)*Math.sin(theta)
+  };
+}
+
+function makeTextSprite(text,color){
+  const canvas=document.createElement('canvas');
+  canvas.width=256;canvas.height=64;
+  const ctx=canvas.getContext('2d');
+  ctx.fillStyle='rgba(0,0,0,0.6)';
+  ctx.roundRect(2,2,252,60,8);ctx.fill();
+  ctx.font='bold 22px "JetBrains Mono", monospace';
+  ctx.fillStyle=color||'#e4e4ef';
+  ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.fillText(text,128,32);
+  const tex=new THREE.CanvasTexture(canvas);
+  const mat=new THREE.SpriteMaterial({map:tex,transparent:true,depthTest:false});
+  const sprite=new THREE.Sprite(mat);
+  sprite.scale.set(0.28,0.07,1);
+  return sprite;
+}
+
+function eciToScene(x_km,y_km,z_km){
+  // ECI: x toward vernal equinox, z toward north pole, y completes right-hand
+  // Three.js: y up. Map ECI directly -- scene unit = 1 Earth radius
+  return new THREE.Vector3(
+    x_km/EARTH_RADIUS_KM,
+    z_km/EARTH_RADIUS_KM,
+    -y_km/EARTH_RADIUS_KM
+  );
+}
+
+async function fetchAndUpdateGlobeOrbits(){
+  try{
+    const resp=await fetch('/api/orbits');
+    if(!resp.ok)return;
+    const data=await resp.json();
+    if(data.status!=='ok')return;
+    // Convert to the shape updateGlobeOrbits expects
+    const orbits={
+      asset_track: data.asset,
+      object_tracks: data.objects
+    };
+    updateGlobeOrbits(orbits);
+  }catch(e){
+    console.warn('Globe orbit fetch failed:',e);
+  }
+}
+
+function updateGlobeOrbits(orbits){
+  if(!globeScene)return;
+
+  // Remove old tracks and markers
+  objectTrackLines.forEach(l=>globeScene.remove(l));
+  debrisMarkers.forEach(m=>globeScene.remove(m));
+  debrisLabelSprites.forEach(s=>globeScene.remove(s));
+  objectTrackLines=[];debrisMarkers=[];
+  debrisTrackPoints=[];debrisMarkerOffsets=[];
+  // Note: debrisPhaseMap is NOT reset -- offsets persist across refreshes
+  debrisLabelSprites=[];
+  if(assetTrackLine)globeScene.remove(assetTrackLine);
+
+  // Asset track (cyan)
+  if(orbits.asset_track&&orbits.asset_track.length>1){
+    assetTrackPoints=orbits.asset_track.map(p=>eciToScene(p[0],p[1],p[2]));
+    // Close the loop -- append first point so the track is a complete circle
+    if(assetTrackPoints.length>1){
+      assetTrackPoints.push(assetTrackPoints[0].clone());
+    }
+    const geo=new THREE.BufferGeometry().setFromPoints(assetTrackPoints);
+    assetTrackLine=new THREE.Line(geo,new THREE.LineBasicMaterial({color:0x4ff8e8,transparent:true,opacity:0.6}));
+    globeScene.add(assetTrackLine);
+    // Place asset marker at first point
+    if(assetMarker&&assetTrackPoints.length>0)assetMarker.position.copy(assetTrackPoints[0]);
+    markerAnimT=0;
+  }
+
+  // Object tracks
+  const riskColors={'RED':0xff3b5c,'AMBER':0xffb020,'GREEN':0x3ddc84,'NOMINAL':0x4466aa};
+  if(orbits.object_tracks){
+    Object.entries(orbits.object_tracks).forEach(([objId,pts])=>{
+      if(!pts||pts.length<2)return;
+      const risk=conjunctionData?.conjunctions?.find(c=>c.object_id===objId)?.risk_level||'NOMINAL';
+      const col=riskColors[risk]||riskColors.NOMINAL;
+      const scenePts=pts.map(p=>eciToScene(p[0],p[1],p[2]));
+      // Close the loop
+      if(scenePts.length>1) scenePts.push(scenePts[0].clone());
+      const geo=new THREE.BufferGeometry().setFromPoints(scenePts);
+      const line=new THREE.Line(geo,new THREE.LineBasicMaterial({color:col,transparent:true,opacity:0.5}));
+      globeScene.add(line);
+      objectTrackLines.push(line);
+      // Debris marker at first point
+      const m=new THREE.Mesh(
+        new THREE.SphereGeometry(0.012,8,8),
+        new THREE.MeshBasicMaterial({color:col,transparent:true,opacity:1})
+      );
+      m.position.copy(scenePts[0]);
+      globeScene.add(m);
+      debrisMarkers.push(m);
+      debrisTrackPoints.push(scenePts);
+      // Reuse existing phase offset for this object ID to prevent jumps on refresh
+      if(debrisPhaseMap[objId]===undefined){
+        debrisPhaseMap[objId]=Math.random();
+      }
+      debrisMarkerOffsets.push(debrisPhaseMap[objId]);
+      // Label sprite above the marker
+      const riskHex={'RED':'#ff3b5c','AMBER':'#ffb020','GREEN':'#3ddc84','NOMINAL':'#4466aa'};
+      const labelColor=riskHex[risk]||riskHex.NOMINAL;
+      const label=makeTextSprite(objId,labelColor);
+      label.position.copy(scenePts[0]).multiplyScalar(1.06);
+      globeScene.add(label);
+      debrisLabelSprites.push(label);
+    });
+  }
+}
+
+function startGlobeLoop(){
+  if(globeAnimId)return;
+  function loop(){
+    globeAnimId=requestAnimationFrame(loop);
+    // Animate asset marker along track
+    if(assetTrackPoints.length>1){
+      const now=performance.now();
+      if(!globeStartTime)globeStartTime=now;
+      const elapsed=(now-globeStartTime)%ORBIT_PERIOD_MS;
+      const t=elapsed/ORBIT_PERIOD_MS;
+      const totalPts=assetTrackPoints.length-1;
+      const pos=t*totalPts;
+      const idx=Math.floor(pos)%totalPts;
+      const alpha=pos-Math.floor(pos);
+      assetMarker.position.lerpVectors(
+        assetTrackPoints[idx],
+        assetTrackPoints[(idx+1)%assetTrackPoints.length],
+        alpha
+      );
+      assetMarker.material.opacity=1;
+    }
+    // Animate debris markers along their tracks
+    for(let i=0;i<debrisMarkers.length;i++){
+      const pts=debrisTrackPoints[i];
+      if(!pts||pts.length<2)continue;
+      const now=performance.now();
+      if(!globeStartTime)globeStartTime=now;
+      const period=ORBIT_PERIOD_MS*DEBRIS_SPEED_FACTOR;
+      const offset=debrisMarkerOffsets[i]||0;
+      const elapsed=((now-globeStartTime)/period+offset)%1;
+      const totalPts=pts.length-1;
+      const pos=elapsed*totalPts;
+      const idx=Math.floor(pos)%totalPts;
+      const alpha=pos-Math.floor(pos);
+      debrisMarkers[i].position.lerpVectors(
+        pts[idx],
+        pts[(idx+1)%pts.length],
+        alpha
+      );
+      debrisMarkers[i].material.opacity=1;
+      // Keep label above the marker
+      if(debrisLabelSprites[i]){
+        debrisLabelSprites[i].position.copy(debrisMarkers[i].position).multiplyScalar(1.06);
+      }
+    }
+    // Update threat lines each frame so they track animated marker positions
+    threatLines.forEach((l,i)=>{
+      if(!debrisMarkers[i]||!assetMarker)return;
+      const assetPos=assetMarker.position.clone();
+      const debrisPos=debrisMarkers[i].position.clone();
+      const mid=assetPos.clone().lerp(debrisPos,0.5);
+      const liftFactor=1.0+0.18/mid.length();
+      const midLifted=mid.clone().multiplyScalar(liftFactor);
+      l.geometry.dispose();
+      l.geometry=new THREE.BufferGeometry().setFromPoints([assetPos,midLifted,debrisPos]);
+    });
+    // Soft camera follow -- when active, gently orbit to keep asset marker near center
+    if(cameraFollowActive&&assetMarker&&globeCamera&&globeControls){
+      const targetLook=assetMarker.position.clone().multiplyScalar(0.2);
+      globeControls.target.lerp(targetLook,0.005);
+    }
+    if(globeControls)globeControls.update();
+    if(globeRenderer&&globeScene&&globeCamera)globeRenderer.render(globeScene,globeCamera);
+  }
+  loop();
+}
+
+function stopGlobeLoop(){
+  if(globeAnimId){cancelAnimationFrame(globeAnimId);globeAnimId=null;}
+}
+
+function resizeGlobe(){
+  const wrap=document.getElementById('globeWrap');
+  if(!wrap||!globeRenderer||!globeCamera)return;
+  const w=wrap.clientWidth,h=wrap.clientHeight;
+  if(w===0||h===0)return;
+  globeRenderer.setSize(w,h);
+  globeCamera.aspect=w/h;
+  globeCamera.updateProjectionMatrix();
+}
+
+function updateConjunctionArc(conj){
+  // Remove old threat lines
+  threatLines.forEach(l=>globeScene&&globeScene.remove(l));
+  threatLines=[];
+
+  if(!conjArcLine||!globeScene){return;}
+
+  if(!conj){
+    conjArcLine.material.opacity=0;
+    return;
+  }
+
+  // Risk color
+  const riskColors={'RED':0xff3b5c,'AMBER':0xffb020,'GREEN':0x3ddc84,'NOMINAL':0x4466aa};
+  const col=riskColors[conj.risk_level]||riskColors.NOMINAL;
+
+  // Highlight the arc segment of asset track nearest the TCA
+  // Use time_to_tca_s to estimate where along the orbit TCA occurs
+  if(assetTrackPoints.length>1){
+    const orbitPeriodS=92*60; // ~92 min LEO period
+    const tcaFrac=Math.min((conj.time_to_tca_s||0)/orbitPeriodS,1);
+    const arcHalf=0.06; // highlight +/- 6% of orbit around TCA
+    const startFrac=Math.max(0,tcaFrac-arcHalf);
+    const endFrac=Math.min(1,tcaFrac+arcHalf);
+    const startIdx=Math.floor(startFrac*(assetTrackPoints.length-1));
+    const endIdx=Math.floor(endFrac*(assetTrackPoints.length-1));
+    const arcPts=assetTrackPoints.slice(startIdx,endIdx+1);
+
+    if(arcPts.length>1){
+      // Slightly offset arc points radially outward so they render above the track line
+      const arcPtsLifted=arcPts.map(p=>p.clone().multiplyScalar(1.008));
+      conjArcLine.geometry.dispose();
+      conjArcLine.geometry=new THREE.BufferGeometry().setFromPoints(arcPtsLifted);
+      conjArcLine.material.color.setHex(col);
+      conjArcLine.material.opacity=1.0;
+      // Make the arc visually distinct from the base track
+      conjArcLine.renderOrder=2;
+      conjArcLine.material.depthTest=false;
+    }
+  }
+
+  // Draw threat lines from asset position to each debris marker at current position
+  debrisMarkers.forEach((m,i)=>{
+    if(!m.visible)return;
+    const assetPos=assetMarker?assetMarker.position.clone():new THREE.Vector3(1.08,0,0);
+    // Arc the threat line through space above Earth by adding a lifted midpoint
+    const mid=assetPos.clone().lerp(m.position.clone(),0.5);
+    const liftFactor=1.0+0.18/mid.length(); // lift proportional to how close to surface
+    const midLifted=mid.clone().multiplyScalar(liftFactor);
+    // Build a curved line through 3 points: asset -> lifted midpoint -> debris
+    const curvePts=[assetPos,midLifted,m.position.clone()];
+    const threatGeo=new THREE.BufferGeometry().setFromPoints(curvePts);
+    const threatLine=new THREE.Line(
+      threatGeo,
+      new THREE.LineBasicMaterial({color:col,transparent:true,opacity:0.55,depthTest:false})
+    );
+    threatLine.renderOrder=1;
+    globeScene.add(threatLine);
+    threatLines.push(threatLine);
+  });
+}
+
+function globeFocusOnConj(conj){
+  if(!globeCamera||!globeControls||!conj)return;
+  if(currentView!=='3d')return;
+
+  updateConjunctionArc(conj);
+
+  // Position camera to view the conjunction region
+  const rAsset=conj.r_asset_km||[6878,0,0];
+  const midScene=eciToScene(rAsset[0],rAsset[1],rAsset[2]);
+  const targetCamPos=midScene.clone().normalize().multiplyScalar(2.8);
+  const startPos=globeCamera.position.clone();
+  const startTarget=globeControls.target.clone();
+  const endTarget=midScene.clone().multiplyScalar(0.15);
+  let t=0;
+
+  // Disable follow during transition then re-enable
+  cameraFollowActive=false;
+  function animStep(){
+    t=Math.min(t+0.02,1);
+    const ease=t<0.5?2*t*t:1-Math.pow(-2*t+2,2)/2;
+    globeCamera.position.lerpVectors(startPos,targetCamPos,ease);
+    globeControls.target.lerpVectors(startTarget,endTarget,ease);
+    globeControls.update();
+    if(t<1)requestAnimationFrame(animStep);
+    else cameraFollowActive=true;
+  }
+  animStep();
+}
 
 </script>
 </body>
