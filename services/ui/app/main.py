@@ -179,6 +179,36 @@ async def ingest_store():
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+@app.delete("/api/ingest/store/deduplicate")
+async def ingest_deduplicate():
+    """Proxy deduplicate request to ingest service."""
+    try:
+        resp = requests.delete(
+            f"{INGEST_SERVICE_URL}/store/cdm_records/duplicates",
+            timeout=10
+        )
+        return JSONResponse(status_code=resp.status_code, content=resp.json())
+    except requests.exceptions.ConnectionError:
+        return JSONResponse(status_code=503, content={"error": "Ingest service unavailable"})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.delete("/api/ingest/store/clear")
+async def ingest_clear():
+    """Proxy clear all request to ingest service."""
+    try:
+        resp = requests.delete(
+            f"{INGEST_SERVICE_URL}/store/cdm_records/all",
+            timeout=10
+        )
+        return JSONResponse(status_code=resp.status_code, content=resp.json())
+    except requests.exceptions.ConnectionError:
+        return JSONResponse(status_code=503, content={"error": "Ingest service unavailable"})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 # ---------- Detector proxy ----------
 
 @app.post("/api/detect")

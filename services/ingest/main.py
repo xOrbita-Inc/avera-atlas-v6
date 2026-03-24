@@ -343,6 +343,14 @@ async def inject_cdm(request: Request) -> dict:
     for cdm in cdm_list:
         try:
             save_cdm_record(cdm)
+            # save_cdm_record sets source internally -- override it after save
+            with get_session() as session:
+                record = session.query(CdmRecord).order_by(
+                    CdmRecord.id.desc()
+                ).first()
+                if record:
+                    record.source = "real_cdm"
+                    session.commit()
             saved += 1
         except Exception as e:
             skipped += 1
@@ -369,10 +377,10 @@ async def store_cdm_records():
                     "id": r.id,
                     "primary_norad": r.primary_norad,
                     "secondary_norad": r.secondary_norad,
-                    "tca_utc": r.tca_utc,
+                    "tca_utc": r.tca,
                     "miss_distance_m": round(r.miss_distance_m, 1) if r.miss_distance_m else None,
-                    "pc": r.pc,
-                    "covariance_source": r.covariance_source,
+                    "pc": r.pc_space_track,
+                    "covariance_source": r.source,
                     "ingested_at": r.ingested_at,
                 }
                 for r in rows
@@ -394,10 +402,10 @@ async def store_planner_outputs():
                 {
                     "id": r.id,
                     "cdm_record_id": r.cdm_record_id,
-                    "conjunction_id": r.conjunction_id,
+                    "conjunction_id": f"{r.cdm_record_id}",
                     "recommendation": r.recommendation,
-                    "utility": round(r.utility, 4) if r.utility else None,
-                    "dv_magnitude_m_s": round(r.dv_magnitude_m_s, 3) if r.dv_magnitude_m_s else None,
+                    "utility": round(r.utility_value, 4) if r.utility_value else None,
+                    "dv_magnitude_m_s": round(r.delta_v_ms, 3) if r.delta_v_ms else None,
                     "covariance_source": r.covariance_source,
                     "created_at": r.created_at,
                 }
@@ -406,3 +414,78 @@ async def store_planner_outputs():
     except Exception as e:
         logging.error("[INGEST] store_planner_outputs error: %s", e)
         return []
+
+
+@app.post("/planner_output", status_code=201)
+async def save_planner_output(request: Request) -> dict:
+    """Persist a planner audit record to the SQLite store.
+
+    Called by the planner service after each APS evaluation.
+    Body fields: cdm_record_id, conjunction_id, recommendation,
+                 utility, dv_magnitude_m_s, covariance_source
+    """
+    body = await request.json()
+    try:
+        with get_session() as session:
+            output = PlannerOutput(
+                cdm_record_id=body.get("cdm_record_id"),
+                recommendation=body.get("recommendation"),
+                delta_v_ms=body.get("delta_v_ms"),
+                pc_computed=body.get("pc_computed") or 0.0,
+                utility_value=body.get("utility_value"),
+                lambda_v=body.get("lambda_v") or 0.0,
+                lambda_l=body.get("lambda_l") or 0.0,
+                covariance_source=body.get("covariance_source"),
+                created_at=datetime.utcnow().isoformat() + "Z",
+            )
+            session.add(output)
+            session.commit()
+            logging.info("[INGEST] Planner output saved: %s", body.get("conjunction_id"))
+            return {"status": "saved"}
+    except Exception as e:
+        logging.error("[INGEST] save_planner_output error: %s", e)
+        return {"status": "error", "error": str(e)}
+
+
+@app.delete("/store/cdm_records/duplicates", status_code=200)
+async def deduplicate_cdm_records() -> dict:
+    """Remove duplicate CDM records keeping only the most recent per object pair."""
+    try:
+        with get_session() as session:
+            # Get all records ordered by ingested_at desc
+            rows = session.query(CdmRecord).order_by(
+                CdmRecord.ingested_at.desc()
+            ).all()
+            seen = set()
+            to_delete = []
+            for r in rows:
+                key = (r.primary_norad, r.secondary_norad)
+                if key in seen:
+                    to_delete.append(r.id)
+                else:
+                    seen.add(key)
+            for rid in to_delete:
+                session.query(CdmRecord).filter(CdmRecord.id == rid).delete()
+            session.commit()
+            logging.info("[INGEST] Deduplicated CDM records: removed %d", len(to_delete))
+            return {"removed": len(to_delete), "kept": len(seen)}
+    except Exception as e:
+        logging.error("[INGEST] deduplicate error: %s", e)
+        return {"error": str(e)}
+
+
+@app.delete("/store/cdm_records/all", status_code=200)
+async def clear_cdm_records() -> dict:
+    """Delete all CDM records and planner outputs from the store."""
+    try:
+        with get_session() as session:
+            cdm_count = session.query(CdmRecord).count()
+            output_count = session.query(PlannerOutput).count()
+            session.query(PlannerOutput).delete()
+            session.query(CdmRecord).delete()
+            session.commit()
+            logging.info("[INGEST] Cleared store: %d CDMs, %d outputs", cdm_count, output_count)
+            return {"cdm_records_deleted": cdm_count, "planner_outputs_deleted": output_count}
+    except Exception as e:
+        logging.error("[INGEST] clear error: %s", e)
+        return {"error": str(e)}

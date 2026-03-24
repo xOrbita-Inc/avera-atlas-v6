@@ -1997,6 +1997,28 @@ async function loadStoreData(){
   }
 }
 
+async function storeAction(action){
+  const btn=document.getElementById(action==='deduplicate'?'storeDedupeBtn':'storeClearBtn');
+  const label=action==='deduplicate'?'DEDUPLICATING...':'CLEARING...';
+  const confirm_msg=action==='clear'?'Delete ALL CDM records and planner outputs?':'Remove duplicate CDM records keeping only the most recent per object pair?';
+  if(!window.confirm(confirm_msg))return;
+  btn.disabled=true;btn.textContent=label;
+  try{
+    const url=action==='deduplicate'?'/api/ingest/store/deduplicate':'/api/ingest/store/clear';
+    const resp=await fetch(url,{method:'DELETE'});
+    const data=await resp.json();
+    if(resp.ok){
+      await loadStoreData();
+    } else {
+      alert('Error: '+(data.error||resp.status));
+    }
+  } catch(e){
+    alert('Ingest service unavailable');
+  }
+  btn.disabled=false;
+  btn.textContent=action==='deduplicate'?'DEDUPLICATE':'CLEAR ALL';
+}
+
 function renderCdmRecords(records){
   const body=document.getElementById('storeModalBody');
   if(!records.length){
@@ -2072,7 +2094,11 @@ document.addEventListener('keydown',function(e){
   <div class="store-modal">
     <div class="store-modal-hdr">
       <span>CDM Store &mdash; SQLite Record Viewer</span>
-      <button class="store-modal-close" onclick="closeStoreModal()">&times;</button>
+      <div style="display:flex;align-items:center;gap:6px">
+        <button class="poll-btn" id="storeDedupeBtn" onclick="storeAction('deduplicate')">DEDUPLICATE</button>
+        <button class="poll-btn" id="storeClearBtn" onclick="storeAction('clear')" style="border-color:var(--red);color:var(--red)">CLEAR ALL</button>
+        <button class="store-modal-close" onclick="closeStoreModal()">&times;</button>
+      </div>
     </div>
     <div class="store-modal-tabs">
       <button class="store-tab active" id="storeTabCdm" onclick="switchStoreTab('cdm')">CDM Records</button>
