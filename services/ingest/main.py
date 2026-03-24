@@ -10,7 +10,7 @@ from sqlalchemy.exc import OperationalError
 
 from spacetrack_client import SpaceTrackClient
 from cdm_parser import parse_cdm_kvn
-from db import init_db, save_cdm_record, CdmRecord, get_session
+from db import init_db, save_cdm_record, CdmRecord, PlannerOutput, get_session
 
 # === CONFIGURATION ===
 BUFFER_WINDOW_SIZE = 5 
@@ -354,3 +354,55 @@ async def inject_cdm(request: Request) -> dict:
 
     logging.info("[INGEST] Inject complete: %d saved, %d skipped", saved, skipped)
     return {"saved": saved, "skipped": skipped, "errors": errors}
+
+
+@app.get("/store/cdm_records")
+async def store_cdm_records():
+    """Return all CDM records from the SQLite store."""
+    try:
+        with get_session() as session:
+            rows = session.query(CdmRecord).order_by(
+                CdmRecord.ingested_at.desc()
+            ).limit(100).all()
+            return [
+                {
+                    "id": r.id,
+                    "primary_norad": r.primary_norad,
+                    "secondary_norad": r.secondary_norad,
+                    "tca_utc": r.tca_utc,
+                    "miss_distance_m": round(r.miss_distance_m, 1) if r.miss_distance_m else None,
+                    "pc": r.pc,
+                    "covariance_source": r.covariance_source,
+                    "ingested_at": r.ingested_at,
+                }
+                for r in rows
+            ]
+    except Exception as e:
+        logging.error("[INGEST] store_cdm_records error: %s", e)
+        return []
+
+
+@app.get("/store/planner_outputs")
+async def store_planner_outputs():
+    """Return all planner output records from the SQLite store."""
+    try:
+        with get_session() as session:
+            rows = session.query(PlannerOutput).order_by(
+                PlannerOutput.created_at.desc()
+            ).limit(100).all()
+            return [
+                {
+                    "id": r.id,
+                    "cdm_record_id": r.cdm_record_id,
+                    "conjunction_id": r.conjunction_id,
+                    "recommendation": r.recommendation,
+                    "utility": round(r.utility, 4) if r.utility else None,
+                    "dv_magnitude_m_s": round(r.dv_magnitude_m_s, 3) if r.dv_magnitude_m_s else None,
+                    "covariance_source": r.covariance_source,
+                    "created_at": r.created_at,
+                }
+                for r in rows
+            ]
+    except Exception as e:
+        logging.error("[INGEST] store_planner_outputs error: %s", e)
+        return []

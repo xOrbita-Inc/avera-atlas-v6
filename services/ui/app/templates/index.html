@@ -193,6 +193,29 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 .speed-control input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;border-radius:50%;background:var(--accent);cursor:pointer;border:2px solid var(--bg-panel)}
 .speed-val{font-size:9px;color:var(--accent);font-family:'JetBrains Mono',monospace;min-width:28px}
 
+.store-modal-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:1000;align-items:center;justify-content:center}
+.store-modal-backdrop.open{display:flex}
+.store-modal{background:var(--bg-card);border:1px solid var(--border-accent);border-radius:6px;width:860px;max-width:95vw;max-height:85vh;display:flex;flex-direction:column;position:relative;overflow:hidden}
+.store-modal::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--accent-dim),transparent)}
+.store-modal-hdr{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid var(--border);font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--accent-dim);font-weight:500}
+.store-modal-close{background:none;border:1px solid var(--border);color:var(--text-dim);width:24px;height:24px;border-radius:3px;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;transition:all 0.2s}
+.store-modal-close:hover{border-color:var(--red);color:var(--red)}
+.store-modal-tabs{display:flex;gap:0;border-bottom:1px solid var(--border);flex-shrink:0}
+.store-tab{padding:8px 16px;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--text-dim);cursor:pointer;border-bottom:2px solid transparent;transition:all 0.2s;background:none;border-top:none;border-left:none;border-right:none;font-family:'JetBrains Mono',monospace}
+.store-tab:hover{color:var(--text)}
+.store-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.store-modal-body{padding:12px 16px;overflow-y:auto;flex:1}
+.store-table{width:100%;border-collapse:collapse;font-size:10px}
+.store-table th{font-size:8px;color:var(--accent-dim);letter-spacing:1px;text-transform:uppercase;padding:6px 8px;text-align:left;border-bottom:1px solid var(--border);font-weight:400;position:sticky;top:0;background:var(--bg-card)}
+.store-table td{padding:6px 8px;border-bottom:1px solid var(--border);color:var(--text);vertical-align:middle}
+.store-table tr:hover{background:var(--bg-hover)}
+.store-badge-real{display:inline-block;padding:2px 6px;border-radius:2px;font-size:8px;font-weight:700;letter-spacing:1px;background:rgba(61,220,132,0.12);color:var(--green);border:1px solid rgba(61,220,132,0.35)}
+.store-badge-surrogate{display:inline-block;padding:2px 6px;border-radius:2px;font-size:8px;font-weight:700;letter-spacing:1px;background:rgba(255,176,32,0.12);color:var(--amber);border:1px solid rgba(255,176,32,0.35)}
+.store-badge-maneuver{display:inline-block;padding:2px 6px;border-radius:2px;font-size:8px;font-weight:700;letter-spacing:1px;background:rgba(61,220,132,0.12);color:var(--green);border:1px solid rgba(61,220,132,0.35)}
+.store-badge-no-maneuver{display:inline-block;padding:2px 6px;border-radius:2px;font-size:8px;font-weight:700;letter-spacing:1px;background:rgba(107,109,138,0.12);color:var(--text-dim);border:1px solid var(--border)}
+.store-empty{text-align:center;padding:30px;color:var(--text-dim);font-size:10px;letter-spacing:0.5px}
+.store-count{font-size:9px;color:var(--text-dim);margin-bottom:8px}
+
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
@@ -263,6 +286,7 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
         <div class="poll-status" id="pollStatus"></div>
         <div style="font-size:8px;color:var(--text-dim);letter-spacing:0.5px;margin-bottom:4px">Last CDM fetch</div>
         <div style="font-size:9px;color:var(--text-dim)" id="pollLastResult">No poll run yet</div>
+        <button class="poll-btn" onclick="openStoreModal()" style="width:100%;margin-top:8px">VIEW CDM STORE</button>
       </div>
     </div>
     <div class="panel">
@@ -1932,6 +1956,132 @@ function globeFocusOnConj(conj){
   animStep();
 }
 
+// ==========================================================
+// CDM STORE VIEWER MODAL
+// ==========================================================
+let storeCurrentTab='cdm';
+
+async function openStoreModal(){
+  document.getElementById('storeBackdrop').classList.add('open');
+  await loadStoreData();
+}
+
+function closeStoreModal(){
+  document.getElementById('storeBackdrop').classList.remove('open');
+}
+
+function switchStoreTab(tab){
+  storeCurrentTab=tab;
+  document.getElementById('storeTabCdm').classList.toggle('active',tab==='cdm');
+  document.getElementById('storeTabOutputs').classList.toggle('active',tab==='outputs');
+  loadStoreData();
+}
+
+async function loadStoreData(){
+  const body=document.getElementById('storeModalBody');
+  body.innerHTML='<div class="store-empty"><span class="spinner"></span> Loading...</div>';
+  try{
+    const resp=await fetch('/api/ingest/store');
+    if(!resp.ok){
+      body.innerHTML='<div class="store-empty">Error loading store data ('+resp.status+')</div>';
+      return;
+    }
+    const data=await resp.json();
+    if(storeCurrentTab==='cdm'){
+      renderCdmRecords(data.cdm_records||[]);
+    } else {
+      renderPlannerOutputs(data.planner_outputs||[]);
+    }
+  } catch(e){
+    body.innerHTML='<div class="store-empty">Ingest service unavailable</div>';
+  }
+}
+
+function renderCdmRecords(records){
+  const body=document.getElementById('storeModalBody');
+  if(!records.length){
+    body.innerHTML='<div class="store-empty">No CDM records in store.<br>Use INJECT EXAMPLE CDM or POLL to populate.</div>';
+    return;
+  }
+  let html='<div class="store-count">'+records.length+' record'+(records.length!==1?'s':'')+'</div>';
+  html+='<table class="store-table"><thead><tr>';
+  html+='<th>ID</th><th>Primary</th><th>Secondary</th><th>TCA (UTC)</th><th>Miss (m)</th><th>Pc</th><th>Covariance</th><th>Ingested</th>';
+  html+='</tr></thead><tbody>';
+  records.forEach(r=>{
+    const covBadge=r.covariance_source==='real_cdm'
+      ?'<span class="store-badge-real">REAL CDM</span>'
+      :'<span class="store-badge-surrogate">SURROGATE</span>';
+    const tca=r.tca_utc?r.tca_utc.replace('T',' ').substring(0,19):'--';
+    const ingested=r.ingested_at?r.ingested_at.replace('T',' ').substring(0,19):'--';
+    const pc=r.pc!=null?(parseFloat(r.pc)>0?parseFloat(r.pc).toExponential(2):'0.00'):'--';
+    const miss=r.miss_distance_m!=null?r.miss_distance_m.toFixed(0):'--';
+    html+='<tr>';
+    html+='<td style="color:var(--text-dim)">'+r.id+'</td>';
+    html+='<td style="color:var(--accent)">'+r.primary_norad+'</td>';
+    html+='<td>'+r.secondary_norad+'</td>';
+    html+='<td style="color:var(--text-dim);font-size:9px">'+tca+'</td>';
+    html+='<td>'+miss+'</td>';
+    html+='<td>'+pc+'</td>';
+    html+='<td>'+covBadge+'</td>';
+    html+='<td style="color:var(--text-dim);font-size:9px">'+ingested+'</td>';
+    html+='</tr>';
+  });
+  html+='</tbody></table>';
+  body.innerHTML=html;
+}
+
+function renderPlannerOutputs(records){
+  const body=document.getElementById('storeModalBody');
+  if(!records.length){
+    body.innerHTML='<div class="store-empty">No planner outputs in store.<br>Evaluate a conjunction with a NORAD ID set to generate audit records.</div>';
+    return;
+  }
+  let html='<div class="store-count">'+records.length+' record'+(records.length!==1?'s':'')+'</div>';
+  html+='<table class="store-table"><thead><tr>';
+  html+='<th>ID</th><th>CDM Ref</th><th>Conjunction</th><th>Recommendation</th><th>Utility</th><th>||dv|| (m/s)</th><th>Covariance</th><th>Timestamp</th>';
+  html+='</tr></thead><tbody>';
+  records.forEach(r=>{
+    const recBadge=r.recommendation==='maneuver'
+      ?'<span class="store-badge-maneuver">MANEUVER</span>'
+      :'<span class="store-badge-no-maneuver">NO MANEUVER</span>';
+    const covBadge=r.covariance_source==='real_cdm'
+      ?'<span class="store-badge-real">REAL CDM</span>'
+      :'<span class="store-badge-surrogate">SURROGATE</span>';
+    const ts=r.created_at?r.created_at.replace('T',' ').substring(0,19):'--';
+    html+='<tr>';
+    html+='<td style="color:var(--text-dim)">'+r.id+'</td>';
+    html+='<td style="color:var(--text-dim)">'+( r.cdm_record_id||'--')+'</td>';
+    html+='<td style="font-size:9px">'+( r.conjunction_id||'--')+'</td>';
+    html+='<td>'+recBadge+'</td>';
+    html+='<td style="color:var(--accent)">'+( r.utility!=null?r.utility.toFixed(4):'--')+'</td>';
+    html+='<td>'+( r.dv_magnitude_m_s!=null?r.dv_magnitude_m_s.toFixed(3):'--')+'</td>';
+    html+='<td>'+covBadge+'</td>';
+    html+='<td style="color:var(--text-dim);font-size:9px">'+ts+'</td>';
+    html+='</tr>';
+  });
+  html+='</tbody></table>';
+  body.innerHTML=html;
+}
+
+document.addEventListener('keydown',function(e){
+  if(e.key==='Escape'&&document.getElementById('storeBackdrop').classList.contains('open'))closeStoreModal();
+});
+
 </script>
+<div class="store-modal-backdrop" id="storeBackdrop" onclick="if(event.target===this)closeStoreModal()">
+  <div class="store-modal">
+    <div class="store-modal-hdr">
+      <span>CDM Store &mdash; SQLite Record Viewer</span>
+      <button class="store-modal-close" onclick="closeStoreModal()">&times;</button>
+    </div>
+    <div class="store-modal-tabs">
+      <button class="store-tab active" id="storeTabCdm" onclick="switchStoreTab('cdm')">CDM Records</button>
+      <button class="store-tab" id="storeTabOutputs" onclick="switchStoreTab('outputs')">Planner Outputs</button>
+    </div>
+    <div class="store-modal-body" id="storeModalBody">
+      <div class="store-empty">Loading...</div>
+    </div>
+  </div>
+</div>
 </body>
 </html>

@@ -150,6 +150,35 @@ async def ingest_inject(request: Request):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+@app.get("/api/ingest/store")
+async def ingest_store():
+    """Fetch all CDM records and planner outputs from the ingest SQLite store.
+
+    Returns both tables for display in the CDM Store viewer modal.
+    """
+    try:
+        resp_cdm = requests.get(
+            f"{INGEST_SERVICE_URL}/store/cdm_records",
+            timeout=5
+        )
+        resp_outputs = requests.get(
+            f"{INGEST_SERVICE_URL}/store/planner_outputs",
+            timeout=5
+        )
+        cdm_data = resp_cdm.json() if resp_cdm.ok else []
+        output_data = resp_outputs.json() if resp_outputs.ok else []
+        return JSONResponse(content={
+            "cdm_records": cdm_data,
+            "planner_outputs": output_data
+        })
+    except requests.exceptions.ConnectionError:
+        return JSONResponse(status_code=503, content={
+            "error": "Ingest service unavailable"
+        })
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 # ---------- Detector proxy ----------
 
 @app.post("/api/detect")
