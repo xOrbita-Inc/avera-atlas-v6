@@ -60,6 +60,20 @@ class ClassifyResult(BaseModel):
     risk_class:    str
     all_probs:     dict
     inference_ms:  float
+    detected_modality: str = Field(
+        default="UNKNOWN",
+        description=(
+            "Auto-detected modality via FFT "
+            "frequency analysis"
+        )
+    )
+    freq_ratio: float = Field(
+        default=0.0,
+        description=(
+            "FFT high/low frequency ratio used "
+            "for modality detection"
+        )
+    )
 
 
 async def push_to_tracker(payload: dict):
@@ -157,6 +171,10 @@ async def classify_spectrogram(
         risk_class=result["risk_class"],
         all_probs=result["all_probs"],
         inference_ms=result["inference_ms"],
+        detected_modality=result.get(
+            "detected_modality", "UNKNOWN"
+        ),
+        freq_ratio=result.get("freq_ratio", 0.0),
     )
 
     background_tasks.add_task(
