@@ -130,6 +130,26 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 .detect-empty{color:var(--text-dim);font-size:10px;text-align:center;padding:12px}
 #pDetect.clickable{cursor:pointer}
 #pDetect.clickable:hover{color:var(--accent);text-shadow:0 0 8px rgba(79,248,232,0.4)}
+.detect-tabs{display:flex;gap:0;border-bottom:1px solid var(--border);flex-shrink:0}
+.detect-tab{flex:1;padding:8px 12px;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--text-dim);background:none;border:none;cursor:pointer;font-family:inherit;transition:all 0.2s;border-bottom:2px solid transparent}
+.detect-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.detect-tab:hover:not(.active){color:var(--text)}
+.detect-tab-panel{display:none}
+.detect-tab-panel.active{display:block}
+.phys-modality{display:flex;gap:8px;margin-bottom:12px}
+.phys-mod-btn{flex:1;padding:6px;font-size:9px;letter-spacing:1px;text-transform:uppercase;background:none;border:1px solid var(--border);color:var(--text-dim);cursor:pointer;font-family:inherit;border-radius:3px;transition:all 0.2s}
+.phys-mod-btn.active{border-color:var(--accent-dim);color:var(--accent);background:rgba(79,248,232,0.05)}
+.phys-results{margin-top:12px}
+.phys-class-row{display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border)}
+.phys-class-label{width:120px;font-size:9px;letter-spacing:0.5px;text-transform:uppercase;color:var(--text-dim);flex-shrink:0}
+.phys-class-bar-wrap{flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden}
+.phys-class-bar{height:100%;border-radius:3px;transition:width 0.4s ease}
+.phys-class-pct{width:40px;font-size:9px;text-align:right;color:var(--text-dim);flex-shrink:0}
+.phys-result-header{display:flex;align-items:center;gap:10px;padding:10px 0 8px;border-bottom:1px solid var(--border-accent);margin-bottom:10px}
+.phys-result-class{font-size:14px;letter-spacing:2px;font-weight:500}
+.phys-result-conf{font-size:10px;color:var(--text-dim)}
+.phys-result-ms{font-size:9px;color:var(--text-dim);margin-left:auto}
+.phys-empty{color:var(--text-dim);font-size:10px;text-align:center;padding:12px;letter-spacing:0.5px}
 
 .info-modal-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:1000;align-items:center;justify-content:center}
 .info-modal-backdrop.open{display:flex}
@@ -390,16 +410,34 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
       <span>Detector &mdash; Object Classification</span>
       <button class="detect-modal-close" onclick="closeDetectModal()">&times;</button>
     </div>
+    <div class="detect-tabs">
+      <button class="detect-tab active" id="tabSwir" onclick="switchDetectTab('swir')">SWIR / Optical</button>
+      <button class="detect-tab" id="tabPhysics" onclick="switchDetectTab('physics')">Physics Sensor</button>
+    </div>
     <div class="detect-modal-body">
-      <div class="detect-dropzone" id="detectDropzone" onclick="document.getElementById('detectFileInput').click()">
-        <input type="file" id="detectFileInput" accept="image/*">
-        DROP IMAGE HERE OR CLICK TO UPLOAD
+      <div class="detect-tab-panel active" id="panelSwir">
+        <div class="detect-dropzone" id="detectDropzone" onclick="document.getElementById('detectFileInput').click()">
+          <input type="file" id="detectFileInput" accept="image/*">
+          DROP IMAGE HERE OR CLICK TO UPLOAD
+        </div>
+        <div class="detect-canvas-wrap" id="detectCanvasWrap" style="display:none">
+          <canvas id="detectCanvas"></canvas>
+        </div>
+        <div class="detect-results" id="detectResults"></div>
+        <button class="run-btn" id="detectNewBtn" style="display:none;margin-top:10px" onclick="resetDetectModal()">UPLOAD ANOTHER IMAGE</button>
       </div>
-      <div class="detect-canvas-wrap" id="detectCanvasWrap" style="display:none">
-        <canvas id="detectCanvas"></canvas>
+      <div class="detect-tab-panel" id="panelPhysics">
+        <div class="phys-modality">
+          <button class="phys-mod-btn active" id="modEM" onclick="setPhysModality('EM')">EM / RF</button>
+          <button class="phys-mod-btn" id="modTHERMAL" onclick="setPhysModality('THERMAL')">Thermal / IR</button>
+        </div>
+        <div class="detect-dropzone" id="physDropzone" onclick="document.getElementById('physFileInput').click()">
+          <input type="file" id="physFileInput" accept="image/*">
+          DROP 256&times;256 SPECTROGRAM HERE OR CLICK TO UPLOAD
+        </div>
+        <div class="phys-results" id="physResults"></div>
+        <button class="run-btn" id="physNewBtn" style="display:none;margin-top:10px" onclick="resetPhysPanel()">UPLOAD ANOTHER SPECTROGRAM</button>
       </div>
-      <div class="detect-results" id="detectResults"></div>
-      <button class="run-btn" id="detectNewBtn" style="display:none;margin-top:10px" onclick="resetDetectModal()">UPLOAD ANOTHER IMAGE</button>
     </div>
   </div>
 </div>
@@ -860,7 +898,8 @@ async function refreshPipeline(){
   try{
     const resp=await fetch('/api/pipeline/status');const data=await resp.json();const s=data.services||{};
     setNode('pPlan',s.planner?.status==='online');setNode('pTrack',s.tracker?.status==='online');
-    setNode('pProp',s.propagator?.status!=='offline');setNode('pAtlas',true);setNode('pIngest',true);setNode('pDetect',true);
+    setNode('pProp',s.propagator?.status!=='offline');setNode('pAtlas',true);setNode('pIngest',true);
+    setNode('pDetect',s.physics_classifier?.status==='online'||s.planner?.status==='online');
     if(s.planner?.version)document.getElementById('plannerVer').textContent='v'+s.planner.version;
   }catch(e){}
 }
@@ -1437,6 +1476,143 @@ function resetDetectModal(){
     if(e.key==='Escape'&&document.getElementById('detectBackdrop').classList.contains('open'))closeDetectModal();
   });
 })();
+
+// PHYSICS SENSOR TAB
+// ==========================================================
+let physModality='EM';
+
+function switchDetectTab(tab){
+  document.getElementById('tabSwir').classList.toggle('active',tab==='swir');
+  document.getElementById('tabPhysics').classList.toggle('active',tab==='physics');
+  document.getElementById('panelSwir').classList.toggle('active',tab==='swir');
+  document.getElementById('panelPhysics').classList.toggle('active',tab==='physics');
+  if(tab==='swir')resetDetectModal();
+  else resetPhysPanel();
+}
+
+function setPhysModality(mod){
+  physModality=mod;
+  document.getElementById('modEM').classList.toggle('active',mod==='EM');
+  document.getElementById('modTHERMAL').classList.toggle('active',mod==='THERMAL');
+}
+
+function resetPhysPanel(){
+  document.getElementById('physDropzone').style.display='';
+  document.getElementById('physResults').innerHTML='';
+  document.getElementById('physNewBtn').style.display='none';
+}
+
+(function initPhysModal(){
+  const dropzone=document.getElementById('physDropzone');
+  const fileInput=document.getElementById('physFileInput');
+
+  dropzone.addEventListener('dragover',e=>{
+    e.preventDefault();dropzone.classList.add('dragover');
+  });
+  dropzone.addEventListener('dragleave',()=>
+    dropzone.classList.remove('dragover')
+  );
+  dropzone.addEventListener('drop',e=>{
+    e.preventDefault();dropzone.classList.remove('dragover');
+    if(e.dataTransfer.files.length)
+      handlePhysFile(e.dataTransfer.files[0]);
+  });
+  fileInput.addEventListener('change',()=>{
+    if(fileInput.files.length)
+      handlePhysFile(fileInput.files[0]);
+    fileInput.value='';
+  });
+})();
+
+function handlePhysFile(file){
+  if(!file.type.startsWith('image/'))return;
+  const reader=new FileReader();
+  reader.onload=async function(){
+    const b64=reader.result;
+    document.getElementById('physDropzone').style.display='none';
+    document.getElementById('physResults').innerHTML=
+      '<div class="phys-empty"><span class="spinner"></span>Classifying...</div>';
+
+    try{
+      const resp=await fetch('/api/detect/physics',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+          base64_data:b64,
+          modality:physModality,
+          sensor_id:'ui_upload',
+          image_id:'phys-'+Date.now()
+        })
+      });
+      const data=await resp.json();
+      if(data.error){
+        document.getElementById('physResults').innerHTML=
+          '<div class="phys-empty">Error: '+data.error+'</div>';
+        document.getElementById('physNewBtn').style.display='';
+        return;
+      }
+      renderPhysResults(data);
+      document.getElementById('physNewBtn').style.display='';
+    }catch(e){
+      document.getElementById('physResults').innerHTML=
+        '<div class="phys-empty">Physics classifier unavailable</div>';
+      document.getElementById('physNewBtn').style.display='';
+    }
+  };
+  reader.readAsDataURL(file);
+}
+
+function renderPhysResults(data){
+  const el=document.getElementById('physResults');
+  const classColors={
+    'ACTIVE_SAT':'var(--accent)',
+    'DEAD_SAT':'var(--text-dim)',
+    'DEBRIS_SMALL':'var(--red)',
+    'DEBRIS_LARGE':'var(--amber)',
+    'MANEUVERING':'var(--green)'
+  };
+  const barColors={
+    'ACTIVE_SAT':'#4ff8e8',
+    'DEAD_SAT':'#6b6d8a',
+    'DEBRIS_SMALL':'#ff3b5c',
+    'DEBRIS_LARGE':'#ffb020',
+    'MANEUVERING':'#3ddc84'
+  };
+  const cls=data.class_label;
+  const conf=(data.confidence*100).toFixed(1);
+  const ms=data.inference_ms?.toFixed(1)||'--';
+  const mod=data.modality||physModality;
+  const allProbs=data.all_probs||{};
+
+  const classOrder=[
+    'ACTIVE_SAT','DEAD_SAT',
+    'DEBRIS_SMALL','DEBRIS_LARGE','MANEUVERING'
+  ];
+
+  const rows=classOrder.map(c=>{
+    const pct=((allProbs[c]||0)*100).toFixed(1);
+    const barW=((allProbs[c]||0)*100).toFixed(2);
+    const isTop=c===cls;
+    const color=barColors[c]||'#6b6d8a';
+    return'<div class="phys-class-row">'+
+      '<div class="phys-class-label" style="color:'+(isTop?classColors[c]:'var(--text-dim)')+
+      ';font-weight:'+(isTop?'500':'400')+'">'+c.replace('_',' ')+'</div>'+
+      '<div class="phys-class-bar-wrap">'+
+      '<div class="phys-class-bar" style="width:'+barW+'%;background:'+color+
+      ';opacity:'+(isTop?'1':'0.4')+'"></div></div>'+
+      '<div class="phys-class-pct" style="color:'+(isTop?classColors[c]:'var(--text-dim)')+'">'+
+      pct+'%</div></div>';
+  }).join('');
+
+  el.innerHTML=
+    '<div class="phys-result-header">'+
+    '<div class="phys-result-class" style="color:'+
+    (classColors[cls]||'var(--text)')+'">'+
+    cls.replace('_',' ')+'</div>'+
+    '<div class="phys-result-conf">'+conf+'% confidence</div>'+
+    '<div class="phys-result-ms">'+ms+'ms &mdash; '+mod+'</div>'+
+    '</div>'+rows;
+}
 
 function handleDetectFile(file){
   if(!file.type.startsWith('image/')){return}
