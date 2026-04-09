@@ -19,6 +19,18 @@ services:
     depends_on: [tracker]
     restart: unless-stopped
 
+  physics-classifier:
+    build:
+      context: ./services/physics-classifier
+    image: avera/physics-classifier:v1
+    container_name: avera-physics-classifier
+    ports: ["8003:8000"]
+    environment:
+      - TRACKER_HOST=tracker
+      - TRACKER_PORT=8000
+    depends_on: [tracker]
+    restart: unless-stopped
+
   tracker:
     build: {context: ./services/tracker}
     image: avera/tracker:v6
@@ -59,11 +71,12 @@ services:
     ports: ["8080:8000"]
     environment:
       - SWIR_SERVICE_URL=http://detector:8000/predict
+      - PHYSICS_CLASSIFIER_URL=http://physics-classifier:8000/predict
       - TRACKER_SERVICE_URL=http://tracker:8000
       - PLANNER_SERVICE_URL=http://planner:8060
       - INGEST_SERVICE_URL=http://ingest:8000
       - DATA_DIR=/data/planner_artifacts
-    depends_on: [detector, tracker, planner]
+    depends_on: [detector, tracker, planner, physics-classifier]
     volumes: [planner_data:/data/planner_artifacts]
     restart: unless-stopped
 
