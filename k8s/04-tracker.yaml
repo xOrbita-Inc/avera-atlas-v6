@@ -1,32 +1,40 @@
+# AVERA-ATLAS Tracker Service
+# Multi-sensor fusion and track management.
+# Receives detections from detector and
+# physics-classifier services.
+# Sits between detectors and propagator in pipeline:
+#   detector → [TRACKER] → propagator
+#   physics-classifier → [TRACKER] → propagator
+#
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: ui
+  name: tracker
   namespace: avera-system
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: ui
+      app: tracker
   template:
     metadata:
       labels:
-        app: ui
+        app: tracker
     spec:
       containers:
-      - name: ui
-        image: avera/ui:v1
+      - name: tracker
+        image: avera/tracker:v6
         imagePullPolicy: Never
         ports:
         - containerPort: 8000
         env:
-        - name: SWIR_SERVICE_URL
-          value: "http://detector-service:80/predict"
+        - name: DATA_DIR
+          value: "/data/planner_artifacts"
         volumeMounts:
-        - name: shared-data
+        - name: planner-data
           mountPath: /data/planner_artifacts
       volumes:
-      - name: shared-data
+      - name: planner-data
         hostPath:
           path: /opt/avera/data
           type: DirectoryOrCreate
@@ -34,14 +42,13 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: ui-service
+  name: tracker-service
   namespace: avera-system
 spec:
   selector:
-    app: ui
+    app: tracker
   ports:
     - protocol: TCP
       port: 80
       targetPort: 8000
-      nodePort: 30080
-  type: NodePort
+  type: ClusterIP

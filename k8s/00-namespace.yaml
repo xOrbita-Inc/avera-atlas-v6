@@ -1,4 +1,9 @@
+# AVERA-ATLAS Kubernetes Namespace
+# Apply first: kubectl apply -f k8s/00-namespace.yaml
 apiVersion: v1
 kind: Namespace
 metadata:
   name: avera-system
+  labels:
+    app: avera-atlas
+    version: v6

@@ -1,0 +1,36 @@
+# AVERA-ATLAS Propagator Service
+# Keplerian two-body orbital propagation with SGP4.
+# File-watching service — reads states_multi.npz,
+# writes prop_multi.npz to shared volume.
+# No HTTP endpoints — no Service definition needed.
+#
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: propagator
+  namespace: avera-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: propagator
+  template:
+    metadata:
+      labels:
+        app: propagator
+    spec:
+      containers:
+      - name: propagator
+        image: avera/propagator:v6
+        imagePullPolicy: Never
+        env:
+        - name: DATA_DIR
+          value: "/data/planner_artifacts"
+        volumeMounts:
+        - name: planner-data
+          mountPath: /data/planner_artifacts
+      volumes:
+      - name: planner-data
+        hostPath:
+          path: /opt/avera/data
+          type: DirectoryOrCreate

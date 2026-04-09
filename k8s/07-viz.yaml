@@ -1,3 +1,9 @@
+# AVERA-ATLAS Visualization Service
+# Generates MP4 trajectory videos and PNG summary
+# charts from propagator output artifacts.
+# File-watching service — no HTTP endpoints.
+# No Service definition needed.
+#
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -15,16 +21,16 @@ spec:
     spec:
       containers:
       - name: viz
-        image: avera/viz:v1
+        image: avera/viz:v6
         imagePullPolicy: Never
         env:
         - name: DATA_DIR
           value: "/data/planner_artifacts"
         volumeMounts:
-        - name: shared-data
+        - name: planner-data
           mountPath: /data/planner_artifacts
       volumes:
-      - name: shared-data
+      - name: planner-data
         hostPath:
           path: /opt/avera/data
           type: DirectoryOrCreate

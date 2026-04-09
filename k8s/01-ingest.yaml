@@ -1,0 +1,72 @@
+# AVERA-ATLAS Ingest Service
+# Polls Space-Track for CDMs and persists to SQLite.
+# Requires Kubernetes Secret: spacetrack-credentials
+#
+# Create secret before deploying:
+#   kubectl create secret generic spacetrack-credentials \
+#     --from-literal=user=YOUR_USER \
+#     --from-literal=pass=YOUR_PASS \
+#     -n avera-system
+#
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingest
+  namespace: avera-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ingest
+  template:
+    metadata:
+      labels:
+        app: ingest
+    spec:
+      containers:
+      - name: ingest
+        image: avera/ingest:v6
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8000
+        env:
+        - name: OUTPUT_DIR
+          value: "/data/planner_artifacts"
+        - name: SPACETRACK_USER
+          valueFrom:
+            secretKeyRef:
+              name: spacetrack-credentials
+              key: user
+        - name: SPACETRACK_PASS
+          valueFrom:
+            secretKeyRef:
+              name: spacetrack-credentials
+              key: pass
+        volumeMounts:
+        - name: planner-data
+          mountPath: /data/planner_artifacts
+        - name: cdm-data
+          mountPath: /data/cdm_store
+      volumes:
+      - name: planner-data
+        hostPath:
+          path: /opt/avera/data
+          type: DirectoryOrCreate
+      - name: cdm-data
+        hostPath:
+          path: /opt/avera/cdm
+          type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingest-service
+  namespace: avera-system
+spec:
+  selector:
+    app: ingest
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8000
+  type: ClusterIP

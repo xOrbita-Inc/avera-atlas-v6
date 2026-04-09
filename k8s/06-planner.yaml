@@ -1,0 +1,44 @@
+# AVERA-ATLAS APS Planner Service
+# Avoidance Decision System — conjunction evaluation
+# and maneuver recommendation. Core APS logic lives
+# in decision_model.py (Sreerjit Sarma).
+# Exposes OpenAPI at port 8060.
+#
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: planner
+  namespace: avera-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: planner
+  template:
+    metadata:
+      labels:
+        app: planner
+    spec:
+      containers:
+      - name: planner
+        image: avera/planner:v6
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8060
+        env:
+        - name: INGEST_SERVICE_URL
+          value: "http://ingest-service:80"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: planner-service
+  namespace: avera-system
+spec:
+  selector:
+    app: planner
+  ports:
+    - protocol: TCP
+      port: 8060
+      targetPort: 8060
+  type: ClusterIP
