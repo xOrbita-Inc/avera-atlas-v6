@@ -21,6 +21,14 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 PLANNER_SERVICE_URL = os.getenv("PLANNER_SERVICE_URL", "http://planner:8060")
 TRACKER_SERVICE_URL = os.getenv("TRACKER_SERVICE_URL", "http://tracker:8000")
 DETECTOR_SERVICE_URL = os.getenv("SWIR_SERVICE_URL", "http://detector:8000/predict")
+PHYSICS_CLASSIFIER_URL = os.getenv(
+    "PHYSICS_CLASSIFIER_URL",
+    "http://physics-classifier:8000/predict"
+)
+PHYSICS_CLASSIFIER_HEALTH_URL = os.getenv(
+    "PHYSICS_CLASSIFIER_URL",
+    "http://physics-classifier:8000"
+).replace("/predict", "") + "/health"
 INGEST_SERVICE_URL = os.getenv("INGEST_SERVICE_URL", "http://ingest:8000")
 DATA_DIR = os.getenv("DATA_DIR", "/data/planner_artifacts")
 PROP_ARTIFACT_PATH = os.path.join(DATA_DIR, "prop_multi.npz")
@@ -224,6 +232,42 @@ async def detect_image(request: Request):
         })
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/api/detect/physics")
+async def classify_physics(request: Request):
+    """Proxy a physics spectrogram classification
+    request to the physics-classifier service.
+
+    Accepts base64-encoded 256x256 PNG spectrogram.
+    Returns 5-class orbital object classification
+    with confidence scores per class.
+
+    Modality should be set by caller: EM or THERMAL.
+    """
+    body = await request.json()
+    try:
+        resp = requests.post(
+            PHYSICS_CLASSIFIER_URL,
+            json=body,
+            timeout=10
+        )
+        return JSONResponse(
+            status_code=resp.status_code,
+            content=resp.json()
+        )
+    except requests.exceptions.ConnectionError:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "Physics classifier unavailable"
+            }
+        )
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
 
 
 # ---------- Conjunction data from propagator artifacts ----------
@@ -495,6 +539,25 @@ async def pipeline_status():
         }
     except Exception:
         services["tracker"] = {"status": "offline"}
+
+    # Physics Classifier
+    try:
+        r = requests.get(
+            PHYSICS_CLASSIFIER_HEALTH_URL,
+            timeout=2
+        )
+        d = r.json()
+        services["physics_classifier"] = {
+            "status":       "online",
+            "model_loaded": d.get(
+                "model_loaded", False
+            ),
+            "version":      d.get("version"),
+        }
+    except Exception:
+        services["physics_classifier"] = {
+            "status": "offline"
+        }
 
     # Propagator (check if artifacts exist and are recent)
     prop_exists = os.path.exists(PROP_ARTIFACT_PATH)
