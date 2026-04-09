@@ -1524,55 +1524,6 @@ function resetPhysPanel(){
   });
 })();
 
-function detectModalityFromImage(imgElement){
-  // FFT-based modality detection matching
-  // classifier.py detect_modality()
-  // freq_ratio > 0.3541 → EM, else THERMAL
-  const canvas=document.createElement('canvas');
-  const size=256;
-  canvas.width=size;canvas.height=size;
-  const ctx=canvas.getContext('2d');
-  ctx.drawImage(imgElement,0,0,size,size);
-  const data=ctx.getImageData(0,0,size,size).data;
-
-  // Convert to grayscale float [0,1]
-  const gray=new Float32Array(size*size);
-  for(let i=0;i<size*size;i++){
-    gray[i]=(0.299*data[i*4]+
-             0.587*data[i*4+1]+
-             0.114*data[i*4+2])/255.0;
-  }
-
-  // Simple frequency proxy: compare local variance
-  // in high-frequency blocks vs overall variance
-  // This approximates FFT high/low freq ratio
-  // without a full FFT implementation in JS
-  const blockSize=8;
-  let highFreqSum=0,blockCount=0;
-  for(let y=0;y<size-blockSize;y+=blockSize){
-    for(let x=0;x<size-blockSize;x+=blockSize){
-      let mean=0;
-      for(let dy=0;dy<blockSize;dy++)
-        for(let dx=0;dx<blockSize;dx++)
-          mean+=gray[(y+dy)*size+(x+dx)];
-      mean/=blockSize*blockSize;
-      let variance=0;
-      for(let dy=0;dy<blockSize;dy++)
-        for(let dx=0;dx<blockSize;dx++){
-          const diff=gray[(y+dy)*size+(x+dx)]-mean;
-          variance+=diff*diff;
-        }
-      highFreqSum+=variance/(blockSize*blockSize);
-      blockCount++;
-    }
-  }
-  const localVariance=highFreqSum/blockCount;
-  // EM has high local variance due to radar speckle
-  // THERMAL has low local variance (smooth gradients)
-  // Threshold calibrated to match Python FFT results
-  return localVariance > 0.003 ? 'EM' : 'THERMAL';
-}
-
 function handlePhysFile(file){
   if(!file.type.startsWith('image/'))return;
   const reader=new FileReader();
@@ -1582,31 +1533,27 @@ function handlePhysFile(file){
     document.getElementById('physResults').innerHTML=
       '<div class="phys-empty"><span class="spinner"></span>Classifying...</div>';
 
-    // Auto-detect modality from image
-    const img=new window.Image();
-    img.onload=async function(){
-      const autoMod=detectModalityFromImage(img);
-      setPhysModality(autoMod);
-      // Brief visual pause so user sees the toggle
-      await new Promise(r=>setTimeout(r,300));
-
-      try{
-        const resp=await fetch('/api/detect/physics',{
-          method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({
-            base64_data:b64,
-            modality:autoMod,
-            sensor_id:'ui_upload',
-            image_id:'phys-'+Date.now()
-          })
-        });
+    try{
+      const resp=await fetch('/api/detect/physics',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+          base64_data:b64,
+          modality:physModality,
+          sensor_id:'ui_upload',
+          image_id:'phys-'+Date.now()
+        })
+      });
       const data=await resp.json();
       if(data.error){
         document.getElementById('physResults').innerHTML=
           '<div class="phys-empty">Error: '+data.error+'</div>';
         document.getElementById('physNewBtn').style.display='';
         return;
+      }
+      if(data.detected_modality&&
+         data.detected_modality!=='UNKNOWN'){
+        setPhysModality(data.detected_modality);
       }
       renderPhysResults(data);
       document.getElementById('physNewBtn').style.display='';
@@ -1615,8 +1562,6 @@ function handlePhysFile(file){
         '<div class="phys-empty">Physics classifier unavailable</div>';
       document.getElementById('physNewBtn').style.display='';
     }
-    };
-    img.src=b64;
   };
   reader.readAsDataURL(file);
 }
