@@ -1,0 +1,178 @@
+# AVERA-ATLAS Production Compose File
+# =====================================
+# Used on the VPS at averaatlas.space
+# Includes Traefik routing, TLS, and BasicAuth.
+#
+# DO NOT use this file for local development.
+# Use docker-compose.yaml for local development.
+#
+# VPS deployment:
+#   docker compose -f docker-compose.prod.yaml up -d
+#
+# Required environment variables on VPS:
+#   SPACETRACK_USER — Space-Track.org username
+#   SPACETRACK_PASS — Space-Track.org password
+#   DMUI_DIR        — Path to orbital-dmui repo
+#                     (default: /orbital-dmui)
+#
+# Required external Docker network:
+#   traefik-proxy (managed by Traefik on VPS)
+#
+# BasicAuth credentials are hashed inline.
+# To regenerate: htpasswd -nb admin YOUR_PASSWORD
+#
+services:
+  ingest:
+    build: {context: ./services/ingest}
+    image: avera/ingest:v6
+    ports: ["8001:8000"]
+    environment:
+      - OUTPUT_DIR=/data/planner_artifacts
+      - SPACETRACK_USER=${SPACETRACK_USER}
+      - SPACETRACK_PASS=${SPACETRACK_PASS}
+    volumes:
+      - planner_data:/data/planner_artifacts
+      - cdm_data:/data/cdm_store
+    restart: unless-stopped
+
+  detector:
+    build: {context: ./services/detector}
+    image: avera/detector:v6
+    ports: ["8000:8000"]
+    depends_on: [tracker]
+    restart: unless-stopped
+
+  physics-classifier:
+    build:
+      context: ./services/physics-classifier
+    image: avera/physics-classifier:v1
+    container_name: avera-physics-classifier
+    ports: ["8003:8000"]
+    environment:
+      - TRACKER_HOST=tracker
+      - TRACKER_PORT=8000
+    depends_on: [tracker]
+    restart: unless-stopped
+
+  tracker:
+    build: {context: ./services/tracker}
+    image: avera/tracker:v6
+    ports: ["8002:8000"]
+    environment: [DATA_DIR=/data/planner_artifacts]
+    volumes: [planner_data:/data/planner_artifacts]
+    depends_on: [ingest]
+    restart: unless-stopped
+
+  propagator:
+    build: {context: ./services/propagator}
+    image: avera/propagator:v6
+    environment: [DATA_DIR=/data/planner_artifacts]
+    volumes: [planner_data:/data/planner_artifacts]
+    depends_on: [tracker]
+    restart: unless-stopped
+
+  planner:
+    build: {context: ./services/planner}
+    image: avera/planner:v6
+    ports: ["8060:8060"]
+    environment:
+      - INGEST_SERVICE_URL=http://ingest:8000
+    depends_on: [propagator]
+    restart: unless-stopped
+
+  viz:
+    build: {context: ./services/viz}
+    image: avera/viz:v6
+    environment: [DATA_DIR=/data/planner_artifacts]
+    volumes: [planner_data:/data/planner_artifacts]
+    depends_on: [propagator]
+    restart: unless-stopped
+
+  ui:
+    build: {context: ./services/ui}
+    image: avera/ui:v6
+    ports: ["8080:8000"]
+    environment:
+      - SWIR_SERVICE_URL=http://detector:8000/predict
+      - PHYSICS_CLASSIFIER_URL=http://physics-classifier:8000/predict
+      - TRACKER_SERVICE_URL=http://tracker:8000
+      - PLANNER_SERVICE_URL=http://planner:8060
+      - INGEST_SERVICE_URL=http://ingest:8000
+      - DATA_DIR=/data/planner_artifacts
+    depends_on: [detector, tracker, planner,
+                 physics-classifier]
+    volumes: [planner_data:/data/planner_artifacts]
+    restart: unless-stopped
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-proxy
+      - traefik.http.routers.avera-ui.rule=Host(`averaatlas.space`) || Host(`www.averaatlas.space`)
+      - traefik.http.routers.avera-ui.entrypoints=websecure
+      - traefik.http.routers.avera-ui.tls=true
+      - traefik.http.routers.avera-ui.tls.certresolver=mytlschallenge
+      - traefik.http.services.avera-ui.loadbalancer.server.port=8000
+      - "traefik.http.middlewares.avera-auth.basicauth.users=admin:$$apr1$$onAN1zCS$$qdDH2yREWDJTUBCtHyBtf."
+      - "traefik.http.routers.avera-ui.middlewares=avera-auth@docker"
+    networks:
+      - default
+      - traefik-proxy
+
+  voice:
+    build: {context: ./services/voice}
+    container_name: avera-atlas-voice
+    restart: unless-stopped
+    networks:
+      - traefik-proxy
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.avera-voice.rule=Host(`averaatlas.space`) && PathPrefix(`/voice`)
+      - traefik.http.routers.avera-voice.entrypoints=websecure
+      - traefik.http.routers.avera-voice.tls=true
+      - traefik.http.routers.avera-voice.tls.certresolver=mytlschallenge
+      - traefik.http.middlewares.avera-voice-strip.stripprefix.prefixes=/voice
+      - traefik.http.routers.avera-voice.middlewares=avera-voice-strip@docker
+      - traefik.http.services.avera-voice.loadbalancer.server.port=80
+      - traefik.http.routers.avera-voice.priority=100
+
+  dmui:
+    build:
+      context: ${DMUI_DIR:-/orbital-dmui}
+      dockerfile: Dockerfile
+    container_name: orbital-dmui
+    environment:
+      - PYTHONUNBUFFERED=1
+      - HOST_DATASET_DIR=/data/orbital-pbsdg-dataset
+    volumes:
+      - type: bind
+        source: /data/orbital-pbsdg-dataset
+        target: /data/dataset
+        read_only: true
+      - type: bind
+        source: /orbital-pbsdg
+        target: /opt/pbsdg
+        read_only: true
+      - type: bind
+        source: /data/orbital-dmui-exports
+        target: /data/exports
+    restart: unless-stopped
+    networks:
+      - traefik-proxy
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-proxy
+      - "traefik.http.routers.dmui.rule=Host(`datastudio.averaatlas.space`)"
+      - traefik.http.routers.dmui.entrypoints=websecure
+      - traefik.http.routers.dmui.tls=true
+      - traefik.http.routers.dmui.tls.certresolver=mytlschallenge
+      - traefik.http.services.dmui.loadbalancer.server.port=8501
+      - "traefik.http.routers.dmui.middlewares=avera-auth@docker"
+
+volumes:
+  planner_data:
+    driver: local
+  cdm_data:
+    driver: local
+
+networks:
+  traefik-proxy:
+    external: true
