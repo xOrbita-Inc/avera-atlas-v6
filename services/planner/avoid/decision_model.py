@@ -341,7 +341,27 @@ def evaluate_conjunction(req: Dict[str, Any]) -> Dict[str, Any]:
     lifetime_penalty = dv_mag_m_s / max(1e-6, v_remaining)
 
     all_candidates: List[Dict[str, Any]] = []
-    best: Optional[Dict[str, Any]] = None
+
+    # No-burn baseline: delta_C=0, dv=0, U=0.
+    # Wins whenever all burn directions produce negative utility,
+    # making "no burn optimal" cases scientifically defensible
+    # without requiring policy weight tuning per event.
+    no_burn = {
+        "direction": "no-burn",
+        "dv_eci_km_s": [0.0, 0.0, 0.0],
+        "delta_C": 0.0,
+        "utility": 0.0,
+    }
+    all_candidates.append(no_burn)
+    best: Optional[Dict[str, Any]] = {
+        "direction": "no-burn",
+        "dv_eci_km_s": [0.0, 0.0, 0.0],
+        "dv_magnitude_m_s": 0.0,
+        "t_burn_utc": t_burn_utc,
+        "utility": 0.0,
+        "_m2_post": float(m2_pre),
+        "_delta_C": 0.0,
+    }
 
     for name, d_hat in directions:
         dv_vec_km_s = d_hat * dv_mag_km_s
@@ -362,7 +382,7 @@ def evaluate_conjunction(req: Dict[str, Any]) -> Dict[str, Any]:
             }
         )
 
-        if best is None or U > best["utility"]:
+        if U > best["utility"]:
             best = {
                 "direction": name,
                 "dv_eci_km_s": dv_vec_km_s.tolist(),
