@@ -707,8 +707,9 @@ function updateDecisionCard(result,conj){
   document.getElementById('dTarget').textContent=conj.object_id;
   const t=conj.time_to_tca_min;
   document.getElementById('dTCA').textContent=t<60?t.toFixed(0)+' min':(t/60).toFixed(1)+' hr';
-  document.getElementById('dDir').textContent=(result.recommendation?.direction||'--').toUpperCase();
-  document.getElementById('dDv').textContent=(result.recommendation?.dv_magnitude_m_s||0).toFixed(2)+' m/s';
+  const dir=result.recommendation?.direction||'--';
+  document.getElementById('dDir').textContent=dir==='no-burn'?'NO-BURN':dir.toUpperCase();
+  document.getElementById('dDv').textContent=dir==='no-burn'?'0.00 m/s':(result.recommendation?.dv_magnitude_m_s||0).toFixed(2)+' m/s';
 }
 
 function updateCandidatesTable(candidates,bestDir,fuelCost){
@@ -1074,8 +1075,10 @@ function drawEncounter(conj,result){
 
   // ---- BURN VECTOR ARROW ----
   const rec=result.recommendation;
+  // No-burn: skip burn vector entirely
+  const isNoBurn=rec?.direction==='no-burn';
   // Resolve active burn: selected candidate preview or recommended
-  let activeDv=rec?.dv_eci_km_s;
+  let activeDv=isNoBurn?null:rec?.dv_eci_km_s;
   let activeDir=rec?.direction||'';
   let activeMag=rec?.dv_magnitude_m_s||0;
   let isAltCandidate=false;
