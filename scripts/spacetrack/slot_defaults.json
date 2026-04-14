@@ -1,0 +1,15 @@
+{
+  "source": "Space-Track TLE history",
+  "epoch_start": "2026-03-14",
+  "epoch_end": "2026-04-13",
+  "n_satellites_analyzed": 2652,
+  "n_tle_records": 238760,
+  "n_correction_events": 3273,
+  "corrections_per_sat_per_year": 15.02,
+  "target_mean_motion_rev_per_day": 15.302,
+  "shell_sma_km": 6853.35,
+  "shell_altitude_km": 482.4,
+  "acceptable_drift_km": 45.133,
+  "median_drift_km": 2.572,
+  "return_dv_budget_m_s": 3.3299
+}
