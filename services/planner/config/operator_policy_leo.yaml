@@ -1,0 +1,68 @@
+# services/planner/config/operator_policy_leo.yaml
+#
+# Default operator policy for LEO operations.
+# Loaded at runtime by OperatorPolicy.from_yaml().
+# No code changes required to onboard a new operator:
+# supply a new YAML file with their values and point the service at it.
+#
+# Two-tier model:
+#   Tier 1 (this file): operator-specific thresholds, weights, constraints.
+#   Tier 2 (embedded):  CWH dynamics, Mahalanobis calculation, no-burn
+#                       baseline, secondary conjunction check.
+#
+# For constellation operators who know their own slot tolerances,
+# add a constellation_slot block here to override Space-Track defaults.
+# See services/planner/common/satellite_capability.py ConstellationSlot.
+
+operator_id: "DEFAULT_LEO"
+policy_version: "2.5.0"
+
+risk_thresholds:
+  pc_maneuver_threshold: 1.0e-4       # Pc >= this requires a maneuver
+  pc_monitor_threshold: 1.0e-5        # Pc >= this escalates to watch status
+  min_miss_distance_km: 1.0           # Hard floor on acceptable miss distance
+  mahalanobis_screen_threshold: 4.0   # Skip events with MD above this
+
+maneuver_constraints:
+  max_dv_per_event_ms: 2.0            # Maximum burn per conjunction event [m/s]
+  max_maneuvers_per_week: 3           # Fleet-level frequency limit
+  min_hours_before_tca: 4.0           # Latest acceptable burn execution time
+  max_hours_before_tca: 72.0          # Earliest acceptable burn window open
+
+# Operator-level blackout windows.
+# These are merged at runtime with ManeuverCadence.no_burn_windows
+# from the satellite profile. Never applied in isolation.
+blackout_windows:
+  - type: payload_operation
+    buffer_hours_before: 1.0
+    buffer_hours_after: 1.0
+  - type: ground_contact
+    buffer_hours_before: 0.5
+    buffer_hours_after: 0.0
+
+scoring_weights:
+  lambda_dv: 1.0                      # Weight on delta-v cost
+  lambda_lifetime: 0.8                # Weight on lifetime impact
+  lambda_slot_deviation: 1.2          # Weight on constellation slot deviation
+
+operational_philosophy: "balanced"    # risk_averse | balanced | fuel_conservative
+
+fleet_priority:
+  method: "highest_pc_first"          # highest_pc_first | most_fuel_remaining | manual
+
+# Total mission lifetime [days]. Unlocks LifetimeProfile.lifetime_fraction_used
+# for the lambda_L penalty term in 9.4. Set to null if unknown.
+mission_lifetime_days_total: 1825.0    # 5 years default for LEO operations
+
+# Optional: operator-supplied ConstellationSlot values.
+# If provided, these override the Space-Track empirical defaults
+# in satellite_capability.py for this operator's satellites.
+# Intended for smaller constellations where TLE-spread derivation
+# is not feasible. Uncomment and fill in to use.
+#
+# constellation_slot:
+#   in_constellation: true
+#   target_mean_motion_rev_per_day: 14.8812
+#   acceptable_drift_km: 8.0
+#   return_dv_budget_m_s: 0.30
+#   max_recovery_time_s: 172800.0

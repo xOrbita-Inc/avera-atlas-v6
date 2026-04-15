@@ -36,3 +36,5 @@ Thumbs.db
 # Logs
 *.log
 scripts/spacetrack/shell1_tles.json
+__pycache__/
+*.pyc
