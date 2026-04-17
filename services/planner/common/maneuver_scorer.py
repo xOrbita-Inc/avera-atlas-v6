@@ -733,8 +733,7 @@ def score_maneuver_candidates(
             dv_return_base = _return_burn_cost_m_s(dv_tangential_m_s, cap.a_ref_km)
             dv_return_drag = _drag_corrected_dv_return_m_s(
                 dv_tangential_m_s, cap.a_ref_km,
-                recovery_orbits, cap.altitude_km if hasattr(cap, 'altitude_km')
-                else cap.a_ref_km - 6371.0,
+                recovery_orbits, cap.a_ref_km - 6371.0,  # altitude_km is not on SatelliteCapability; derive from a_ref_km
             )
             drag_applied = dv_return_drag > dv_return_base + 1e-6
             dv_return = dv_return_drag
