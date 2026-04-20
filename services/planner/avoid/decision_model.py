@@ -299,6 +299,69 @@ def _validate_request(req: Dict[str, Any]) -> Tuple[str, Dict[str, Any], Dict[st
     return conjunction_id, satellite, conjunction, policy_obj, policy_raw
 
 
+
+# -----------------------------------------------------------------------------
+# Thrust model for power_constrained path
+# -----------------------------------------------------------------------------
+
+_G0_M_S2: float = 9.80665  # standard gravity [m/s^2]
+
+
+def _power_constrained_dv_m_s(
+    propulsion_raw: dict,
+    mass_kg: float,
+    dv_limit_m_s: float,
+    dt_to_ca_s: float,
+) -> float:
+    """
+    Compute achievable delta-v for a power-constrained satellite.
+
+    Reads propulsion parameters from the satellite propulsion sub-dict
+    (satellite.propulsion in the OpenAPI request), consistent with
+    PropulsionProfile in satellite_capability.py.
+
+    Physics:
+        F   = 2 * eta * P_W / (Isp * g0)   [N]
+        dv  = F * t_burn / mass_kg           [m/s]
+
+    Result is capped at dv_limit_m_s. Falls back to 0.5 * dv_limit_m_s
+    when any required field is absent or invalid, preserving
+    backward-compatible behavior for callers that have not supplied
+    power propulsion parameters.
+
+    Parameters
+    ----------
+    propulsion_raw : dict
+        satellite.propulsion sub-dict. Expected fields:
+        power_available_w, thruster_efficiency, isp_s, burn_window_s.
+    mass_kg : float
+        Satellite wet mass [kg] from satellite.lifetime.mass_kg.
+    dv_limit_m_s : float
+        Policy delta-v ceiling [m/s].
+    dt_to_ca_s : float
+        Time to closest approach [s]; used as burn window when
+        propulsion_raw does not supply burn_window_s.
+    """
+    P_W    = propulsion_raw.get("power_available_w")
+    eta    = propulsion_raw.get("thruster_efficiency")
+    isp    = float(propulsion_raw.get("isp_s", 220.0))
+    t_burn = propulsion_raw.get("burn_window_s", dt_to_ca_s)
+
+    if P_W is None or eta is None:
+        return dv_limit_m_s * 0.5
+
+    P_W    = float(P_W)
+    eta    = float(eta)
+    t_burn = float(t_burn)
+
+    if P_W <= 0 or eta <= 0 or eta > 1.0 or isp <= 0 or mass_kg <= 0 or t_burn <= 0:
+        return dv_limit_m_s * 0.5
+
+    thrust_n      = 2.0 * eta * P_W / (isp * _G0_M_S2)
+    dv_achievable = thrust_n * t_burn / mass_kg
+    return float(min(dv_achievable, dv_limit_m_s))
+
+
 def evaluate_conjunction(req: Dict[str, Any]) -> Dict[str, Any]:
     """
     Evaluate a single conjunction and return OpenAPI EvaluateResponse.
@@ -320,11 +383,17 @@ def evaluate_conjunction(req: Dict[str, Any]) -> Dict[str, Any]:
     attitude_restricted = bool(hard.get("attitude_restricted", False))
     power_constrained = bool(hard.get("power_constrained", False))
 
-    # If power_constrained, you can optionally downscale dv magnitude.
-    # Keep deterministic + explicit:
     dv_mag_m_s = float(policy.dv_mag_limit_m_s)
     if power_constrained:
-        dv_mag_m_s *= 0.5  # conservative; replace with proper thrust model later
+        _prop_raw = sat.get("propulsion", {}) if isinstance(sat.get("propulsion"), dict) else {}
+        _lt_raw   = sat.get("lifetime", {}) if isinstance(sat.get("lifetime"), dict) else {}
+        _mass_kg  = float(_lt_raw.get("mass_kg", sat.get("mass_kg", 100.0)))
+        dv_mag_m_s = _power_constrained_dv_m_s(
+            propulsion_raw=_prop_raw,
+            mass_kg=_mass_kg,
+            dv_limit_m_s=dv_mag_m_s,
+            dt_to_ca_s=dt_to_ca_s,
+        )
 
     dv_mag_km_s = dv_mag_m_s / 1000.0
 

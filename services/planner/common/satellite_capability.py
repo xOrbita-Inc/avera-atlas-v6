@@ -74,6 +74,9 @@ class PropulsionProfile:
     thrust_n: float = 1.0
     min_dv_m_s: float = 0.01
     max_dv_per_burn_m_s: float = 10.0
+    power_available_w: Optional[float] = None
+    thruster_efficiency: Optional[float] = None
+    burn_window_s: Optional[float] = None
 
     def __post_init__(self) -> None:
         if self.isp_s <= 0:
@@ -86,6 +89,12 @@ class PropulsionProfile:
             raise ValueError("max_dv_per_burn_m_s must be > 0")
         if self.min_dv_m_s > self.max_dv_per_burn_m_s:
             raise ValueError("min_dv_m_s must be <= max_dv_per_burn_m_s")
+        if self.thruster_efficiency is not None and not (0 < self.thruster_efficiency <= 1.0):
+            raise ValueError("thruster_efficiency must be in (0, 1]")
+        if self.power_available_w is not None and self.power_available_w <= 0:
+            raise ValueError("power_available_w must be > 0")
+        if self.burn_window_s is not None and self.burn_window_s <= 0:
+            raise ValueError("burn_window_s must be > 0")
 
 
 @dataclass(frozen=True)
@@ -236,6 +245,62 @@ class ConstellationSlot:
             raise ValueError("return_dv_budget_m_s must be >= 0")
 
 
+
+# ---------------------------------------------------------------------------
+# Thrust model (power-constrained dv, used by SatelliteCapability)
+# ---------------------------------------------------------------------------
+
+_G0_M_S2: float = 9.80665  # standard gravity [m/s^2]
+
+
+def _propulsion_limited_dv_m_s(
+    propulsion: "PropulsionProfile",
+    mass_kg: float,
+    dv_limit_m_s: float,
+    dt_to_ca_s: float,
+) -> float:
+    """
+    Compute achievable delta-v for a power-constrained satellite.
+
+    Physics:
+        F   = 2 * eta * P_W / (Isp * g0)   [N]
+        dv  = F * t_burn / mass_kg           [m/s]
+
+    Result is capped at dv_limit_m_s.
+
+    Falls back to 0.5 * dv_limit_m_s when any required PropulsionProfile
+    field (power_available_w, thruster_efficiency) is None, preserving
+    backward-compatible behavior for callers that have not supplied
+    power propulsion parameters.
+
+    Parameters
+    ----------
+    propulsion : PropulsionProfile
+        Satellite propulsion profile carrying power_available_w,
+        thruster_efficiency, isp_s, and optionally burn_window_s.
+    mass_kg : float
+        Current satellite mass from LifetimeProfile.mass_kg [kg].
+    dv_limit_m_s : float
+        Policy delta-v ceiling [m/s].
+    dt_to_ca_s : float
+        Time to closest approach [s]; used as burn window when
+        PropulsionProfile.burn_window_s is None.
+    """
+    P_W    = propulsion.power_available_w
+    eta    = propulsion.thruster_efficiency
+    isp    = propulsion.isp_s
+    t_burn = propulsion.burn_window_s if propulsion.burn_window_s is not None else dt_to_ca_s
+
+    if P_W is None or eta is None:
+        return dv_limit_m_s * 0.5
+    if P_W <= 0 or eta <= 0 or eta > 1.0 or isp <= 0 or mass_kg <= 0 or t_burn <= 0:
+        return dv_limit_m_s * 0.5
+
+    thrust_n      = 2.0 * eta * P_W / (isp * _G0_M_S2)
+    dv_achievable = thrust_n * t_burn / mass_kg
+    return float(min(dv_achievable, dv_limit_m_s))
+
+
 # ---------------------------------------------------------------------------
 # Top-level SatelliteCapability
 # ---------------------------------------------------------------------------
@@ -286,12 +351,16 @@ class SatelliteCapability:
 
         # PropulsionProfile
         p_raw = sat.get("propulsion", {})
+        _opt = lambda v: float(v) if v is not None else None
         propulsion = PropulsionProfile(
-            propulsion_type       = str(p_raw.get("propulsion_type", PropulsionType.CHEMICAL)),
-            isp_s                 = float(p_raw.get("isp_s", 220.0)),
-            thrust_n              = float(p_raw.get("thrust_n", 1.0)),
-            min_dv_m_s            = float(p_raw.get("min_dv_m_s", 0.01)),
-            max_dv_per_burn_m_s   = float(p_raw.get("max_dv_per_burn_m_s", 10.0)),
+            propulsion_type     = str(p_raw.get("propulsion_type", PropulsionType.CHEMICAL)),
+            isp_s               = float(p_raw.get("isp_s", 220.0)),
+            thrust_n            = float(p_raw.get("thrust_n", 1.0)),
+            min_dv_m_s          = float(p_raw.get("min_dv_m_s", 0.01)),
+            max_dv_per_burn_m_s = float(p_raw.get("max_dv_per_burn_m_s", 10.0)),
+            power_available_w   = _opt(p_raw.get("power_available_w")),
+            thruster_efficiency = _opt(p_raw.get("thruster_efficiency")),
+            burn_window_s       = _opt(p_raw.get("burn_window_s")),
         )
 
         # LifetimeProfile — v_remaining_m_s bridges from v2.4
@@ -334,17 +403,34 @@ class SatelliteCapability:
             slot       = slot,
         )
 
-    def effective_dv_limit_m_s(self, requested_dv_m_s: float) -> float:
+    def effective_dv_limit_m_s(
+        self, requested_dv_m_s: float, dt_to_ca_s: float = 600.0
+    ) -> float:
         """
         Return the effective dv limit after applying all constraints:
-        - power_constrained halves available thrust
         - max_dv_per_burn_m_s hard ceiling
         - v_available_m_s fuel ceiling
+        - power_constrained: uses PropulsionProfile thrust model when
+          power_available_w, thruster_efficiency, isp_s, and mass_kg
+          are all available; falls back to 0.5 * dv for legacy callers.
+
+        Parameters
+        ----------
+        requested_dv_m_s : float
+            Requested delta-v [m/s].
+        dt_to_ca_s : float
+            Time to closest approach [s]. Used as burn window when
+            PropulsionProfile.burn_window_s is None.
         """
         dv = min(requested_dv_m_s, self.propulsion.max_dv_per_burn_m_s)
         dv = min(dv, self.lifetime.v_available_m_s)
         if self.cadence.power_constrained:
-            dv *= 0.5
+            dv = _propulsion_limited_dv_m_s(
+                propulsion=self.propulsion,
+                mass_kg=self.lifetime.mass_kg,
+                dv_limit_m_s=dv,
+                dt_to_ca_s=dt_to_ca_s,
+            )
         return max(0.0, dv)
 
     def requires_return_burn(self, delta_along_track_km: float) -> bool:
