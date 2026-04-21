@@ -38,3 +38,8 @@ Thumbs.db
 scripts/spacetrack/shell1_tles.json
 __pycache__/
 *.pyc
+
+# ONNX models (added for physics-classifier)
+*.onnx
+*.onnx.data
+services/*/models/
