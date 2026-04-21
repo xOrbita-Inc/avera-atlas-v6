@@ -5,10 +5,10 @@ YOLOv8-based SWIR debris detection and spacecraft classification.
 ## Role in Pipeline
 
 ```
-SWIR Sensor → Ingest → [DETECT] → Track → Propagate → Plan → ATLAS
+SWIR Sensor → Ingest → [DETECT] → Tracker → Propagate → Plan → ATLAS
 ```
 
-The Detector service runs neural network inference on SWIR camera frames to identify and classify space objects. It uses a YOLOv8 model trained on 11 spacecraft classes and outputs bounding boxes with confidence scores in the Ingest-compatible detection schema.
+The Detector service runs neural network inference on SWIR camera frames to identify and classify space objects. It uses a YOLOv8 model trained on 11 spacecraft classes, returns bounding boxes and confidence scores synchronously to the UI, and asynchronously forwards each detection batch to the Tracker service in `DetectionBatchInput` format for correlation and IOD.
 
 ## Spacecraft Classes
 
@@ -27,15 +27,15 @@ Stars detected in the field of view are classified as `star` and excluded from c
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/predict` | POST | Run inference on a SWIR frame |
-| `/health` | GET | Service health check |
+| `/health` | GET | Service health check (includes configured `tracker_url`) |
 
 ### Inference Request
 
 ```json
 {
   "frame_id": "frame_001",
-  "sensor_id": "swir_001",
-  "image_base64": "<base64-encoded SWIR frame>",
+  "sensor_id": "UI-UPLOAD-SWIR",
+  "base64_data": "<base64-encoded SWIR frame>",
   "camera_pose": {
     "position_eci_km": [6878.0, 0.0, 0.0],
     "quaternion_eci_body": [1.0, 0.0, 0.0, 0.0]
@@ -43,9 +43,23 @@ Stars detected in the field of view are classified as `star` and excluded from c
 }
 ```
 
+`sensor_id` defaults to `UI-UPLOAD-SWIR` if not supplied. For programmatic callers, use `AVERA-SAT-01-SWIR` or `AVERA-SAT-02-SWIR` so the Tracker's platform-id derivation resolves to the expected mock platform.
+
 ### Inference Response
 
-Returns detection frame compatible with the Ingest service schema, including bounding boxes, confidence scores, and classified object types.
+Returns a `DetectionFrame` with bounding boxes in `[x1, y1, x2, y2]` (xyxy) format, confidence scores, and object class. The UI contract is stable; response shape has been unchanged since v3.0.0.
+
+### Tracker Forwarding
+
+On each successful inference, the Detector translates its internal `DetectionFrame` into Tracker's `DetectionBatchInput` schema and POSTs asynchronously to `http://{TRACKER_HOST}:{TRACKER_PORT}/detections`. The forward is fire-and-forget and does not block the UI response. Translation includes:
+
+- `bbox` xyxy → `bbox_x` / `bbox_y` / `bbox_w` / `bbox_h`
+- bbox centre → `pixel_u` / `pixel_v`
+- generated UUID per `detection_id`
+- ISO-8601 UTC `timestamp`
+- `platform_state: null` (Tracker falls back to its mock platform generator)
+
+See `services/tracker/schemas.py :: DetectionInput` for the full downstream schema.
 
 ## Model
 
@@ -61,6 +75,11 @@ Returns detection frame compatible with the Ingest service schema, including bou
 | `MODEL_PATH` | `spark_detector.onnx` | Path to ONNX model weights |
 | `CONF_THRESHOLD` | `0.25` | Minimum detection confidence |
 | `IOU_THRESHOLD` | `0.45` | Non-maximum suppression IoU threshold |
+| `TRACKER_HOST` | `tracker` | Tracker service hostname |
+| `TRACKER_PORT` | `8000` | Tracker service port |
+| `DEFAULT_SENSOR_ID` | `UI-UPLOAD-SWIR` | Sensor ID used when the request omits one |
+| `PLANNER_HOST` | n/a | Legacy fallback for `TRACKER_HOST` (pre-SCRUM-325; kept for transition) |
+| `PLANNER_PORT` | n/a | Legacy fallback for `TRACKER_PORT` |
 
 ## Docker
 
