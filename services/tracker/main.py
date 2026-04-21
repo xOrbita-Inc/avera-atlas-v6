@@ -132,6 +132,59 @@ class TrackerState:
                 true_anomaly_deg=ta_offset,
             ))
 
+    def register_default_sensors(self):
+        """Register default sensors at startup so live detector traffic is not dropped.
+
+        Uses the PLATFORM-NAME-SENSOR convention so the platform-id derivation
+        in /detections (split('-')[:-1]) produces a non-empty platform_id.
+        Idempotent: skips sensors/platforms already registered.
+        """
+        defaults = [
+            ("AVERA-SAT-01-SWIR", "AVERA-SAT-01"),
+            ("AVERA-SAT-02-SWIR", "AVERA-SAT-02"),
+            ("UI-UPLOAD-SWIR", "UI-UPLOAD"),
+        ]
+        for sensor_id, platform_id in defaults:
+            # Platform
+            if platform_id not in self.platform_generator.platforms:
+                try:
+                    platform_num = int(platform_id.split("-")[-1])
+                except (ValueError, IndexError):
+                    platform_num = 1
+                raan_offset = (platform_num - 1) * 90.0
+                ta_offset = (platform_num - 1) * 45.0
+                self.platform_generator.add_platform(MockPlatformConfig(
+                    platform_id=platform_id,
+                    semi_major_axis_km=6871.0,
+                    inclination_deg=51.6,
+                    raan_deg=raan_offset,
+                    true_anomaly_deg=ta_offset,
+                ))
+
+            # Camera + sensor record
+            if sensor_id not in self.transformer.cameras:
+                camera = CameraModel(
+                    focal_length_mm=50.0,
+                    pixel_size_um=15.0,
+                    resolution_x=1024,
+                    resolution_y=768,
+                )
+                self.transformer.register_camera(sensor_id, camera)
+
+            if sensor_id not in self.sensors:
+                self.sensors[sensor_id] = {
+                    "sensor_id": sensor_id,
+                    "platform_name": platform_id,
+                    "focal_length_mm": 50.0,
+                    "pixel_size_um": 15.0,
+                    "resolution_x": 1024,
+                    "resolution_y": 768,
+                    "fov_x_deg": 12.0,
+                    "fov_y_deg": 9.0,
+                    "registered_at": datetime.now(timezone.utc).isoformat(),
+                    "detection_count": 0,
+                }
+
 
 # Global state instance
 state = TrackerState()
@@ -149,7 +202,10 @@ async def lifespan(app: FastAPI):
     # Create data directory if needed
     os.makedirs(DATA_DIR, exist_ok=True)
     logger.info(f"Data directory: {DATA_DIR}")
-    
+
+    state.register_default_sensors()
+    logger.info("Default sensors registered")
+
     yield
     
     logger.info(f"Shutting down {SERVICE_NAME} service")
@@ -286,8 +342,13 @@ async def ingest_detections(batch: DetectionBatchInput):
             
             # Check if sensor is registered with transformer
             if det.sensor_id not in state.transformer.cameras:
-                logger.warning(f"Sensor {det.sensor_id} not registered, skipping detection")
+                logger.warning(
+                    f"Sensor {det.sensor_id} not registered, skipping detection. "
+                    f"Known sensors: {list(state.transformer.cameras.keys())}"
+                )
                 results["errors"] += 1
+                results.setdefault("unknown_sensor", 0)
+                results["unknown_sensor"] += 1
                 continue
             
             # Create SensorDetection from input
