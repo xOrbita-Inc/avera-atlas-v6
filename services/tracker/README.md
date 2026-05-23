@@ -128,6 +128,50 @@ Detection received
 }
 ```
 
+## Initial Orbit Determination
+
+The tracker includes an Initial Orbit Determination (IOD) module for converting observations into an estimated Earth-centered orbital state.
+
+The IOD flow is:
+
+```text
+observations                    → raw optical/radar measurements
+    ↓
+IODObservation                  → normalized tracker input
+    ↓
+IODSolver                       → runs candidate IOD methods
+    ↓
+IODSolution                     → estimated orbit result
+    ↓
+orbital elements + state vector → final usable output
+```
+`iod.py` supports optical angles-only observations using RA/Dec and observer state. It also supports radar-style range+angles observations using optional `range_km` and `range_sigma_km` fields on `IODObservation`.
+
+For angles-only observations, the solver evaluates multiple candidate methods, including double-r, range-search, Gauss, a Lambert-backed Gooding-style prototype, and a direction-based fallback seed. Candidate solutions are filtered using physical plausibility checks so invalid orbits, such as low-perigee or highly eccentric candidates, are rejected.
+
+For range+angles observations, the solver uses the measured slant range to reconstruct the target ECI position directly:
+
+```text
+r_target = r_observer + range_km * line_of_sight
+```
+
+The solver returns an `IODSolution` containing the estimated state vector, orbital elements, residual metrics, selected method, and attempted-method diagnostics.
+
+### Validation Scripts
+
+`test_observation_loader.py` validates the sandbox NPZ ingest path:
+
+```bash
+python services/tracker/test_observation_loader.py
+```
+This loads a sandbox `observations_multi.npz` artifact, converts detections into `IODObservation` objects, and runs the IOD solver.
+
+`sensor_agnostic_ingest.py` validates sensor-agnostic IOD ingest:
+```bash
+python services/tracker/sensor_agnostic_ingest.py
+```
+This demonstrates both optical angles-only observations and radar range+angles observations using the same `IODObservation` / `IODSolver` interface.
+
 ## Demo Mode
 
 For demonstration purposes, the service includes a mock platform state generator that provides synthetic CubeSat ephemeris and attitude data. This allows the tracker to function without real platform telemetry.
@@ -179,7 +223,6 @@ Add the tracker service to your docker-compose.yaml (see `docker-compose.tracker
 ## Next Steps (Not Yet Implemented)
 
 1. **Sensor-to-inertial transformation** - pixel → angular using camera model
-2. **IOD algorithm** - Gooding's method for moving observer
 3. **EKF state estimation** - angles-only measurement model
 4. **Database persistence** - PostgreSQL/TimescaleDB for tracks
 5. **Cross-sensor correlation** - temporal alignment and fusion
@@ -187,13 +230,19 @@ Add the tracker service to your docker-compose.yaml (see `docker-compose.tracker
 ## Files
 
 ```
-tracker-service/
-├── main.py              # FastAPI application
-├── models.py            # Data models (dataclasses)
-├── schemas.py           # Pydantic schemas (OpenAPI)
-├── mock_platform.py     # Mock ephemeris/attitude generator
-├── requirements.txt     # Python dependencies
-├── Dockerfile           # Container definition
-├── docker-compose.tracker.yaml  # Integration snippet
-└── README.md            # This file
+tracker/
+├── main.py                     # FastAPI application
+├── models.py                   # Data models (dataclasses)
+├── schemas.py                  # Pydantic schemas (OpenAPI)
+├── transform.py                # Pixel → angular transformations
+├── correlate.py                # Angular observation correlation and UCT buffering
+├── iod.py                      # Initial orbit determination solver chain
+├── observation_loader.py       # Sandbox observations_multi.npz loader
+├── test_observation_loader.py  # Sandbox NPZ → IOD validation script
+├── sensor_agnostic_ingest.py   # Sensor-agnostic IOD validation script
+├── mock_platform.py            # Mock ephemeris/attitude generator
+├── requirements.txt            # Python dependencies
+├── Dockerfile                  # Container definition
+├── docker-compose.tracker.yaml # Integration snippet
+└── README.md                   # This file
 ```

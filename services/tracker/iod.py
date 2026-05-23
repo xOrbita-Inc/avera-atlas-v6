@@ -46,6 +46,12 @@ class IODObservation:
     dec_sigma: float  # Dec uncertainty (radians)
     observer_position_km: np.ndarray  # Observer position in ECI (km)
     observer_velocity_km_s: np.ndarray  # Observer velocity in ECI (km/s)
+
+    # Optional radar/range-bearing fields.
+    # If range_km is present, the observation is range+angles.
+    # If absent, the observation is angles-only optical.
+    range_km: Optional[float] = None
+    range_sigma_km: Optional[float] = None
     
     @property
     def line_of_sight(self) -> np.ndarray:
@@ -82,6 +88,8 @@ class IODSolution:
     rms_residual_arcsec: Optional[float] = None
     observations_used: int = 0
     iterations: int = 0
+    method_used: Optional[str] = None
+    attempted_methods: Optional[list[dict]] = None
     
     # Error information
     error_message: Optional[str] = None
@@ -93,6 +101,8 @@ class IODSolution:
             "epoch": self.epoch.isoformat(),
             "observations_used": self.observations_used,
             "iterations": self.iterations,
+            "method_used": self.method_used,
+            "attempted_methods": self.attempted_methods or [],
         }
         
         if self.success:
@@ -352,6 +362,329 @@ def gauss_iod(
     
     return r2_vec, v2_vec, "Success"
 
+def solve_lambert_universal(
+    r1: np.ndarray,
+    r3: np.ndarray,
+    dt: float,
+    mu: float = MU_EARTH_KM,
+    prograde: bool = True,
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], str]:
+    """
+    Lambert solver using a universal-variable formulation.
+
+    Returns:
+        (v1_km_s, v3_km_s, status_message)
+    """
+    r1_mag = norm(r1)
+    r3_mag = norm(r3)
+
+    if r1_mag < 1e-9 or r3_mag < 1e-9:
+        return None, None, "Lambert solver: invalid endpoint magnitude"
+
+    if abs(dt) < 1e-6:
+        return None, None, "Lambert solver: invalid time of flight"
+
+    cos_dnu = np.clip(np.dot(r1, r3) / (r1_mag * r3_mag), -1.0, 1.0)
+    cross_r = cross(r1, r3)
+    sin_dnu_mag = norm(cross_r) / (r1_mag * r3_mag)
+
+    if sin_dnu_mag < 1e-12:
+        return None, None, "Lambert solver: nearly collinear endpoints"
+
+    if prograde:
+        sin_dnu = sin_dnu_mag if cross_r[2] >= 0 else -sin_dnu_mag
+    else:
+        sin_dnu = -sin_dnu_mag if cross_r[2] >= 0 else sin_dnu_mag
+
+    denom = 1.0 - cos_dnu
+    if abs(denom) < 1e-12:
+        return None, None, "Lambert solver: transfer angle too small"
+
+    A = sin_dnu * math.sqrt(r1_mag * r3_mag / denom)
+    if abs(A) < 1e-12:
+        return None, None, "Lambert solver: degenerate A parameter"
+
+    def y_of_z(z: float) -> float:
+        C = stumpff_c2(z)
+        S = stumpff_c3(z)
+        if C <= 0:
+            return float("nan")
+        return r1_mag + r3_mag + A * (z * S - 1.0) / math.sqrt(C)
+
+    def tof_of_z(z: float) -> float:
+        C = stumpff_c2(z)
+        S = stumpff_c3(z)
+        if C <= 0:
+            return float("nan")
+        y = y_of_z(z)
+        if y <= 0:
+            return float("nan")
+        x = math.sqrt(y / C)
+        return (x**3 * S + A * math.sqrt(y)) / math.sqrt(mu)
+    
+    def _safe_tof_of_z(z: float) -> tuple[float, float, float, float]:
+        C = stumpff_c2(z) 
+        S = stumpff_c3(z)
+        if C <= 0:
+            return float("nan"), C, S, float("nan")
+        y = y_of_z(z)
+        if y <= 0 or not np.isfinite(y):
+            return float("nan"), C, S, y
+        x = math.sqrt(y / C)
+        tof = (x**3 * S + A * math.sqrt(y)) / math.sqrt(mu)
+        return tof, C, S, y
+
+    # Scan for a finite bracket in z
+    z_samples = np.linspace(-16.0, 16.0, 257)
+
+    finite_samples: list[tuple[float, float]] = []
+    for z in z_samples:
+        tof, C, S, y = _safe_tof_of_z(float(z))
+        if np.isfinite(tof):
+            finite_samples.append((float(z), float(tof)))
+
+    if len(finite_samples) < 2:
+        return None, None, "Lambert solver: insufficient finite TOF samples"
+
+    z_low = None
+    z_high = None
+    f_low = None
+    f_high = None
+
+    for (z_a, f_a), (z_b, f_b) in zip(finite_samples[:-1], finite_samples[1:]):
+        if (f_a - dt) == 0:
+            z_low, z_high = z_a, z_a
+            f_low, f_high = f_a, f_a
+            break
+        if (f_a - dt) * (f_b - dt) <= 0:
+            z_low, z_high = z_a, z_b
+            f_low, f_high = f_a, f_b
+            break
+
+    if z_low is None or z_high is None:
+        min_tof = min(f for _, f in finite_samples)
+        max_tof = max(f for _, f in finite_samples)
+        return None, None, (
+            "Lambert solver: failed to bracket solution "
+            f"(dt={dt:.3f}, finite_tof_range=[{min_tof:.3f}, {max_tof:.3f}])"
+        )
+
+    if z_low == z_high:
+        z_mid = z_low
+    else:
+        for _ in range(100):
+            z_mid = 0.5 * (z_low + z_high)
+            f_mid, _, _, _ = _safe_tof_of_z(z_mid)
+
+            if not np.isfinite(f_mid):
+                z_low = z_mid
+                continue
+
+            if abs(f_mid - dt) < 1e-6:
+                break
+
+            if (f_low - dt) * (f_mid - dt) <= 0:
+                z_high = z_mid
+                f_high = f_mid
+            else:
+                z_low = z_mid
+                f_low = f_mid
+
+    C = stumpff_c2(z_mid)
+    y = y_of_z(z_mid)
+
+    if C <= 0 or y <= 0:
+        return None, None, "Lambert solver: invalid final y/C"
+
+    f = 1.0 - y / r1_mag
+    g = A * math.sqrt(y / mu)
+    gdot = 1.0 - y / r3_mag
+
+    if abs(g) < 1e-12:
+        return None, None, "Lambert solver: singular g parameter"
+
+    v1 = (r3 - f * r1) / g
+    v3 = (gdot * r3 - r1) / g
+
+    if not np.all(np.isfinite(v1)) or not np.all(np.isfinite(v3)):
+        return None, None, "Lambert solver: non-finite velocity solution"
+
+    return v1, v3, "Lambert solver success"
+
+
+def _gooding_initial_range_guesses(
+    obs1: IODObservation,
+    obs2: IODObservation,
+    obs3: IODObservation,
+) -> list[tuple[float, float]]:
+    """
+    Produce broader initial guesses for endpoint slant ranges (rho1, rho3) in km.
+    These are still scaffolding guesses, but wide enough to let Gooding reach the
+    Lambert stage on more synthetic cases.
+    """
+    base_ranges = [
+        300.0,
+        500.0,
+        750.0,
+        1000.0,
+        1500.0,
+        2000.0,
+        3000.0,
+        5000.0,
+        8000.0,
+        12000.0,
+        20000.0,
+    ]
+
+    guesses: list[tuple[float, float]] = []
+
+    for rho1 in base_ranges:
+        for rho3 in base_ranges:
+            guesses.append((rho1, rho3))
+
+    return guesses
+
+def gooding_iod(
+    obs1: IODObservation,
+    obs2: IODObservation,
+    obs3: IODObservation,
+    mu: float = MU_EARTH_KM
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], str]:
+    """
+    Lambert-backed Gooding-style prototype.
+
+    This is not yet a canonical full Gooding implementation.
+    It searches endpoint slant ranges, solves Lambert between the endpoint
+    positions, propagates to the middle observation epoch, and scores the
+    middle-angle consistency.
+
+    Returns:
+        (position_km, velocity_km_s, status_message)
+    """
+    t13 = time_difference_seconds(obs1.timestamp, obs3.timestamp)
+    if abs(t13) < 1.0:
+        return None, None, "Gooding IOD: observations too close in time"
+
+    t12 = time_difference_seconds(obs1.timestamp, obs2.timestamp)
+
+    L1 = obs1.line_of_sight
+    L2 = obs2.line_of_sight
+    L3 = obs3.line_of_sight
+
+    R1 = obs1.observer_position_km
+    R2 = obs2.observer_position_km
+    R3 = obs3.observer_position_km
+
+    guess_pairs = _gooding_initial_range_guesses(obs1, obs2, obs3)
+
+    best_result = None
+    best_score_arcsec = float("inf")
+    last_status = "Gooding IOD: no guesses attempted"
+
+    attempted = 0
+
+    for rho1, rho3 in guess_pairs:
+        attempted += 1
+
+        r1 = R1 + rho1 * L1
+        r3 = R3 + rho3 * L3
+
+        if norm(r1) < RE_EARTH + 100 or norm(r3) < RE_EARTH + 100:
+            last_status = (
+                f"Gooding IOD attempt {attempted}: rejected rho1={rho1:.1f}, rho3={rho3:.1f} "
+                "because endpoint lies below minimum orbital altitude"
+            )
+            continue
+
+        v1, v3, lambert_status = solve_lambert_universal(r1, r3, t13, mu=mu, prograde=True)
+        last_status = (
+            f"Gooding IOD attempt {attempted}: rho1={rho1:.1f}, rho3={rho3:.1f}, "
+            f"lambert_status={lambert_status}"
+        )
+
+        if v1 is None or v3 is None:
+            continue
+    
+        if not np.all(np.isfinite(v1)) or not np.all(np.isfinite(v3)):
+            last_status = (
+                f"Gooding IOD attempt {attempted}: non-finite Lambert velocity"
+            )
+            continue
+
+        v1_mag = norm(v1)
+        v3_mag = norm(v3)
+
+        if v1_mag < 1.0 or v1_mag > 15.0 or v3_mag < 1.0 or v3_mag > 15.0:
+            last_status = (
+                f"Gooding IOD attempt {attempted}: Lambert endpoint velocity out of bounds "
+                f"(v1={v1_mag:.2f} km/s, v3={v3_mag:.2f} km/s)"
+            )
+            continue
+
+        energy1 = v1_mag**2 / 2.0 - mu / norm(r1)
+        if not np.isfinite(energy1):
+            last_status = (
+                f"Gooding IOD attempt {attempted}: non-finite endpoint energy"
+            )
+            continue
+
+        # Skip strongly hyperbolic / numerically dangerous cases for now
+        if energy1 >= 0:
+            last_status = (
+                f"Gooding IOD attempt {attempted}: hyperbolic Lambert branch rejected"
+            )
+            continue
+
+        # Propagate the Lambert endpoint state to the middle epoch
+        try:
+            r2_pred, v2_pred = kepler_propagate(r1, v1, t12, mu)
+        except (OverflowError, ValueError, FloatingPointError) as exc:
+            last_status = (
+                f"Gooding IOD attempt {attempted}: midpoint propagation failed "
+                f"({type(exc).__name__}: {exc})"
+            )
+            continue
+
+        if not np.all(np.isfinite(r2_pred)) or not np.all(np.isfinite(v2_pred)):
+            last_status = (
+                f"Gooding IOD attempt {attempted}: non-finite midpoint propagation"
+            )
+            continue
+
+        r2_mag = norm(r2_pred)
+        v2_mag = norm(v2_pred)
+
+        if r2_mag < RE_EARTH + 100 or r2_mag > 100000:
+            last_status = (
+                f"Gooding IOD attempt {attempted}: midpoint radius out of bounds ({r2_mag:.1f} km)"
+            )
+            continue
+
+        if v2_mag < 1.0 or v2_mag > 15.0:
+            last_status = (
+                f"Gooding IOD attempt {attempted}: midpoint velocity out of bounds ({v2_mag:.2f} km/s)"
+            )
+            continue
+
+        los2_pred = unit(r2_pred - R2)
+        ang_err2 = math.acos(np.clip(np.dot(los2_pred, L2), -1.0, 1.0))
+        score_arcsec = math.degrees(ang_err2) * 3600.0
+
+        if score_arcsec < best_score_arcsec:
+            best_score_arcsec = score_arcsec
+            best_result = (r2_pred.copy(), v2_pred.copy())
+
+    if best_result is None:
+        return None, None, last_status
+
+    if best_score_arcsec > 3600.0:
+        return None, None, f"Gooding IOD prototype: poor midpoint consistency ({best_score_arcsec:.1f} arcsec)"
+
+    return (
+        best_result[0],
+        best_result[1],
+        f"Gooding IOD prototype success (midpoint residual: {best_score_arcsec:.1f} arcsec)"
+    )
 
 def gibbs_velocity(
     r1: np.ndarray,
@@ -580,8 +913,6 @@ def double_r_iod(
             rho1_b = (-b1 - math.sqrt(disc1)) / (2*a1)
             if rho1_a > 50:  # Minimum 50 km range
                 rho1_candidates.append(rho1_a)
-            if rho1_b > 50:
-                rho1_candidates.append(rho1_b)
             
             if not rho1_candidates:
                 continue
@@ -830,6 +1161,65 @@ def estimate_orbit_from_directions(
     
     return best_solution[0], best_solution[1], f"Estimated (residual: {best_score:.1f} arcsec)"
 
+def range_angles_iod(
+    observations: List[IODObservation],
+    mu: float = MU_EARTH_KM,
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[datetime], str]:
+    """
+    IOD from range+angles observations.
+
+    If slant range is available, each observation directly reconstructs
+    target ECI position:
+
+        r_target = r_observer + range_km * line_of_sight
+
+    Velocity is estimated from reconstructed positions and referenced to the
+    middle observation epoch.
+    """
+    ranged_obs = [
+        obs for obs in observations
+        if obs.range_km is not None and np.isfinite(obs.range_km)
+    ]
+
+    if len(ranged_obs) < 3:
+        return None, None, None, "Range+angles IOD requires at least 3 ranged observations"
+
+    ranged_obs = sorted(ranged_obs, key=lambda obs: obs.timestamp)
+
+    positions = []
+    for obs in ranged_obs:
+        if obs.range_km is None or obs.range_km <= 0:
+            return None, None, None, "Range+angles IOD received invalid range"
+
+        r_target = obs.observer_position_km + obs.range_km * obs.line_of_sight
+        positions.append(r_target)
+
+    positions = np.array(positions, dtype=np.float64)
+
+    mid_idx = len(ranged_obs) // 2
+    epoch = ranged_obs[mid_idx].timestamp
+    r_mid = positions[mid_idx]
+
+    # Use a finite-difference velocity over the full arc for stability.
+    t_first = ranged_obs[0].timestamp
+    t_last = ranged_obs[-1].timestamp
+    dt = time_difference_seconds(t_first, t_last)
+
+    if abs(dt) < 1e-9:
+        return None, None, None, "Range+angles observations have insufficient time separation"
+
+    v_mid = (positions[-1] - positions[0]) / dt
+
+    r_mag = norm(r_mid)
+    v_mag = norm(v_mid)
+
+    if r_mag < RE_EARTH + 100:
+        return None, None, None, f"Range+angles solution inside Earth (r={r_mag:.1f} km)"
+
+    if v_mag < 1.0 or v_mag > 15.0:
+        return None, None, None, f"Range+angles velocity unreasonable ({v_mag:.2f} km/s)"
+
+    return r_mid, v_mid, epoch, "Range+angles IOD success"
 
 # =============================================================================
 # Orbital Elements Conversion
@@ -1068,6 +1458,83 @@ class IODSolver:
     def __init__(self, mu: float = MU_EARTH_KM):
         self.mu = mu
     
+    def _score_candidate(
+        self,
+        obs_sorted: List[IODObservation],
+        r2: np.ndarray,
+        v2: np.ndarray,
+        epoch: datetime,
+    ) -> tuple[float, float]:
+        """
+        Score a candidate solution. Lower is better.
+
+        The RMS angular residual is still the main quality metric, but we add
+        stronger physical-plausibility penalties so a weird high-eccentricity
+        or very high-energy orbit does not beat a cleaner low-residual LEO-like
+        solution.
+        """
+        rms_arcsec, _ = compute_residuals(obs_sorted, r2, v2, epoch, self.mu)
+
+        v_mag = norm(v2)
+        r_mag = norm(r2)
+        elements = state_to_elements(r2, v2, self.mu)
+
+        a = elements["semi_major_axis_km"]
+        e = elements["eccentricity"]
+        perigee = elements["perigee_km"]
+        apogee = elements["apogee_km"]
+
+        penalty = 0.0
+
+        # Radius sanity.
+        if r_mag < RE_EARTH + 100:
+            penalty += 1_000_000.0
+        elif r_mag > 50_000.0:
+            penalty += 50_000.0 + 0.5 * (r_mag - 50_000.0)
+
+        # LEO-ish optical close-pass cases should normally be around 7-8 km/s.
+        # Keep this loose, but penalize obviously suspicious values.
+        if v_mag < 5.0:
+            penalty += 25_000.0 + 10_000.0 * (5.0 - v_mag)
+        elif v_mag > 9.5:
+            penalty += 25_000.0 + 10_000.0 * (v_mag - 9.5)
+
+        # Semi-major axis plausibility.
+        if a is not None and np.isfinite(a):
+            if a < RE_EARTH + 100:
+                penalty += 100_000.0
+            elif a > 20_000.0:
+                penalty += 25_000.0 + 0.5 * (a - 20_000.0)
+        else:
+            penalty += 100_000.0
+
+        # Eccentricity plausibility.
+        if e is not None and np.isfinite(e):
+            if e >= 1.0:
+                penalty += 1_000_000.0
+            elif e > 0.5:
+                penalty += 75_000.0 + 150_000.0 * (e - 0.5)
+            elif e > 0.2:
+                penalty += 10_000.0 + 50_000.0 * (e - 0.2)
+        else:
+            penalty += 100_000.0
+
+        # Perigee / apogee sanity.
+        if perigee is not None and np.isfinite(perigee):
+            if perigee < 100.0:
+                penalty += 100_000.0
+            elif perigee < 300.0:
+                penalty += 25_000.0
+        else:
+            penalty += 50_000.0
+
+        if apogee is not None and np.isfinite(apogee):
+            if apogee > 20_000.0:
+                penalty += 25_000.0 + 0.25 * (apogee - 20_000.0)
+
+        score = rms_arcsec + penalty
+        return score, rms_arcsec
+
     def solve(
         self,
         observations: List[IODObservation],
@@ -1095,6 +1562,73 @@ class IODSolver:
         # Sort by time
         obs_sorted = sorted(observations, key=lambda o: o.timestamp)
         
+        # If all observations contain slant range, use the range+angles path.
+        # This demonstrates sensor-agnostic ingest: optical observations use
+        # angles-only methods, while radar observations can use range-bearing
+        # reconstruction.
+        ranged_count = sum(
+            1 for obs in obs_sorted
+            if obs.range_km is not None and np.isfinite(obs.range_km)
+        )
+
+        if ranged_count >= 3 and ranged_count == len(obs_sorted):
+            r_radar, v_radar, radar_epoch, radar_status = range_angles_iod(
+                obs_sorted,
+                self.mu,
+            )
+
+            attempted_methods = [{
+                "method": "range+angles",
+                "success": r_radar is not None and v_radar is not None,
+                "status": radar_status,
+            }]
+
+            if r_radar is None or v_radar is None or radar_epoch is None:
+                return IODSolution(
+                    success=False,
+                    track_id=track_id,
+                    epoch=obs_sorted[len(obs_sorted) // 2].timestamp,
+                    error_message=radar_status,
+                    observations_used=len(obs_sorted),
+                    attempted_methods=attempted_methods,
+                )
+
+            elements = state_to_elements(r_radar, v_radar, self.mu)
+            rms_arcsec, _ = compute_residuals(
+                obs_sorted,
+                r_radar,
+                v_radar,
+                radar_epoch,
+                self.mu,
+            )
+
+            attempted_methods[0].update({
+                "rms_residual_arcsec": rms_arcsec,
+                "semi_major_axis_km": elements["semi_major_axis_km"],
+                "eccentricity": elements["eccentricity"],
+                "perigee_km": elements["perigee_km"],
+                "apogee_km": elements["apogee_km"],
+            })
+
+            return IODSolution(
+                success=True,
+                track_id=track_id,
+                epoch=radar_epoch,
+                position_km=r_radar,
+                velocity_km_s=v_radar,
+                semi_major_axis_km=elements["semi_major_axis_km"],
+                eccentricity=elements["eccentricity"],
+                inclination_deg=elements["inclination_deg"],
+                raan_deg=elements["raan_deg"],
+                arg_perigee_deg=elements["arg_perigee_deg"],
+                true_anomaly_deg=elements["true_anomaly_deg"],
+                rms_residual_arcsec=rms_arcsec,
+                observations_used=len(obs_sorted),
+                iterations=1,
+                method_used="range+angles",
+                attempted_methods=attempted_methods,
+            )
+
         # Select best three observations (first, middle, last for max arc)
         n = len(obs_sorted)
         if n == 3:
@@ -1104,41 +1638,213 @@ class IODSolver:
             obs1 = obs_sorted[0]
             obs2 = obs_sorted[n // 2]
             obs3 = obs_sorted[-1]
-        
-        # Try double-r method first (more robust for space-based sensors)
-        r2, v2, status = double_r_iod(obs1, obs2, obs3, self.mu)
-        
-        if r2 is None:
-            # Try range search as fallback
-            r2, v2, status = range_search_iod(obs1, obs2, obs3, self.mu)
-        
-        if r2 is None:
-            # Last resort: try Gauss
-            r2, v2, status = gauss_iod(obs1, obs2, obs3, self.mu)
-        
-        if r2 is None:
-            # As a last resort, try to estimate an orbit from the observation directions
-            # This is less accurate but provides a working solution for demos
+
+        attempted_methods = []
+        candidates = []
+
+        def try_method(method_name: str, method_fn):
+            r2_try, v2_try, status_try = method_fn(obs1, obs2, obs3, self.mu)
+
+            attempt_record = {
+                "method": method_name,
+                "success": r2_try is not None and v2_try is not None,
+                "status": status_try,
+            }
+
+            if r2_try is not None and v2_try is not None:
+                v_mag = norm(v2_try)
+                r_mag = norm(r2_try)
+
+                # Hard screening first
+                if v_mag < 1.0 or v_mag > 15.0:
+                    attempt_record["success"] = False
+                    attempt_record["status"] = (
+                        f"{status_try}; rejected: unreasonable velocity {v_mag:.2f} km/s"
+                    )
+                elif r_mag < RE_EARTH + 100:
+                    attempt_record["success"] = False
+                    attempt_record["status"] = (
+                        f"{status_try}; rejected: solution inside Earth (r={r_mag:.1f} km)"
+                    )
+                elif r_mag > 100000:
+                    attempt_record["success"] = False
+                    attempt_record["status"] = (
+                        f"{status_try}; rejected: solution too far from Earth (r={r_mag:.1f} km)"
+                    )
+                else:
+                    elements_try = state_to_elements(r2_try, v2_try, self.mu)
+
+                    a_try = elements_try["semi_major_axis_km"]
+                    e_try = elements_try["eccentricity"]
+                    perigee_try = elements_try["perigee_km"]
+                    apogee_try = elements_try["apogee_km"]
+
+                    if a_try is not None and a_try < 0:
+                        attempt_record["success"] = False
+                        attempt_record["status"] = (
+                            f"{status_try}; rejected: hyperbolic orbit (a={a_try:.1f} km)"
+                        )
+                    elif perigee_try is not None and perigee_try < 100.0:
+                        attempt_record["success"] = False
+                        attempt_record["status"] = (
+                            f"{status_try}; rejected: perigee too low ({perigee_try:.1f} km)"
+                        )
+                    elif e_try is not None and e_try >= 0.8:
+                        attempt_record["success"] = False
+                        attempt_record["status"] = (
+                            f"{status_try}; rejected: eccentricity too high ({e_try:.3f})"
+                        )
+                    elif apogee_try is not None and apogee_try > 50000.0:
+                        attempt_record["success"] = False
+                        attempt_record["status"] = (
+                            f"{status_try}; rejected: apogee too high ({apogee_try:.1f} km)"
+                        )
+                    else:
+                        score_try, rms_try = self._score_candidate(
+                            obs_sorted, r2_try, v2_try, obs2.timestamp
+                        )
+
+                        if method_name == "gooding" and rms_try > 1000.0:
+                            attempt_record["success"] = False
+                            attempt_record["status"] = (
+                                f"{status_try}; rejected: Gooding residual too high ({rms_try:.1f} arcsec)"
+                            )
+                        else:
+                            physical_penalty = score_try - rms_try
+
+                            attempt_record["score"] = score_try
+                            attempt_record["base_score"] = rms_try
+                            attempt_record["physical_penalty"] = physical_penalty
+                            attempt_record["rms_residual_arcsec"] = rms_try
+                            attempt_record["semi_major_axis_km"] = elements_try["semi_major_axis_km"]
+                            attempt_record["eccentricity"] = elements_try["eccentricity"]
+                            attempt_record["perigee_km"] = elements_try["perigee_km"]
+                            attempt_record["apogee_km"] = elements_try["apogee_km"]
+
+                            candidates.append({
+                                "method": method_name,
+                                "r2": r2_try,
+                                "v2": v2_try,
+                                "score": score_try,
+                                "rms_arcsec": rms_try,
+                                "elements": elements_try,
+                            })
+
+            attempted_methods.append(attempt_record)
+
+        try_method("double-r", double_r_iod)
+        try_method("range-search", range_search_iod)
+        try_method("gauss", gauss_iod)
+        try_method("gooding", gooding_iod)
+
+        if not candidates:
             r2, v2, status = estimate_orbit_from_directions(obs1, obs2, obs3, self.mu)
-        
-        if r2 is None:
+            fallback_record = {
+                "method": "estimate_orbit_from_directions",
+                "success": r2 is not None and v2 is not None,
+                "status": status,
+            }
+
+            if r2 is not None and v2 is not None:
+                v_mag = norm(v2)
+                r_mag = norm(r2)
+
+                if v_mag < 1.0 or v_mag > 15.0:
+                    fallback_record["success"] = False
+                    fallback_record["status"] = (
+                        f"{status}; rejected: unreasonable velocity {v_mag:.2f} km/s"
+                    )
+                elif r_mag < RE_EARTH + 100:
+                    fallback_record["success"] = False
+                    fallback_record["status"] = (
+                        f"{status}; rejected: solution inside Earth (r={r_mag:.1f} km)"
+                    )
+                elif r_mag > 100000:
+                    fallback_record["success"] = False
+                    fallback_record["status"] = (
+                        f"{status}; rejected: solution too far from Earth (r={r_mag:.1f} km)"
+                    )
+                else:
+                    elements_try = state_to_elements(r2, v2, self.mu)
+
+                    a_try = elements_try["semi_major_axis_km"]
+                    e_try = elements_try["eccentricity"]
+                    perigee_try = elements_try["perigee_km"]
+                    apogee_try = elements_try["apogee_km"]
+
+                    if a_try is not None and a_try < 0:
+                        fallback_record["success"] = False
+                        fallback_record["status"] = (
+                            f"{status}; rejected: hyperbolic orbit (a={a_try:.1f} km)"
+                        )
+                    elif perigee_try is not None and perigee_try < 100.0:
+                        fallback_record["success"] = False
+                        fallback_record["status"] = (
+                            f"{status}; rejected: perigee too low ({perigee_try:.1f} km)"
+                        )
+                    elif e_try is not None and e_try >= 0.8:
+                        fallback_record["success"] = False
+                        fallback_record["status"] = (
+                            f"{status}; rejected: eccentricity too high ({e_try:.3f})"
+                        )
+                    elif apogee_try is not None and apogee_try > 50000.0:
+                        fallback_record["success"] = False
+                        fallback_record["status"] = (
+                            f"{status}; rejected: apogee too high ({apogee_try:.1f} km)"
+                        )
+                    else:
+                        score_try, rms_try = self._score_candidate(
+                            obs_sorted, r2, v2, obs2.timestamp
+                        )
+                        physical_penalty = score_try - rms_try
+
+                        fallback_record["score"] = score_try
+                        fallback_record["base_score"] = rms_try
+                        fallback_record["physical_penalty"] = physical_penalty
+                        fallback_record["rms_residual_arcsec"] = rms_try
+                        fallback_record["semi_major_axis_km"] = elements_try["semi_major_axis_km"]
+                        fallback_record["eccentricity"] = elements_try["eccentricity"]
+                        fallback_record["perigee_km"] = elements_try["perigee_km"]
+                        fallback_record["apogee_km"] = elements_try["apogee_km"]
+
+                        candidates.append({
+                            "method": "estimate_orbit_from_directions",
+                            "r2": r2,
+                            "v2": v2,
+                            "score": score_try,
+                            "rms_arcsec": rms_try,
+                            "elements": elements_try,
+                        })
+
+            attempted_methods.append(fallback_record)
+
+        if not candidates:
             return IODSolution(
                 success=False,
                 track_id=track_id,
                 epoch=obs2.timestamp,
-                error_message=f"IOD failed: {status}",
-                observations_used=3
+                error_message="IOD failed: no acceptable candidate solution",
+                observations_used=3,
+                attempted_methods=attempted_methods
             )
+
+        best = min(candidates, key=lambda c: c["score"])
+        r2 = best["r2"]
+        v2 = best["v2"]
+        method_used = best["method"]
+        elements = best["elements"]
+        rms_arcsec = best["rms_arcsec"]
         
         # Check velocity reasonableness
         v2_mag = norm(v2)
-        if v2_mag < 1.0 or v2_mag > 15.0:  # km/s - reasonable orbital velocities
+        if v2_mag < 1.0 or v2_mag > 15.0:
             return IODSolution(
                 success=False,
                 track_id=track_id,
                 epoch=obs2.timestamp,
                 error_message=f"Unreasonable velocity: {v2_mag:.2f} km/s",
-                observations_used=3
+                observations_used=3,
+                attempted_methods=attempted_methods
             )
         
         # Check position is in valid orbital range
@@ -1149,7 +1855,8 @@ class IODSolver:
                 track_id=track_id,
                 epoch=obs2.timestamp,
                 error_message=f"Solution inside Earth: r = {r2_mag:.1f} km",
-                observations_used=3
+                observations_used=3,
+                attempted_methods=attempted_methods
             )
         
         if r2_mag > 100000:
@@ -1158,11 +1865,9 @@ class IODSolver:
                 track_id=track_id,
                 epoch=obs2.timestamp,
                 error_message=f"Solution too far from Earth (r = {r2_mag:.1f} km)",
-                observations_used=3
+                observations_used=3,
+                attempted_methods=attempted_methods
             )
-        
-        # Compute orbital elements
-        elements = state_to_elements(r2, v2, self.mu)
         
         # Check orbit reasonableness - only fail for clearly impossible orbits
         # Note: For demo purposes, we allow some physically questionable orbits
@@ -1172,11 +1877,9 @@ class IODSolver:
                 track_id=track_id,
                 epoch=obs2.timestamp,
                 error_message=f"Hyperbolic orbit (a = {elements['semi_major_axis_km']:.1f} km)",
-                observations_used=3
+                observations_used=3,
+                attempted_methods=attempted_methods
             )
-        
-        # Compute residuals for reference (but don't fail on them for demo)
-        rms_arcsec, residuals = compute_residuals(obs_sorted, r2, v2, obs2.timestamp, self.mu)
         
         # Success!
         return IODSolution(
@@ -1193,9 +1896,10 @@ class IODSolver:
             true_anomaly_deg=elements["true_anomaly_deg"],
             rms_residual_arcsec=rms_arcsec,
             observations_used=len(obs_sorted),
-            iterations=1
+            iterations=1,
+            method_used=method_used,
+            attempted_methods=attempted_methods
         )
-
 
 # =============================================================================
 # CLI Testing
