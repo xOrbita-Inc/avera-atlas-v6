@@ -339,7 +339,8 @@ components:
             PostManeuverProjection, NoGoReasoning) plus VerificationResult and
             MissionImpactSummary. Absent on /v1/evaluate/batch responses.
           nullable: true
-          $ref: "#/components/schemas/ATLASManeuverArtifact"
+          allOf:
+            - $ref: "#/components/schemas/ATLASManeuverArtifact"
     ManeuverRecommendation:
       required:
       - direction
@@ -481,17 +482,20 @@ components:
         recommendation:
           description: "A2: What should be done? Null if no-go."
           nullable: true
-          $ref: "#/components/schemas/ManeuverRecommendation2_5"
+          allOf:
+            - $ref: "#/components/schemas/ManeuverRecommendation2_5"
         rationale:
           $ref: "#/components/schemas/DecisionRationale"
         post_maneuver:
           description: "A4: What happens if we execute? Null if no-go."
           nullable: true
-          $ref: "#/components/schemas/PostManeuverProjection"
+          allOf:
+            - $ref: "#/components/schemas/PostManeuverProjection"
         no_go:
           description: "A5: Why are we not acting? Null if maneuver recommended."
           nullable: true
-          $ref: "#/components/schemas/NoGoReasoning"
+          allOf:
+            - $ref: "#/components/schemas/NoGoReasoning"
         verification:
           $ref: "#/components/schemas/VerificationResult"
         mission_impact:

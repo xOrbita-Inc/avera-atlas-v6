@@ -27,10 +27,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sys
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 
@@ -46,51 +44,13 @@ from avoid.decision_model import (
 from common.maneuver_scorer import evaluate_conjunction_v25, _policy_from_dict
 from common.atlas_artifact import build_atlas_artifact
 from common.satellite_capability import SatelliteCapability
+from common.logging_setup import build_logger, _POLICY_CONFIG_PATH, SERVICE_NAME, SERVICE_VERSION
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-SERVICE_NAME    = "planner"
-SERVICE_VERSION = "2.5.0"
-
-# Default config path -- baked into image via COPY config/ /app/config/
-# Can be overridden via env var for future operator policy hot-swap support.
-_POLICY_CONFIG_PATH = Path(
-    os.environ.get("OPERATOR_POLICY_PATH", "/app/config/operator_policy_leo.yaml")
-)
-
-
-# ---------------------------------------------------------------------------
-# Structured JSON logging (SCRUM-341 AC3)
-# Matches documented service log format:
-# {"time": "...", "level": "INFO", "service": "planner", "msg": "..."}
-# ---------------------------------------------------------------------------
-
-class _JsonFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        payload: Dict[str, Any] = {
-            "time":    datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            "level":   record.levelname,
-            "service": SERVICE_NAME,
-            "msg":     record.getMessage(),
-        }
-        if record.exc_info:
-            payload["exc"] = self.formatException(record.exc_info)
-        return json.dumps(payload)
-
-
-def _setup_logging() -> logging.Logger:
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(_JsonFormatter())
-    logger = logging.getLogger(SERVICE_NAME)
-    logger.setLevel(logging.INFO)
-    logger.addHandler(handler)
-    logger.propagate = False
-    return logger
-
-
-log = _setup_logging()
+log = build_logger()
 
 # ---------------------------------------------------------------------------
 # Ingest service URL
@@ -140,31 +100,19 @@ def _fetch_cdm_covariance(
         url = f"{_ingest_url()}/cdm/{primary_norad}/{secondary_norad}"
         resp = http_requests.get(url, timeout=5.0)
     except Exception as exc:
-        log.warning(
-            json.dumps({"event": "covariance_fetch_fail", "reason": "unreachable",
-                        "pair": f"{primary_norad}/{secondary_norad}", "exc": str(exc)})
-        )
+        log.warning("covariance fetch failed", extra={"event": "covariance_fetch_fail", "reason": "unreachable", "pair": f"{primary_norad}/{secondary_norad}", "exc": str(exc)})
         return _SURROGATE
 
     if resp.status_code == 404:
-        log.warning(
-            json.dumps({"event": "covariance_fetch_fail", "reason": "not_found",
-                        "pair": f"{primary_norad}/{secondary_norad}"})
-        )
+        log.warning("covariance fetch failed", extra={"event": "covariance_fetch_fail", "reason": "not_found", "pair": f"{primary_norad}/{secondary_norad}"})
         return _SURROGATE
 
     if resp.status_code == 503:
-        log.warning(
-            json.dumps({"event": "covariance_fetch_fail", "reason": "store_unavailable",
-                        "pair": f"{primary_norad}/{secondary_norad}"})
-        )
+        log.warning("covariance fetch failed", extra={"event": "covariance_fetch_fail", "reason": "store_unavailable", "pair": f"{primary_norad}/{secondary_norad}"})
         return _SURROGATE
 
     if not resp.ok:
-        log.warning(
-            json.dumps({"event": "covariance_fetch_fail", "reason": f"http_{resp.status_code}",
-                        "pair": f"{primary_norad}/{secondary_norad}"})
-        )
+        log.warning("covariance fetch failed", extra={"event": "covariance_fetch_fail", "reason": f"http_{resp.status_code}", "pair": f"{primary_norad}/{secondary_norad}"})
         return _SURROGATE
 
     try:
@@ -179,18 +127,11 @@ def _fetch_cdm_covariance(
         cov_eci = rot @ cov_rtn @ rot.T
         p_rel_km2 = cov_eci.flatten().tolist()
 
-        log.info(
-            json.dumps({"event": "covariance_fetched",
-                        "pair": f"{primary_norad}/{secondary_norad}",
-                        "source": covariance_source, "cdm_id": cdm_record_id})
-        )
+        log.info("covariance fetched", extra={"event": "covariance_fetched", "pair": f"{primary_norad}/{secondary_norad}", "source": covariance_source, "cdm_id": cdm_record_id})
         return p_rel_km2, covariance_source, cdm_record_id
 
     except Exception as exc:
-        log.warning(
-            json.dumps({"event": "covariance_parse_fail",
-                        "pair": f"{primary_norad}/{secondary_norad}", "exc": str(exc)})
-        )
+        log.warning("covariance parse failed", extra={"event": "covariance_parse_fail", "pair": f"{primary_norad}/{secondary_norad}", "exc": str(exc)})
         return _SURROGATE
 
 
@@ -229,23 +170,12 @@ def _post_planner_output(
         resp = http_requests.post(url, json=payload, timeout=5.0)
 
         if resp.status_code == 201:
-            log.info(
-                json.dumps({"event": "audit_written",
-                            "planner_output_id": resp.json().get("id"),
-                            "cdm_record_id": cdm_record_id})
-            )
+            log.info("audit record written", extra={"event": "audit_written", "planner_output_id": resp.json().get("id"), "cdm_record_id": cdm_record_id})
         else:
-            log.warning(
-                json.dumps({"event": "audit_write_unexpected_status",
-                            "status": resp.status_code,
-                            "cdm_record_id": cdm_record_id})
-            )
+            log.warning("audit write unexpected status", extra={"event": "audit_write_unexpected_status", "status": resp.status_code, "cdm_record_id": cdm_record_id})
 
     except Exception as exc:
-        log.warning(
-            json.dumps({"event": "audit_write_failed",
-                        "cdm_record_id": cdm_record_id, "exc": str(exc)})
-        )
+        log.warning("audit write failed", extra={"event": "audit_write_failed", "cdm_record_id": cdm_record_id, "exc": str(exc)})
 
 
 # ---------------------------------------------------------------------------
@@ -257,13 +187,9 @@ _start_time = time.time()
 
 @asynccontextmanager
 async def lifespan(a):
-    log.info(json.dumps({
-        "event":         "startup",
-        "version":       SERVICE_VERSION,
-        "policy_config": str(_POLICY_CONFIG_PATH),
-    }))
+    log.info("service starting", extra={"event": "startup", "version": SERVICE_VERSION, "policy_config": str(_POLICY_CONFIG_PATH)})
     yield
-    log.info(json.dumps({"event": "shutdown", "version": SERVICE_VERSION}))
+    log.info("service shutting down", extra={"event": "shutdown", "version": SERVICE_VERSION})
 
 
 svc = FastAPI(
@@ -281,12 +207,7 @@ svc = FastAPI(
 async def _log_requests(request: Request, call_next):
     t0 = time.time()
     response = await call_next(request)
-    log.info(json.dumps({
-        "method":     request.method,
-        "path":       request.url.path,
-        "status":     response.status_code,
-        "elapsed_ms": round((time.time() - t0) * 1000, 1),
-    }))
+    log.info("request", extra={"method": request.method, "path": request.url.path, "status": response.status_code, "elapsed_ms": round((time.time() - t0) * 1000, 1)})
     return response
 
 
@@ -333,7 +254,7 @@ async def ready() -> Dict[str, Any]:
             "policy_config": str(_POLICY_CONFIG_PATH),
         }
     except Exception as exc:
-        log.warning(json.dumps({"event": "readiness_fail", "exc": str(exc)}))
+        log.warning("readiness check failed", extra={"event": "readiness_fail", "exc": str(exc)})
         raise HTTPException(status_code=503, detail=str(exc))
 
 
@@ -380,12 +301,9 @@ async def post_evaluate(request: Request):
             body["conjunction"]["p_rel_km2"] = p_rel_km2
             body["conjunction"]["covariance_source"] = covariance_source
         else:
-            log.info(json.dumps({
-                "event": "surrogate_covariance",
-                "reason": "primary_norad_not_provided",
-            }))
+            log.info("using surrogate covariance", extra={"event": "surrogate_covariance", "reason": "primary_norad_not_provided"})
     except Exception as exc:
-        log.warning(json.dumps({"event": "covariance_adapter_error", "exc": str(exc)}))
+        log.warning("covariance adapter error", extra={"event": "covariance_adapter_error", "exc": str(exc)})
     # ----------------------------------------------------------------------
 
     try:
@@ -430,17 +348,9 @@ async def post_evaluate(request: Request):
                 miss_distance_km=conj_dict.get("miss_distance_km"),
             )
             result["atlas_artifact"] = artifact.to_dict()
-            log.info(json.dumps({
-                "event":          "artifact_built",
-                "conjunction_id": scoring.conjunction_id,
-                "summary":        artifact.operator_summary(),
-            }))
+            log.info("atlas artifact built", extra={"event": "artifact_built", "conjunction_id": scoring.conjunction_id, "summary": artifact.operator_summary()})
         except Exception as exc:
-            log.warning(json.dumps({
-                "event":          "artifact_build_failed",
-                "conjunction_id": body.get("conjunction_id", "?"),
-                "exc":            str(exc),
-            }))
+            log.warning("atlas artifact build failed", extra={"event": "artifact_build_failed", "conjunction_id": body.get("conjunction_id", "?"), "exc": str(exc)})
         # ------------------------------------------------------------------
 
         # --- Audit write --------------------------------------------------
@@ -456,7 +366,7 @@ async def post_evaluate(request: Request):
             content=error_response(str(exc)),
         )
     except Exception as exc:
-        log.error(json.dumps({"event": "evaluate_error", "exc": str(exc)}))
+        log.error("evaluate error", extra={"event": "evaluate_error", "exc": str(exc)})
         return JSONResponse(
             status_code=500,
             content=error_response("Internal error: " + str(exc)),
@@ -487,7 +397,7 @@ async def post_evaluate_batch(request: Request):
             content=error_response(str(exc)),
         )
     except Exception as exc:
-        log.error(json.dumps({"event": "evaluate_batch_error", "exc": str(exc)}))
+        log.error("evaluate batch error", extra={"event": "evaluate_batch_error", "exc": str(exc)})
         return JSONResponse(
             status_code=500,
             content=error_response("Internal error: " + str(exc)),

@@ -26,7 +26,7 @@ Run:
 import math
 import pytest
 
-from services.planner.common.constellation_geometry import (
+from common.constellation_geometry import (
     WalkerDeltaGeometry,
     WalkerSlotAddress,
     SlotRecoveryPlan,
