@@ -36,6 +36,16 @@ def datetime_to_jd(dt: datetime) -> tuple[float, float]:
     )
     return jd, fr
 
+def deterministic_range_error_km(timestamp: datetime, scale_km: float = 0.15) -> float:
+    """
+    Deterministic pseudo-measurement error for radar range validation.
+
+    This keeps the validation repeatable while ensuring the radar path does not
+    receive the exact truth range that it later reconstructs.
+    """
+    seconds = timestamp.timestamp()
+    return scale_km * math.sin(0.001 * seconds)
+
 
 def sgp4_state_km(tle: TLECase, dt: datetime) -> tuple[np.ndarray, np.ndarray]:
     sat = Satrec.twoline2rv(tle.line1, tle.line2)
@@ -121,8 +131,12 @@ def make_observations_from_tle(
             range_km = None
             range_sigma_km = None
         elif sensor_type == "radar":
-            range_km = slant_range_km
-            range_sigma_km = 0.05
+            # Use an independent measured range, not the exact geometry range.
+            # This prevents the validation from trivially reconstructing the truth state
+            # with zero position error.
+            range_error_km = deterministic_range_error_km(timestamp)
+            range_km = slant_range_km + range_error_km
+            range_sigma_km = 0.15
         else:
             raise ValueError(f"Unsupported sensor_type: {sensor_type}")
 
@@ -267,8 +281,8 @@ def main() -> None:
 
     print("Result:")
     print("  Optical observations use RA/Dec only and route through the angles-only IOD chain.")
-    print("  Radar observations include RA/Dec plus range_km and route through the")
-    print("  range+angles IOD path inside IODSolver.solve().")
+    print("  Radar observations include RA/Dec plus independently perturbed range_km")
+    print("  and route through the range+angles IOD path inside IODSolver.solve().")
     print("  Both paths ingest through IODObservation and output orbital elements.")
 
 
