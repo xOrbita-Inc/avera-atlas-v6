@@ -10,13 +10,22 @@ from sqlalchemy.exc import OperationalError
 
 from spacetrack_client import SpaceTrackClient
 from cdm_parser import parse_cdm_kvn
+from cdm_to_conjunction import cdm_to_conjunction_state
 from db import init_db, save_cdm_record, CdmRecord, PlannerOutput, get_session
 
 # === CONFIGURATION ===
-BUFFER_WINDOW_SIZE = 5 
+BUFFER_WINDOW_SIZE = 5
 # This path must be a shared volume in the Pod
-OUTPUT_DIR = "/data/planner_artifacts" 
+OUTPUT_DIR = "/data/planner_artifacts"
 ARTIFACT_NAME = "states_multi.npz"
+
+# SCRUM-329: Live polling gate.
+# Default is false -- injected reference CDM path is used until the SSA
+# Sharing Agreement with 18 SPCS is in place. Flip to true via env var
+# after the agreement is active. No code changes required at that point.
+_LIVE_POLLING_ENABLED = (
+    os.environ.get("SPACETRACK_LIVE_POLLING_ENABLED", "false").lower() == "true"
+)
 
 app = FastAPI(title="AVERA-ATLAS Ingest Service")
 
@@ -24,6 +33,10 @@ app = FastAPI(title="AVERA-ATLAS Ingest Service")
 @app.on_event("startup")
 async def startup_event() -> None:
     init_db()
+    logging.info(
+        "[INGEST] Space-Track live polling: %s",
+        "ENABLED" if _LIVE_POLLING_ENABLED else "DISABLED (reference CDM path active)",
+    )
 
 
 # --- Data Models (Matching detection.json Schema) ---
@@ -34,7 +47,7 @@ class CameraPose(BaseModel):
 class Detection(BaseModel):
     track_id: Optional[str] = None
     object_class: Literal["debris", "satellite", "star", "unknown"] = Field(..., alias="class")
-    spacecraft_type: Optional[str] = None  # Specific type like "CubeSat", "Starlink", etc.
+    spacecraft_type: Optional[str] = None
     confidence: float
     bbox: List[float] = Field(..., min_items=4, max_items=4)
 
@@ -73,29 +86,27 @@ class PollResponse(BaseModel):
 
 
 detection_buffer = []
-object_counters = {}  # Track sequential IDs per object type
+object_counters = {}
+
 
 def get_object_id(det, frame_id):
     """Generate a clean object ID based on detected type."""
     global object_counters
-    
-    # Priority: track_id > spacecraft_type > object_class > unknown
+
     if det.track_id:
         return det.track_id
-    
-    # Use spacecraft_type if available (e.g., "CubeSat", "Starlink")
+
     if det.spacecraft_type:
         obj_type = det.spacecraft_type.replace(" ", "_")
     else:
-        # Fall back to general class
         obj_type = det.object_class if det.object_class != "unknown" else "UNK"
-    
-    # Get next sequential number for this type
+
     if obj_type not in object_counters:
         object_counters[obj_type] = 0
     object_counters[obj_type] += 1
-    
+
     return f"{obj_type}_{object_counters[obj_type]:03d}"
+
 
 def process_buffer():
     global detection_buffer
@@ -103,37 +114,35 @@ def process_buffer():
         return
 
     print(f"[INGEST] Processing batch of {len(detection_buffer)} frames...")
-    
+
     object_ids = []
     r_eci_km = []
     v_eci_km_s = []
     confidences = []
-    
-    # 1. Convert Detections to States (Mock Logic for V2)
+
     for frame in detection_buffer:
-        obs_pos = np.array(frame.camera_pose.position_eci_km) if frame.camera_pose else np.array([0,0,0])
-        
+        obs_pos = np.array(frame.camera_pose.position_eci_km) if frame.camera_pose else np.array([0, 0, 0])
+
         for det in frame.detections:
-            if det.confidence < 0.5: continue
-            
+            if det.confidence < 0.5:
+                continue
+
             obj_id = get_object_id(det, frame.frame_id)
-            
-            # Mock Relative -> Absolute State
+
             random_offset = np.random.normal(0, 50, 3)
             state_pos = obs_pos + random_offset
-            state_vel = np.array([0.0, 7.6, 0.0]) # Approx LEO
-            
+            state_vel = np.array([0.0, 7.6, 0.0])
+
             object_ids.append(obj_id)
             r_eci_km.append(state_pos)
             v_eci_km_s.append(state_vel)
             confidences.append(det.confidence)
 
-    # 2. Write Artifact to Shared Volume
     if object_ids:
         t0_utc = datetime.utcnow().isoformat()
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         out_path = os.path.join(OUTPUT_DIR, ARTIFACT_NAME)
-        
+
         np.savez(
             out_path,
             object_ids=np.array(object_ids),
@@ -144,8 +153,9 @@ def process_buffer():
             metadata=json.dumps({"source": "swir_live", "t0": t0_utc})
         )
         print(f"[INGEST] Written {out_path} ({len(object_ids)} objects)")
-    
+
     detection_buffer = []
+
 
 @app.post("/ingest/detection", status_code=202)
 async def ingest_detection(frame: DetectionFrame, background_tasks: BackgroundTasks):
@@ -155,29 +165,67 @@ async def ingest_detection(frame: DetectionFrame, background_tasks: BackgroundTa
     return {"status": "buffered", "count": len(detection_buffer)}
 
 
+# SCRUM-329 AC5: source mode endpoint.
+# Returns whether the pipeline is running on live Space-Track data or the
+# injected reference CDM. The UI polls this on load to render the correct
+# data source label. No code changes required to activate live mode --
+# flip SPACETRACK_LIVE_POLLING_ENABLED in the deployment env.
+@app.get("/cdm/source_mode", status_code=200)
+async def get_source_mode() -> dict:
+    """Return the current CDM data source mode.
+
+    Response:
+      live_polling_enabled : bool   -- reflects SPACETRACK_LIVE_POLLING_ENABLED
+      mode                 : str    -- 'live' | 'reference'
+      label                : str    -- human-readable label for the UI badge
+    """
+    return {
+        "live_polling_enabled": _LIVE_POLLING_ENABLED,
+        "mode": "live" if _LIVE_POLLING_ENABLED else "reference",
+        "label": "LIVE SPACE-TRACK POLLING" if _LIVE_POLLING_ENABLED else "REFERENCE CDM (TIROS 4)",
+    }
+
+
 @app.post("/cdm/poll", response_model=PollResponse, status_code=200)
 async def poll_cdms(req: PollRequest) -> PollResponse:
     """Trigger a Space-Track CDM fetch and persist results.
 
-    Exactly one of norad_id or pc_threshold must be provided.
-    Each parsed CDM is saved independently -- a failure on one record
-    does not abort the rest of the batch.
+    SCRUM-329: Gated behind SPACETRACK_LIVE_POLLING_ENABLED env flag (AC1).
+    When disabled, returns 503 with a descriptive message so the operator
+    knows why no CDMs were fetched rather than receiving a silent empty state.
+
+    Each parsed CDM is validated through cdm_to_conjunction_state() before
+    being saved, confirming it maps cleanly to evaluate_conjunction() inputs
+    without adapter code (AC4). CDMs that fail validation are skipped and
+    logged, but do not abort the rest of the batch.
     """
+    from fastapi import HTTPException
+
+    # SCRUM-329 AC1: gate on env flag.
+    if not _LIVE_POLLING_ENABLED:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Live Space-Track CDM polling is disabled. "
+                "Set SPACETRACK_LIVE_POLLING_ENABLED=true to activate after the "
+                "SSA Sharing Agreement with 18 SPCS is in place. "
+                "Use the Inject Example CDM button to load the reference TIROS 4 CDM."
+            ),
+        )
+
     if req.norad_id is None and req.pc_threshold is None:
-        from fastapi import HTTPException
         raise HTTPException(
             status_code=422,
-            detail="Exactly one of norad_id or pc_threshold must be provided"
+            detail="Exactly one of norad_id or pc_threshold must be provided",
         )
 
     client = SpaceTrackClient()
     try:
         client.login()
     except Exception as e:
-        from fastapi import HTTPException
         raise HTTPException(
             status_code=503,
-            detail=f"Space-Track login failed: {e}"
+            detail=f"Space-Track login failed: {e}",
         )
 
     try:
@@ -190,33 +238,69 @@ async def poll_cdms(req: PollRequest) -> PollResponse:
                 req.pc_threshold, days_lookahead=req.days_lookahead
             )
     except Exception as e:
-        from fastapi import HTTPException
         raise HTTPException(
             status_code=503,
-            detail=f"Space-Track query failed: {e}"
+            detail=f"Space-Track query failed: {e}",
         )
 
     cdm_list = parse_cdm_kvn(raw_kvn)
+
+    # SCRUM-329 AC3: explicit log when Space-Track returns no CDMs.
+    # This is the expected state before the SSA Sharing Agreement is active.
+    # A silent empty state would be indistinguishable from a real zero-conjunction
+    # period, which is misleading. Log the reason so operators and support can
+    # diagnose without digging through service internals.
+    if not cdm_list:
+        query_desc = (
+            f"NORAD ID {req.norad_id}" if req.norad_id is not None
+            else f"Pc >= {req.pc_threshold}"
+        )
+        logging.warning(
+            "[INGEST] Space-Track returned 0 CDMs for query (%s, %d-day lookahead). "
+            "Likely cause: no SSA Sharing Agreement with 18 SPCS, or no registered "
+            "spacecraft in CDM_PUBLIC for this operator. "
+            "Live polling will return results only after the agreement is active.",
+            query_desc,
+            req.days_lookahead,
+        )
+        return PollResponse(saved=0, skipped=0, errors=[])
 
     saved = 0
     skipped = 0
     errors: List[str] = []
 
     for cdm in cdm_list:
+        norad1 = cdm.get("OBJECT1_OBJECT_DESIGNATOR", "?")
+        norad2 = cdm.get("OBJECT2_OBJECT_DESIGNATOR", "?")
+
+        # SCRUM-329 AC4: validate CDM maps cleanly to evaluate_conjunction()
+        # inputs via cdm_to_conjunction_state() before persisting. Catches
+        # malformed CDMs early -- a CDM that fails here would cause a silent
+        # error later in the planner pipeline.
+        try:
+            cdm_to_conjunction_state(cdm)
+        except Exception as e:
+            skipped += 1
+            msg = (
+                f"cdm_to_conjunction_state validation failed for "
+                f"{norad1}/{norad2}: {e} -- CDM not saved"
+            )
+            logging.warning("[INGEST] %s", msg)
+            errors.append(msg)
+            continue
+
         try:
             save_cdm_record(cdm)
             saved += 1
         except Exception as e:
             skipped += 1
-            norad1 = cdm.get("OBJECT1_OBJECT_DESIGNATOR", "?")
-            norad2 = cdm.get("OBJECT2_OBJECT_DESIGNATOR", "?")
             msg = f"save_cdm_record failed for {norad1}/{norad2}: {e}"
             logging.warning("[INGEST] %s", msg)
             errors.append(msg)
 
     logging.info(
         "[INGEST] Poll complete: %d saved, %d skipped from %d CDMs",
-        saved, skipped, len(cdm_list)
+        saved, skipped, len(cdm_list),
     )
     return PollResponse(saved=saved, skipped=skipped, errors=errors)
 
@@ -251,11 +335,6 @@ async def get_cdm(
     }
 
     def _assemble(row: CdmRecord) -> dict:
-        # Build 3x3 RTN covariance per object (m²) then sum and convert to km².
-        # Matrix layout per CCSDS 508.0-B-1:
-        #   [[CR_R,  CT_R,  CN_R],
-        #    [CT_R,  CT_T,  CN_T],
-        #    [CN_R,  CN_T,  CN_N]]
         c_primary = [
             [row.cr_r,     row.ct_r,     row.cn_r    ],
             [row.ct_r,     row.ct_t,     row.cn_t    ],
@@ -301,7 +380,7 @@ async def get_cdm(
                     detail=(
                         f"No CDM record found for "
                         f"primary_norad={primary_norad}, secondary_norad={secondary_norad}"
-                    )
+                    ),
                 )
 
             if limit == 1:
@@ -315,7 +394,7 @@ async def get_cdm(
         logging.error("[INGEST] CDM store unavailable: %s", e)
         raise HTTPException(
             status_code=503,
-            detail="CDM store temporarily unavailable"
+            detail="CDM store temporarily unavailable",
         )
 
     return result
@@ -330,10 +409,11 @@ async def inject_cdm(request: Request) -> dict:
     (flat dict with CCSDS field names prefixed by OBJECT1_ / OBJECT2_).
 
     Returns the same PollResponse shape as POST /cdm/poll for UI consistency.
+    This path is always active regardless of SPACETRACK_LIVE_POLLING_ENABLED --
+    the reference CDM remains available at all times (AC1).
     """
     body = await request.json()
 
-    # Accept either a single CDM dict or a list
     cdm_list = body if isinstance(body, list) else [body]
 
     saved = 0
@@ -343,7 +423,6 @@ async def inject_cdm(request: Request) -> dict:
     for cdm in cdm_list:
         try:
             save_cdm_record(cdm)
-            # save_cdm_record sets source internally -- override it after save
             with get_session() as session:
                 record = session.query(CdmRecord).order_by(
                     CdmRecord.id.desc()
@@ -418,12 +497,7 @@ async def store_planner_outputs():
 
 @app.post("/planner_output", status_code=201)
 async def save_planner_output(request: Request) -> dict:
-    """Persist a planner audit record to the SQLite store.
-
-    Called by the planner service after each APS evaluation.
-    Body fields: cdm_record_id, conjunction_id, recommendation,
-                 utility, dv_magnitude_m_s, covariance_source
-    """
+    """Persist a planner audit record to the SQLite store."""
     body = await request.json()
     try:
         with get_session() as session:
@@ -452,7 +526,6 @@ async def deduplicate_cdm_records() -> dict:
     """Remove duplicate CDM records keeping only the most recent per object pair."""
     try:
         with get_session() as session:
-            # Get all records ordered by ingested_at desc
             rows = session.query(CdmRecord).order_by(
                 CdmRecord.ingested_at.desc()
             ).all()
