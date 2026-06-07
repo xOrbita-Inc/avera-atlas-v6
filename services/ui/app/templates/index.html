@@ -347,6 +347,7 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
     <div class="panel cdm-ops-panel">
       <div class="panel-hdr">CDM Operations</div>
       <div class="panel-body" style="padding:10px 14px">
+        <div id="cdmSourceMode" style="display:flex;align-items:center;gap:6px;margin-bottom:8px;padding:4px 6px;border:1px solid var(--border);border-radius:3px;background:var(--bg-panel)"><span id="cdmSourceDot" style="width:6px;height:6px;border-radius:50%;background:var(--text-dim);flex-shrink:0"></span><span id="cdmSourceLabel" style="font-size:8px;letter-spacing:1px;text-transform:uppercase;color:var(--text-dim)">CHECKING SOURCE MODE...</span></div>
         <div style="font-size:8px;color:var(--text-dim);letter-spacing:0.5px;margin-bottom:6px">Asset NORAD ID (leave blank for surrogate covariance)</div>
         <div class="poll-row">
           <input type="text" id="assetNoradInput" placeholder="e.g. 25544" maxlength="10" oninput="onNoradChange()">
@@ -725,6 +726,26 @@ function fmtM2(v){if(Math.abs(v)>=10000)return v.toExponential(2);if(Math.abs(v)
 
 function updateClock(){document.getElementById('clock').textContent=new Date().toISOString().substr(11,8)+' UTC'}
 setInterval(updateClock,1000);updateClock();
+
+// SCRUM-329 AC5: fetch source mode from ingest service and update label.
+async function loadSourceMode(){
+  try{
+    const resp=await fetch('/api/ingest/cdm/source_mode');
+    if(!resp.ok)return;
+    const data=await resp.json();
+    const dot=document.getElementById('cdmSourceDot');
+    const label=document.getElementById('cdmSourceLabel');
+    if(data.mode==='live'){
+      dot.style.background='var(--green)';dot.style.boxShadow='0 0 6px var(--green)';
+      label.style.color='var(--green)';
+    } else {
+      dot.style.background='var(--amber)';dot.style.boxShadow='0 0 6px var(--amber)';
+      label.style.color='var(--amber)';
+    }
+    label.textContent=data.label;
+  } catch(e){}
+}
+loadSourceMode();
 
 function selectScenario(btn){
   document.querySelectorAll('.scenario-btn').forEach(b=>b.classList.remove('active'));
