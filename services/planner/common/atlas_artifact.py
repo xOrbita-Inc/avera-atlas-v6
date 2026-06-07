@@ -62,10 +62,10 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from services.planner.common.satellite_capability import SatelliteCapability
-from services.planner.common.operator_policy import OperatorPolicy
-from services.planner.common.constellation_geometry import SlotRecoveryPlan
-from services.planner.common.maneuver_scorer import (
+from common.satellite_capability import SatelliteCapability
+from common.operator_policy import OperatorPolicy
+from common.constellation_geometry import SlotRecoveryPlan
+from common.maneuver_scorer import (
     ManeuverScoringResult,
     CandidateScore,
 )

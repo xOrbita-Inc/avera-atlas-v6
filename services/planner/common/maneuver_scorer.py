@@ -88,13 +88,13 @@ import numpy as np
 # Imports from locked modules (do not modify those files)
 # ---------------------------------------------------------------------------
 
-from services.planner.common.satellite_capability import (
+from common.satellite_capability import (
     SatelliteCapability,
     LifetimeProfile,
     ConstellationSlot,
 )
-from services.planner.common.operator_policy import OperatorPolicy
-from services.planner.common.constellation_geometry import (
+from common.operator_policy import OperatorPolicy
+from common.constellation_geometry import (
     WalkerDeltaGeometry,
     SlotRecoveryPlan,
     _return_burn_cost_m_s,
@@ -104,7 +104,7 @@ from services.planner.common.constellation_geometry import (
     _TWO_PI,
     _SEC_PER_DAY,
 )
-from services.planner.avoid.decision_model import (
+from avoid.decision_model import (
     cw_phi_rv,
     mahalanobis_sq,
     _as_vec3,
@@ -965,7 +965,7 @@ def _policy_from_dict(policy_dict: Dict[str, Any]) -> OperatorPolicy:
     Supports both v2.4 style (lambda_v, lambda_L, dv_mag_limit_m_s) and
     v2.5 style (scoring_weights, max_dv_per_event_ms).
     """
-    from services.planner.common.operator_policy import ScoringWeights
+    from common.operator_policy import ScoringWeights
 
     # v2.5 path: scoring_weights sub-dict present
     sw_raw = policy_dict.get("scoring_weights", {})

@@ -1,52 +1,74 @@
 """
-APS Planner Service - FastAPI wrapper for decision_model.py
+AVERA-ATLAS Planner Service — FastAPI wrapper for decision_model.py
+APS 2.5 / 9.6 + SCRUM-341 container hardening.
 
-Thin HTTP layer that maps OpenAPI endpoints to the core decision logic.
-All validation and computation lives in decision_model.py.
+Endpoints
+---------
+GET  /health              Liveness probe -- service version and uptime
+GET  /ready               Readiness probe -- service up, policy config loaded
+POST /v1/evaluate         Single conjunction evaluation (APS 2.5, emits ATLASManeuverArtifact)
+POST /v1/evaluate/batch   Batch conjunction evaluation (APS 2.4 path)
+
+SCRUM-341 changes (relative to 9.6 server.py):
+  - Structured JSON logging replacing basicConfig plain-text format.
+    Format: {"time": "...", "level": "INFO", "service": "planner", "msg": "..."}
+  - /ready endpoint: returns 200 when service is up and operator policy
+    config is loadable. API-only readiness -- no disk volume check.
+  - HTTP request logging middleware (method, path, status, elapsed_ms).
+  - Startup log via lifespan.
+  - No changes to /v1/evaluate, /v1/evaluate/batch, covariance adapter,
+    audit write, or ATLASManeuverArtifact integration.
+
+Service port: 8060 (per k8s/06-planner.yaml and service map)
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Dict
 
 import numpy as np
 import requests as http_requests
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from avoid.decision_model import (
     error_response,
     evaluate_batch,
-    evaluate_conjunction,
 )
+from common.maneuver_scorer import evaluate_conjunction_v25, _policy_from_dict
+from common.atlas_artifact import build_atlas_artifact
+from common.satellite_capability import SatelliteCapability
+from common.logging_setup import build_logger, _POLICY_CONFIG_PATH, SERVICE_NAME, SERVICE_VERSION
 
-logger = logging.getLogger("planner")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
 
-SERVICE_VERSION = "2.4.3"
+log = build_logger()
 
+# ---------------------------------------------------------------------------
+# Ingest service URL
+# ---------------------------------------------------------------------------
 
-# Ingest service base URL. Resolved at call time so tests can override via env.
 def _ingest_url() -> str:
     return os.environ.get("INGEST_SERVICE_URL", "http://ingest:8000")
 
+
+# ---------------------------------------------------------------------------
+# Covariance adapter helpers (unchanged from 9.6)
+# ---------------------------------------------------------------------------
 
 def _rtn_to_eci_rotation(r_km: np.ndarray, v_km_s: np.ndarray) -> np.ndarray:
     """Build the 3x3 RTN->ECI rotation matrix from an ECI state vector.
 
     Identical math to cdm_to_conjunction._rtn_to_eci_rotation in the ingest
     service. Duplicated here because the planner cannot import from ingest.
-
-    Columns are the R, T, N unit vectors expressed in ECI:
-      R = r_hat  (radial)
-      N = (r x v) / |r x v|  (cross-track / normal)
-      T = N x R  (along-track / tangential)
     """
     r_hat = r_km / np.linalg.norm(r_km)
     h = np.cross(r_km, v_km_s)
@@ -63,16 +85,8 @@ def _fetch_cdm_covariance(
 ) -> tuple[list, str, int | None]:
     """Fetch RTN covariance from the ingest service and rotate to ECI.
 
-    Returns (p_rel_km2, covariance_source, cdm_record_id) where:
-    - p_rel_km2 is a 9-element row-major flat list (km², ECI frame)
-    - covariance_source is 'real_cdm' or 'surrogate_identity'
-    - cdm_record_id is the cdm_records.id FK, or None if surrogate
-
-    Falls back to surrogate identity matrix (0.01 * I3) on any failure.
-    The surrogate value matches the pre-existing demo default.
-
-    ADR-008 reference: the RTN->ECI rotation is the planner adapter's
-    responsibility. The ingest service returns RTN frame only.
+    Returns (p_rel_km2, covariance_source, cdm_record_id).
+    Falls back to surrogate identity matrix on any failure.
     """
     _SURROGATE = (
         [0.01, 0.0, 0.0,
@@ -86,38 +100,26 @@ def _fetch_cdm_covariance(
         url = f"{_ingest_url()}/cdm/{primary_norad}/{secondary_norad}"
         resp = http_requests.get(url, timeout=5.0)
     except Exception as exc:
-        logger.warning(
-            "[PLANNER] Ingest service unreachable for %s/%s: %s -- using surrogate",
-            primary_norad, secondary_norad, exc,
-        )
+        log.warning("covariance fetch failed", extra={"event": "covariance_fetch_fail", "reason": "unreachable", "pair": f"{primary_norad}/{secondary_norad}", "exc": str(exc)})
         return _SURROGATE
 
     if resp.status_code == 404:
-        logger.warning(
-            "[PLANNER] No CDM found for %s/%s -- using surrogate",
-            primary_norad, secondary_norad,
-        )
+        log.warning("covariance fetch failed", extra={"event": "covariance_fetch_fail", "reason": "not_found", "pair": f"{primary_norad}/{secondary_norad}"})
         return _SURROGATE
 
     if resp.status_code == 503:
-        logger.warning(
-            "[PLANNER] Ingest CDM store unavailable for %s/%s -- using surrogate",
-            primary_norad, secondary_norad,
-        )
+        log.warning("covariance fetch failed", extra={"event": "covariance_fetch_fail", "reason": "store_unavailable", "pair": f"{primary_norad}/{secondary_norad}"})
         return _SURROGATE
 
     if not resp.ok:
-        logger.warning(
-            "[PLANNER] Unexpected ingest response %d for %s/%s -- using surrogate",
-            resp.status_code, primary_norad, secondary_norad,
-        )
+        log.warning("covariance fetch failed", extra={"event": "covariance_fetch_fail", "reason": f"http_{resp.status_code}", "pair": f"{primary_norad}/{secondary_norad}"})
         return _SURROGATE
 
     try:
         data = resp.json()
         cov_rtn = np.array(data["covariance_combined_rtn"], dtype=float)
         covariance_source = data.get("covariance_source", "surrogate_identity")
-        cdm_record_id = data.get("id")  # FK for planner_outputs audit write
+        cdm_record_id = data.get("id")
 
         r = np.array(r_sat_km, dtype=float)
         v = np.array(v_sat_km_s, dtype=float)
@@ -125,17 +127,11 @@ def _fetch_cdm_covariance(
         cov_eci = rot @ cov_rtn @ rot.T
         p_rel_km2 = cov_eci.flatten().tolist()
 
-        logger.info(
-            "[PLANNER] CDM covariance fetched for %s/%s (source: %s, id: %s)",
-            primary_norad, secondary_norad, covariance_source, cdm_record_id,
-        )
+        log.info("covariance fetched", extra={"event": "covariance_fetched", "pair": f"{primary_norad}/{secondary_norad}", "source": covariance_source, "cdm_id": cdm_record_id})
         return p_rel_km2, covariance_source, cdm_record_id
 
     except Exception as exc:
-        logger.warning(
-            "[PLANNER] Failed to parse CDM covariance for %s/%s: %s -- using surrogate",
-            primary_norad, secondary_norad, exc,
-        )
+        log.warning("covariance parse failed", extra={"event": "covariance_parse_fail", "pair": f"{primary_norad}/{secondary_norad}", "exc": str(exc)})
         return _SURROGATE
 
 
@@ -147,16 +143,7 @@ def _post_planner_output(
 ) -> None:
     """Write a planner decision audit record to the ingest service.
 
-    Fire-and-forget: called after a successful evaluate_conjunction().
-    Any failure is logged as a WARNING and silently swallowed -- the
-    planner response is never affected by audit write failures.
-
-    Recommendation mapping (utility-based, APS v2.4):
-      utility > 0  -> 'maneuver'
-      utility <= 0 -> 'no_maneuver'
-    The 'monitor' case is reserved for Pc-threshold logic in APS v2.5.
-
-    Only called when cdm_record_id is not None (i.e. real CDM was used).
+    Fire-and-forget. Any failure is logged and silently swallowed.
     """
     try:
         rec = result.get("recommendation", {})
@@ -166,20 +153,16 @@ def _post_planner_output(
         utility = float(rec.get("utility", 0.0))
         recommendation = "maneuver" if utility > 0.0 else "no_maneuver"
         delta_v_ms = float(rec.get("dv_magnitude_m_s")) if recommendation == "maneuver" else None
-
-        # pc_computed: use risk_surrogate_post as the best available proxy.
-        # This is either the Space-Track published Pc (if pc_precomputed was
-        # provided) or 1/m2_post from the Mahalanobis metric.
         pc_computed = float(metrics.get("risk_surrogate_post", 0.0))
 
         payload = {
-            "cdm_record_id":    cdm_record_id,
-            "recommendation":   recommendation,
-            "delta_v_ms":       delta_v_ms,
-            "pc_computed":      pc_computed,
-            "utility_value":    utility,
-            "lambda_v":         float(policy.get("lambda_v", 0.0)),
-            "lambda_l":         float(policy.get("lambda_L", 0.0)),
+            "cdm_record_id":     cdm_record_id,
+            "recommendation":    recommendation,
+            "delta_v_ms":        delta_v_ms,
+            "pc_computed":       pc_computed,
+            "utility_value":     utility,
+            "lambda_v":          float(policy.get("lambda_v", 0.0)),
+            "lambda_l":          float(policy.get("lambda_L", 0.0)),
             "covariance_source": covariance_source,
         }
 
@@ -187,29 +170,26 @@ def _post_planner_output(
         resp = http_requests.post(url, json=payload, timeout=5.0)
 
         if resp.status_code == 201:
-            planner_output_id = resp.json().get("id")
-            logger.info(
-                "[PLANNER] Audit record written: planner_outputs.id=%s for cdm_record_id=%s",
-                planner_output_id, cdm_record_id,
-            )
+            log.info("audit record written", extra={"event": "audit_written", "planner_output_id": resp.json().get("id"), "cdm_record_id": cdm_record_id})
         else:
-            logger.warning(
-                "[PLANNER] Audit write returned unexpected status %d for cdm_record_id=%s",
-                resp.status_code, cdm_record_id,
-            )
+            log.warning("audit write unexpected status", extra={"event": "audit_write_unexpected_status", "status": resp.status_code, "cdm_record_id": cdm_record_id})
 
     except Exception as exc:
-        logger.warning(
-            "[PLANNER] Audit write failed for cdm_record_id=%s: %s",
-            cdm_record_id, exc,
-        )
+        log.warning("audit write failed", extra={"event": "audit_write_failed", "cdm_record_id": cdm_record_id, "exc": str(exc)})
+
+
+# ---------------------------------------------------------------------------
+# App
+# ---------------------------------------------------------------------------
+
+_start_time = time.time()
 
 
 @asynccontextmanager
 async def lifespan(a):
-    logger.info("planner service v%s starting", SERVICE_VERSION)
+    log.info("service starting", extra={"event": "startup", "version": SERVICE_VERSION, "policy_config": str(_POLICY_CONFIG_PATH)})
     yield
-    logger.info("planner service shutting down")
+    log.info("service shutting down", extra={"event": "shutdown", "version": SERVICE_VERSION})
 
 
 svc = FastAPI(
@@ -219,17 +199,79 @@ svc = FastAPI(
 )
 
 
-# -- Health -------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Request logging middleware (SCRUM-341 AC3)
+# ---------------------------------------------------------------------------
+
+@svc.middleware("http")
+async def _log_requests(request: Request, call_next):
+    t0 = time.time()
+    response = await call_next(request)
+    log.info("request", extra={"method": request.method, "path": request.url.path, "status": response.status_code, "elapsed_ms": round((time.time() - t0) * 1000, 1)})
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Health and readiness (SCRUM-341 AC1, AC5)
+# ---------------------------------------------------------------------------
 
 @svc.get("/health")
-async def health():
-    return {"status": "ok", "version": SERVICE_VERSION}
+async def health() -> Dict[str, Any]:
+    """Liveness probe. Returns 200 with version and uptime.
+    Polled by Dockerfile HEALTHCHECK and k8s liveness probe.
+    """
+    return {
+        "status":   "ok",
+        "service":  SERVICE_NAME,
+        "version":  SERVICE_VERSION,
+        "uptime_s": round(time.time() - _start_time, 1),
+    }
 
 
-# -- Single conjunction -------------------------------------------------------
+@svc.get("/ready")
+async def ready() -> Dict[str, Any]:
+    """Readiness probe. Returns 200 when the service is up and the operator
+    policy config is loadable. API-only readiness -- no disk volume check.
+
+    SCRUM-341 AC1: probes that:
+      1. The service process is running (implicit -- if we get here, it is)
+      2. The operator policy config file exists and parses without error
+
+    Returns 503 if the policy file is missing or malformed, so the container
+    is not marked ready before its required config is in place.
+    """
+    try:
+        if not _POLICY_CONFIG_PATH.exists():
+            raise FileNotFoundError(
+                f"Operator policy config not found: {_POLICY_CONFIG_PATH}"
+            )
+        # Attempt a parse to catch malformed YAML early.
+        from common.operator_policy import OperatorPolicy
+        OperatorPolicy.from_yaml(str(_POLICY_CONFIG_PATH))
+        return {
+            "status":        "ready",
+            "version":       SERVICE_VERSION,
+            "policy_config": str(_POLICY_CONFIG_PATH),
+        }
+    except Exception as exc:
+        log.warning("readiness check failed", extra={"event": "readiness_fail", "exc": str(exc)})
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Single conjunction (unchanged from 9.6 except logging converted to JSON)
+# ---------------------------------------------------------------------------
 
 @svc.post("/v1/evaluate")
 async def post_evaluate(request: Request):
+    """Evaluate a single conjunction event.
+
+    9.6: calls evaluate_conjunction_v25() which returns a ManeuverScoringResult,
+    then builds and emits ATLASManeuverArtifact in the response. The v2.4
+    response fields are preserved unchanged for backward compatibility.
+    atlas_artifact is additive and its build failure never affects the core
+    recommendation.
+    """
     try:
         body: Dict[str, Any] = await request.json()
     except Exception:
@@ -245,8 +287,6 @@ async def post_evaluate(request: Request):
         conj = body.get("conjunction", {})
         sat = body.get("satellite", {})
         primary_norad = conj.get("primary_norad")
-        # Use secondary_norad if explicitly provided (real NORAD ID),
-        # otherwise fall back to obj_id (may be synthetic scenario ID).
         secondary_norad = str(conj.get("secondary_norad") or conj.get("obj_id", ""))
 
         if primary_norad and secondary_norad:
@@ -261,41 +301,85 @@ async def post_evaluate(request: Request):
             body["conjunction"]["p_rel_km2"] = p_rel_km2
             body["conjunction"]["covariance_source"] = covariance_source
         else:
-            logger.debug(
-                "[PLANNER] primary_norad not provided -- using surrogate covariance"
-            )
+            log.info("using surrogate covariance", extra={"event": "surrogate_covariance", "reason": "primary_norad_not_provided"})
     except Exception as exc:
-        logger.warning("[PLANNER] Covariance adapter error: %s -- using surrogate", exc)
+        log.warning("covariance adapter error", extra={"event": "covariance_adapter_error", "exc": str(exc)})
     # ----------------------------------------------------------------------
 
     try:
-        result = evaluate_conjunction(body)
-        result["covariance_source"] = covariance_source
+        scoring = evaluate_conjunction_v25(body)
 
-        # --- Audit write (ADR-008 Prompt 5) --------------------------------
-        # Fire-and-forget: only write when a real CDM record was used.
+        result: Dict[str, Any] = {
+            "conjunction_id": scoring.conjunction_id,
+            "recommendation": {
+                "direction":        scoring.direction,
+                "dv_eci_km_s":      scoring.dv_eci_km_s,
+                "dv_magnitude_m_s": scoring.dv_magnitude_m_s,
+                "t_burn_utc":       scoring.t_burn_utc,
+                "utility":          scoring.utility,
+            },
+            "metrics": {
+                "delta_C":             scoring.delta_C,
+                "m2_pre":              scoring.m2_pre,
+                "m2_post":             scoring.m2_post,
+                "fuel_cost_m_s":       scoring.fuel_cost_m_s,
+                "lifetime_penalty":    scoring.lifetime_penalty,
+                "risk_surrogate_post": scoring.risk_surrogate_post,
+                "all_candidates":      scoring.all_candidates,
+            },
+            "covariance_source": covariance_source,
+            "evaluated_at":      scoring.evaluated_at,
+        }
+
+        # --- 9.6: ATLASManeuverArtifact -----------------------------------
+        try:
+            conj_dict = body.get("conjunction", {})
+            sat_dict  = body.get("satellite", {})
+
+            cap     = SatelliteCapability.from_request(sat_dict)
+            policy  = _policy_from_dict(body.get("policy", {}))
+
+            artifact = build_atlas_artifact(
+                scoring=scoring,
+                cap=cap,
+                policy=policy,
+                tca_utc=conj_dict.get("t_ca_utc", ""),
+                pc_precomputed=conj_dict.get("pc_precomputed"),
+                miss_distance_km=conj_dict.get("miss_distance_km"),
+            )
+            result["atlas_artifact"] = artifact.to_dict()
+            log.info("atlas artifact built", extra={"event": "artifact_built", "conjunction_id": scoring.conjunction_id, "summary": artifact.operator_summary()})
+        except Exception as exc:
+            log.warning("atlas artifact build failed", extra={"event": "artifact_build_failed", "conjunction_id": body.get("conjunction_id", "?"), "exc": str(exc)})
+        # ------------------------------------------------------------------
+
+        # --- Audit write --------------------------------------------------
         if cdm_record_id is not None:
             _post_planner_output(cdm_record_id, result, body, covariance_source)
-        # -------------------------------------------------------------------
+        # ------------------------------------------------------------------
 
         return JSONResponse(status_code=200, content=result)
+
     except ValueError as exc:
         return JSONResponse(
             status_code=422,
             content=error_response(str(exc)),
         )
     except Exception as exc:
-        logger.exception("Unexpected error in /v1/evaluate")
+        log.error("evaluate error", extra={"event": "evaluate_error", "exc": str(exc)})
         return JSONResponse(
             status_code=500,
             content=error_response("Internal error: " + str(exc)),
         )
 
 
-# -- Batch --------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Batch (unchanged from 9.6)
+# ---------------------------------------------------------------------------
 
 @svc.post("/v1/evaluate/batch")
 async def post_evaluate_batch(request: Request):
+    """Evaluate multiple conjunctions. Uses v2.4 path. No atlas_artifact."""
     try:
         body: Dict[str, Any] = await request.json()
     except Exception:
@@ -313,7 +397,7 @@ async def post_evaluate_batch(request: Request):
             content=error_response(str(exc)),
         )
     except Exception as exc:
-        logger.exception("Unexpected error in /v1/evaluate/batch")
+        log.error("evaluate batch error", extra={"event": "evaluate_batch_error", "exc": str(exc)})
         return JSONResponse(
             status_code=500,
             content=error_response("Internal error: " + str(exc)),

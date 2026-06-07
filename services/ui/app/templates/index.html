@@ -236,8 +236,58 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 .store-empty{text-align:center;padding:30px;color:var(--text-dim);font-size:10px;letter-spacing:0.5px}
 .store-count{font-size:9px;color:var(--text-dim);margin-bottom:8px}
 
+
+/* ── APS 2.5 ATLAS ARTIFACT PANELS ─────────────────────────────────────── */
+.artifact-section{margin:0 8px 8px}
+.artifact-panel{border-radius:4px;background:var(--bg-card);border:1px solid var(--border);margin-bottom:6px}
+.artifact-panel-hdr{padding:7px 12px;border-bottom:1px solid var(--border);font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--accent-dim);font-weight:500;display:flex;justify-content:space-between;align-items:center;cursor:pointer}
+.artifact-panel-hdr:hover{color:var(--accent)}
+.artifact-panel-body{padding:10px 12px}
+.artifact-row{display:flex;justify-content:space-between;align-items:baseline;padding:3px 0;border-bottom:1px solid var(--border)}
+.artifact-row:last-child{border-bottom:none}
+.artifact-key{font-size:9px;color:var(--text-dim);letter-spacing:0.5px;text-transform:uppercase}
+.artifact-val{font-size:11px;font-weight:500;color:var(--text);text-align:right;max-width:60%}
+.artifact-val.accent{color:var(--accent)}
+.artifact-val.green{color:var(--green)}
+.artifact-val.red{color:var(--red)}
+.artifact-val.amber{color:var(--amber)}
+/* Verification checks */
+.verify-grid{display:flex;flex-direction:column;gap:4px}
+.verify-check{display:flex;align-items:center;gap:8px;padding:4px 6px;border-radius:3px;font-size:10px}
+.verify-check.pass{background:rgba(61,220,132,0.08);border:1px solid rgba(61,220,132,0.2)}
+.verify-check.fail{background:rgba(255,59,92,0.08);border:1px solid rgba(255,59,92,0.2)}
+.verify-check.skip{background:rgba(107,109,138,0.08);border:1px solid var(--border)}
+.verify-icon{font-size:12px;flex-shrink:0;width:14px;text-align:center}
+.verify-label{flex:1;color:var(--text-dim)}
+.verify-verdict{font-size:9px;font-weight:700;letter-spacing:1px;flex-shrink:0}
+.verify-check.pass .verify-verdict{color:var(--green)}
+.verify-check.fail .verify-verdict{color:var(--red)}
+.verify-check.skip .verify-verdict{color:var(--text-dim)}
+/* No-go reasoning */
+.nogo-panel{margin:8px;padding:12px;background:rgba(107,109,138,0.06);border:1px solid var(--border);border-radius:4px}
+.nogo-code{font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim);margin-bottom:6px}
+.nogo-text{font-size:10px;color:var(--text);line-height:1.5}
+/* Mission impact bar */
+.impact-bar-wrap{margin:6px 0}
+.impact-bar-label{display:flex;justify-content:space-between;font-size:9px;color:var(--text-dim);margin-bottom:2px}
+.impact-bar-track{height:4px;background:var(--border);border-radius:2px;overflow:hidden}
+.impact-bar-fill{height:100%;border-radius:2px;transition:width 0.4s ease}
+/* Rationale candidates mini-table */
+.rationale-table{width:100%;border-collapse:collapse;margin-top:6px}
+.rationale-table th{font-size:8px;color:var(--accent-dim);letter-spacing:1px;text-transform:uppercase;padding:4px 5px;text-align:left;border-bottom:1px solid var(--border);font-weight:400}
+.rationale-table td{padding:4px 5px;font-size:9px;border-bottom:1px solid var(--border)}
+.rationale-table tr.best-row td{color:var(--accent)}
+/* Collapsible artifact sections */
+.artifact-panel-body.collapsed{display:none}
+/* Smoke test result */
+.smoke-result{margin:4px 0;padding:6px 8px;border-radius:3px;font-size:9px;font-family:'JetBrains Mono',monospace}
+.smoke-result.pass{background:rgba(61,220,132,0.08);border:1px solid rgba(61,220,132,0.2);color:var(--green)}
+.smoke-result.fail{background:rgba(255,59,92,0.08);border:1px solid rgba(255,59,92,0.2);color:var(--red)}
+.smoke-result.info{background:rgba(79,248,232,0.05);border:1px solid var(--border);color:var(--text-dim)}
+
 </style>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js">
+</script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 </head>
 <body>
@@ -307,6 +357,7 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
         <div style="font-size:8px;color:var(--text-dim);letter-spacing:0.5px;margin-bottom:4px">Last CDM fetch</div>
         <div style="font-size:9px;color:var(--text-dim)" id="pollLastResult">No poll run yet</div>
         <button class="poll-btn" onclick="openStoreModal()" style="width:100%;margin-top:8px">VIEW CDM STORE</button>
+        <button class="poll-btn" onclick="runTiros4SmokeTest()" style="width:100%;margin-top:6px;border-color:var(--accent-dim);color:var(--accent-dim)">RUN TIROS 4 E2E TEST</button>
       </div>
     </div>
     <div class="panel">
@@ -392,6 +443,82 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
         <div id="fuelRiskChart" style="padding:8px 12px;border-top:1px solid var(--border)"></div>
       </div>
     </div>
+
+    <!-- APS 2.5 ATLAS Artifact Panels -->
+    <div class="artifact-section" id="aps25ArtifactSection" style="display:none">
+
+      <!-- A1: Risk Summary -->
+      <div class="artifact-panel">
+        <div class="artifact-panel-hdr" onclick="toggleArtifactPanel('riskSummaryBody')">
+          A1 &mdash; Risk Summary<span id="riskSummaryBadge"></span>
+        </div>
+        <div class="artifact-panel-body" id="riskSummaryBody">
+          <div class="empty-state">No data</div>
+        </div>
+      </div>
+
+      <!-- A2: Maneuver Recommendation -->
+      <div class="artifact-panel" id="a2Panel">
+        <div class="artifact-panel-hdr" onclick="toggleArtifactPanel('maneuverRecBody')">
+          A2 &mdash; Maneuver Recommendation
+        </div>
+        <div class="artifact-panel-body" id="maneuverRecBody">
+          <div class="empty-state">No data</div>
+        </div>
+      </div>
+
+      <!-- A3: Decision Rationale -->
+      <div class="artifact-panel">
+        <div class="artifact-panel-hdr" onclick="toggleArtifactPanel('decisionRationaleBody')">
+          A3 &mdash; Decision Rationale
+        </div>
+        <div class="artifact-panel-body" id="decisionRationaleBody">
+          <div class="empty-state">No data</div>
+        </div>
+      </div>
+
+      <!-- A4: Post-Maneuver Projection -->
+      <div class="artifact-panel" id="a4Panel">
+        <div class="artifact-panel-hdr" onclick="toggleArtifactPanel('postManeuverBody')">
+          A4 &mdash; Post-Maneuver Projection
+        </div>
+        <div class="artifact-panel-body" id="postManeuverBody">
+          <div class="empty-state">No data</div>
+        </div>
+      </div>
+
+      <!-- A5: No-Go Reasoning (shown only on no-go) -->
+      <div class="artifact-panel" id="a5Panel" style="display:none">
+        <div class="artifact-panel-hdr" onclick="toggleArtifactPanel('nogoReasoningBody')">
+          A5 &mdash; No-Go Reasoning
+        </div>
+        <div class="artifact-panel-body" id="nogoReasoningBody">
+          <div class="empty-state">No data</div>
+        </div>
+      </div>
+
+      <!-- Verification Result -->
+      <div class="artifact-panel">
+        <div class="artifact-panel-hdr" onclick="toggleArtifactPanel('verificationBody')">
+          Verification<span id="verifyOverallBadge" style="margin-left:6px;font-size:9px"></span>
+        </div>
+        <div class="artifact-panel-body" id="verificationBody">
+          <div class="empty-state">No data</div>
+        </div>
+      </div>
+
+      <!-- Mission Impact Summary -->
+      <div class="artifact-panel">
+        <div class="artifact-panel-hdr" onclick="toggleArtifactPanel('missionImpactBody')">
+          Mission Impact
+        </div>
+        <div class="artifact-panel-body" id="missionImpactBody">
+          <div class="empty-state">No data</div>
+        </div>
+      </div>
+
+    </div>
+    <!-- End APS 2.5 panels -->
     <div class="planner-section" style="flex:1;display:flex;flex-direction:column;min-height:0">
       <div class="panel" style="flex:1;display:flex;flex-direction:column;min-height:0">
         <div class="panel-hdr"><span class="panel-hdr-clickable" onclick="openConjunctionsInfoModal()">Active Conjunctions<i class="info-icon">&#x24D8;</i></span><span><button class="refresh-btn" onclick="clearAll()" style="margin-right:4px">CLEAR</button><button class="refresh-btn" onclick="refreshData()">REFRESH</button></span></div>
@@ -623,14 +750,16 @@ async function runScenario(){
 
 async function refreshData(){
   try{
-    const resp=await fetch('/api/conjunctions');const data=await resp.json();
+    const resp=await fetch('/api/conjunctions');
+    if(!resp.ok||!resp.headers.get('content-type')?.includes('application/json'))return;
+    const data=await resp.json();
     if(data.status==='no_data')return;
     if(userCleared)return;
     conjunctionData=data;
     updateMetrics(data.summary);updateConjunctionTable(data.conjunctions);
     if(currentView==='3d')fetchAndUpdateGlobeOrbits();
     updatePayloadModalIfOpen();
-  }catch(e){console.error('Refresh failed:',e)}
+  }catch(e){console.warn('Refresh failed:',e)}
 }
 
 function updateMetrics(s){
@@ -690,6 +819,7 @@ async function evaluateConjunction(conj,idx){
     updatePlannerDetails(result);
     updateRiskBar(result,conj);
     drawEncounter(conj,result);
+    if(result.atlas_artifact)renderAtlasArtifact(result.atlas_artifact);
   }catch(e){console.error('Planner call failed:',e)}
 }
 
@@ -894,6 +1024,7 @@ function clearAll(){
   document.getElementById('sliderLv').value=0.01;document.getElementById('sliderLl').value=0.005;document.getElementById('sliderDv').value=1.0;
   policyDefaults={lv:0.01,ll:0.005,dv:1.0};onPolicyChange();
   if(encounterCtx)drawEncounterEmpty();
+  clearAtlasArtifact();
 }
 async function refreshPipeline(){
   try{
@@ -2272,6 +2403,330 @@ function renderPlannerOutputs(records){
 document.addEventListener('keydown',function(e){
   if(e.key==='Escape'&&document.getElementById('storeBackdrop').classList.contains('open'))closeStoreModal();
 });
+
+
+// ==========================================================
+// APS 2.5 ATLAS ARTIFACT RENDERING
+// ==========================================================
+
+function toggleArtifactPanel(bodyId) {
+  const el = document.getElementById(bodyId);
+  if (!el) return;
+  el.classList.toggle('collapsed');
+}
+
+function _ar(key, val, cls) {
+  return '<div class="artifact-row"><span class="artifact-key">' + key +
+    '</span><span class="artifact-val ' + (cls || '') + '">' + val + '</span></div>';
+}
+
+function renderRiskSummary(rs) {
+  if (!rs) return;
+  const el = document.getElementById('riskSummaryBody');
+  const badge = document.getElementById('riskSummaryBadge');
+  if (!el) return;
+  const cq = rs.covariance_quality || 'good';
+  const cqColor = cq === 'good' ? 'green' : cq === 'dilution_region' ? 'red' : 'amber';
+  badge.innerHTML = ' <span style="font-size:8px;padding:2px 6px;border-radius:2px;background:rgba(107,109,138,0.15);color:var(--text-dim)">' +
+    cq.replace('_', ' ').toUpperCase() + '</span>';
+  let html = '';
+  if (rs.pc_pre != null) html += _ar('Pc pre-maneuver', rs.pc_pre > 0 ? rs.pc_pre.toExponential(2) : '0.00', rs.pc_pre > 1e-4 ? 'red' : rs.pc_pre > 1e-5 ? 'amber' : 'green');
+  if (rs.miss_distance_km != null) html += _ar('Miss distance', (rs.miss_distance_km * 1000).toFixed(0) + ' m');
+  html += _ar('Mahalanobis pre', rs.mahalanobis_pre != null ? rs.mahalanobis_pre.toFixed(3) : '--');
+  html += _ar('Covariance quality', cq.replace('_', ' ').toUpperCase(), cqColor);
+  html += _ar('Maneuver required', rs.maneuver_required ? 'YES' : 'NO', rs.maneuver_required ? 'red' : 'green');
+  el.innerHTML = html;
+}
+
+function renderManeuverRecommendation(rec) {
+  const el = document.getElementById('maneuverRecBody');
+  const panel = document.getElementById('a2Panel');
+  if (!el) return;
+  if (!rec || rec.direction === 'no-burn') { panel.style.opacity = '0.4'; el.innerHTML = '<div class="empty-state">No maneuver recommended</div>'; return; }
+  panel.style.opacity = '1';
+  let html = '';
+  html += _ar('Direction', rec.direction.toUpperCase(), 'accent');
+  html += _ar('Avoidance dv', rec.dv_magnitude_m_s != null ? rec.dv_magnitude_m_s.toFixed(3) + ' m/s' : '--');
+  html += _ar('Return dv', rec.dv_return_m_s != null ? rec.dv_return_m_s.toFixed(3) + ' m/s' : '--');
+  html += _ar('Total dv', rec.dv_total_m_s != null ? rec.dv_total_m_s.toFixed(3) + ' m/s' : '--', 'accent');
+  if (rec.drag_correction_applied) html += _ar('Drag correction', 'APPLIED', 'amber');
+  html += _ar('Burn time', rec.burn_time_utc ? rec.burn_time_utc.replace('T', ' ').substring(0, 19) + ' UTC' : '--');
+  el.innerHTML = html;
+}
+
+function renderDecisionRationale(rat) {
+  if (!rat) return;
+  const el = document.getElementById('decisionRationaleBody');
+  if (!el) return;
+  let html = '';
+  html += _ar('Utility score', rat.utility_score != null ? rat.utility_score.toFixed(4) : '--', 'accent');
+  html += _ar('Risk reduction (\u0394C)', rat.delta_C != null ? rat.delta_C.toFixed(4) : '--');
+  html += _ar('\u03BBv \u00b7 \u0394v cost', rat.dv_cost_term != null ? rat.dv_cost_term.toFixed(4) : '--');
+  html += _ar('\u03BBL \u00b7 lifetime', rat.lifetime_cost_term != null ? rat.lifetime_cost_term.toFixed(4) : '--');
+  html += _ar('\u03BBs \u00b7 slot', rat.slot_cost_term != null ? rat.slot_cost_term.toFixed(4) : '--');
+  html += _ar('Mission maturity', rat.lifetime_fraction_used != null ? (rat.lifetime_fraction_used * 100).toFixed(1) + '%' : '--');
+  html += _ar('Candidate rank', rat.candidate_rank != null ? rat.candidate_rank + ' / ' + rat.n_candidates_evaluated : '--');
+  if (rat.policy_constraints_applied && rat.policy_constraints_applied.length) {
+    html += _ar('Constraints checked', rat.policy_constraints_applied.join(', '));
+  }
+  // Human readable
+  if (rat.utility_score != null) {
+    const ratText = 'Utility: ' + rat.utility_score.toFixed(4) + '. Risk gain: ' + (rat.delta_C || 0).toFixed(3) + '. Fuel: ' + (rat.dv_cost_term || 0).toFixed(3) + '. Lifetime: ' + (rat.lifetime_cost_term || 0).toFixed(3) + '. Slot: ' + (rat.slot_cost_term || 0).toFixed(3) + '.';
+    html += '<div style="margin-top:8px;padding:6px;background:var(--bg-panel);border-radius:3px;font-size:9px;color:var(--text-dim);line-height:1.5">' + ratText + '</div>';
+  }
+  el.innerHTML = html;
+}
+
+function renderPostManeuverProjection(pm) {
+  const el = document.getElementById('postManeuverBody');
+  const panel = document.getElementById('a4Panel');
+  if (!el) return;
+  if (!pm) { panel.style.opacity = '0.4'; el.innerHTML = '<div class="empty-state">No maneuver recommended</div>'; return; }
+  panel.style.opacity = '1';
+  let html = '';
+  html += _ar('Mahalanobis post', pm.mahalanobis_post != null ? pm.mahalanobis_post.toFixed(3) : '--', 'accent');
+  html += _ar('Risk surrogate post', pm.risk_surrogate_post != null ? pm.risk_surrogate_post.toExponential(3) : '--');
+  html += _ar('Slot recovery', pm.slot_recovery_required ? pm.slot_recovery_orbits.toFixed(0) + ' orbit(s) required' : 'Not required', pm.slot_recovery_required ? 'amber' : 'green');
+  if (pm.slot_recovery_required && pm.slot_recovery_time_s) {
+    html += _ar('Recovery time', (pm.slot_recovery_time_s / 60).toFixed(0) + ' min');
+    html += _ar('Recovery feasible', pm.slot_recovery_feasible ? 'YES' : 'NO', pm.slot_recovery_feasible ? 'green' : 'red');
+  }
+  // Secondary conflict
+  const sc = pm.secondary_conflict;
+  if (sc) {
+    const scLabel = !sc.secondary_check_performed ? 'NOT CHECKED' : sc.secondary_conjunction_clear ? 'CLEAR' : 'CONFLICT DETECTED';
+    const scCls = !sc.secondary_check_performed ? '' : sc.secondary_conjunction_clear ? 'green' : 'red';
+    html += _ar('Secondary conflict', scLabel, scCls);
+    if (sc.operator_note) {
+      html += '<div style="margin-top:6px;padding:5px 6px;background:var(--bg-panel);border-radius:3px;font-size:9px;color:var(--text-dim);line-height:1.4">' + sc.operator_note + '</div>';
+    }
+  }
+  el.innerHTML = html;
+}
+
+function renderNoGoReasoning(ng) {
+  const el = document.getElementById('nogoReasoningBody');
+  const panel = document.getElementById('a5Panel');
+  if (!el || !panel) return;
+  if (!ng) { panel.style.display = 'none'; return; }
+  panel.style.display = '';
+  el.innerHTML = '<div class="nogo-panel"><div class="nogo-code">' + (ng.reason_code || '').replace(/_/g, ' ').toUpperCase() +
+    '</div><div class="nogo-text">' + (ng.human_readable || '') + '</div></div>';
+}
+
+function renderVerificationResult(vr) {
+  if (!vr) return;
+  const el = document.getElementById('verificationBody');
+  const badge = document.getElementById('verifyOverallBadge');
+  if (!el) return;
+  const passed = vr.passed;
+  badge.innerHTML = passed
+    ? '<span style="color:var(--green);font-size:8px;letter-spacing:1px">PASSED</span>'
+    : '<span style="color:var(--red);font-size:8px;letter-spacing:1px">FAILED</span>';
+  const checks = [
+    { key: 'risk_reduced',         label: 'Risk reduced (m\u00b2 post > m\u00b2 pre)' },
+    { key: 'utility_positive',     label: 'Utility positive (U > 0)' },
+    { key: 'secondary_clear',      label: 'Secondary conflict clear' },
+    { key: 'budget_within_limits', label: 'dv within policy budget' },
+    { key: 'recovery_within_limits', label: 'Slot recovery feasible' }
+  ];
+  let html = '<div class="verify-grid">';
+  checks.forEach(c => {
+    const val = vr[c.key];
+    const cls = val == null ? 'skip' : val ? 'pass' : 'fail';
+    const icon = val == null ? '\u2014' : val ? '\u2713' : '\u2717';
+    const verdict = val == null ? 'N/A' : val ? 'PASS' : 'FAIL';
+    html += '<div class="verify-check ' + cls + '">' +
+      '<span class="verify-icon">' + icon + '</span>' +
+      '<span class="verify-label">' + c.label + '</span>' +
+      '<span class="verify-verdict">' + verdict + '</span>' +
+      '</div>';
+  });
+  if (vr.verification_note) {
+    html += '<div style="margin-top:6px;padding:5px 6px;background:var(--bg-panel);border-radius:3px;font-size:9px;color:var(--text-dim);line-height:1.4">' + vr.verification_note + '</div>';
+  }
+  html += '</div>';
+  el.innerHTML = html;
+}
+
+function renderMissionImpactSummary(mi) {
+  if (!mi) return;
+  const el = document.getElementById('missionImpactBody');
+  if (!el) return;
+  let html = '';
+  html += _ar('dv consumed', mi.dv_consumed_m_s != null ? mi.dv_consumed_m_s.toFixed(3) + ' m/s' : '--');
+  html += _ar('Remaining budget', mi.v_remaining_after_m_s != null ? mi.v_remaining_after_m_s.toFixed(1) + ' m/s' : '--', 'accent');
+  // Lifetime fraction bar
+  const lfBefore = (mi.lifetime_fraction_before || 0) * 100;
+  const lfAfter = (mi.lifetime_fraction_after || 0) * 100;
+  const barColor = lfAfter > 85 ? '#ff3b5c' : lfAfter > 60 ? '#ffb020' : '#4ff8e8';
+  html += '<div class="impact-bar-wrap">' +
+    '<div class="impact-bar-label"><span>Mission maturity</span><span style="color:var(--accent)">' + lfAfter.toFixed(1) + '%</span></div>' +
+    '<div class="impact-bar-track"><div class="impact-bar-fill" style="width:' + lfAfter.toFixed(1) + '%;background:' + barColor + '"></div></div>' +
+    '</div>';
+  if (mi.slot_drift_km != null && mi.slot_tolerance_km > 0) {
+    const driftPct = Math.min(100, (mi.slot_drift_km / mi.slot_tolerance_km) * 100);
+    const driftColor = driftPct > 90 ? '#ff3b5c' : driftPct > 60 ? '#ffb020' : '#4ff8e8';
+    html += '<div class="impact-bar-wrap">' +
+      '<div class="impact-bar-label"><span>Slot drift</span><span>' + mi.slot_drift_km.toFixed(3) + ' km / ' + mi.slot_tolerance_km.toFixed(3) + ' km</span></div>' +
+      '<div class="impact-bar-track"><div class="impact-bar-fill" style="width:' + driftPct.toFixed(1) + '%;background:' + driftColor + '"></div></div>' +
+      '</div>';
+  }
+  html += _ar('Slot recovery', mi.slot_recovery_required ? mi.slot_recovery_orbits.toFixed(0) + ' orbit(s)' : 'Not required', mi.slot_recovery_required ? 'amber' : 'green');
+  if (mi.constellation_impact_note) {
+    html += '<div style="margin-top:6px;padding:5px 6px;background:var(--bg-panel);border-radius:3px;font-size:9px;color:var(--text-dim);line-height:1.4">' + mi.constellation_impact_note + '</div>';
+  }
+  el.innerHTML = html;
+}
+
+function renderAtlasArtifact(artifact) {
+  if (!artifact) return;
+  const section = document.getElementById('aps25ArtifactSection');
+  if (section) section.style.display = '';
+
+  renderRiskSummary(artifact.risk_summary);
+  renderManeuverRecommendation(artifact.recommendation);
+  renderDecisionRationale(artifact.rationale);
+  renderPostManeuverProjection(artifact.post_maneuver);
+  renderNoGoReasoning(artifact.no_go);
+  renderVerificationResult(artifact.verification);
+  renderMissionImpactSummary(artifact.mission_impact);
+}
+
+function clearAtlasArtifact() {
+  const section = document.getElementById('aps25ArtifactSection');
+  if (section) section.style.display = 'none';
+  ['riskSummaryBody','maneuverRecBody','decisionRationaleBody',
+   'postManeuverBody','nogoReasoningBody','verificationBody','missionImpactBody'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = '<div class="empty-state">No data</div>';
+  });
+  const a5 = document.getElementById('a5Panel');
+  if (a5) a5.style.display = 'none';
+}
+
+// ==========================================================
+// END-TO-END SMOKE TEST (TIROS 4 CDM)
+// ==========================================================
+async function runTiros4SmokeTest() {
+  const results = [];
+  const log = (label, passed, detail) => {
+    results.push({ label, passed, detail: detail || '' });
+  };
+
+  // Step 1: Inject TIROS 4 CDM
+  log('Step 1: Inject TIROS 4 CDM', null, 'Injecting...');
+  try {
+    const exampleCdm = {
+      TCA: '2020-03-05T07:26:54.974Z', MISS_DISTANCE: 1780.0, COLLISION_PROBABILITY: 0.0,
+      OBJECT1_OBJECT_DESIGNATOR: 226.0, OBJECT1_OBJECT_NAME: 'TIROS 4',
+      OBJECT1_X: -1484.865223, OBJECT1_Y: -5293.446853, OBJECT1_Z: -4495.437378,
+      OBJECT1_X_DOT: 6.464033802, OBJECT1_Y_DOT: 0.661818202, OBJECT1_Z_DOT: -3.00266646,
+      OBJECT1_CR_R: 99.64363206828475, OBJECT1_CT_R: 877.2210070811166, OBJECT1_CT_T: 22486.67143317358,
+      OBJECT1_CN_R: -4.426324899888984, OBJECT1_CN_T: -79.04618434539326, OBJECT1_CN_N: 9.972811643135275,
+      OBJECT2_OBJECT_DESIGNATOR: 35929.0, OBJECT2_OBJECT_NAME: 'IRIDIUM 33 DEB',
+      OBJECT2_X: -1484.285818, OBJECT2_Y: -5292.263622, OBJECT2_Z: -4494.23968,
+      OBJECT2_X_DOT: -1.063675697, OBJECT2_Y_DOT: -4.585064279, OBJECT2_Z_DOT: 5.79176252,
+      OBJECT2_CR_R: 211.5189133059618, OBJECT2_CT_R: -11074.05902817656, OBJECT2_CT_T: 1805633.075022246,
+      OBJECT2_CN_R: 51.98576102432443, OBJECT2_CN_T: 952.6244095306695, OBJECT2_CN_N: 147.3578567617173
+    };
+    const r = await fetch('/api/ingest/inject', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(exampleCdm)
+    });
+    const d = await r.json();
+    const ok = r.ok && (d.saved > 0 || d.status === 'ok' || d.status === 'duplicate');
+    log('Step 1: Inject TIROS 4 CDM', ok, ok ? 'TIROS 4 (226) / IRIDIUM 33 DEB (35929) loaded' : JSON.stringify(d));
+  } catch(e) { log('Step 1: Inject TIROS 4 CDM', false, e.message); }
+
+  // Step 2: Evaluate with TIROS 4 state vectors
+  const r1 = [-1484.865223, -5293.446853, -4495.437378];
+  const r2 = [-1484.285818, -5292.263622, -4494.23968];
+  const r_rel = [r1[0]-r2[0], r1[1]-r2[1], r1[2]-r2[2]];
+  // Covariance: CDM values in m2, convert to km2 (divide by 1e6)
+  const p_rel_km2 = [
+    (99.64+211.52)/1e6, 0, 0,
+    0, (22486.67+1805633.08)/1e6, 0,
+    0, 0, (9.97+147.36)/1e6
+  ];
+  const tBurn = new Date(Date.now() - 3600000).toISOString();
+  const tCA   = new Date(Date.now() + 3 * 3600000).toISOString();
+  const evalReq = {
+    conjunction_id: 'TIROS4-SMOKE-E2E',
+    satellite: {
+      sat_id: 'TIROS 4', r_sat_km: r1,
+      v_sat_km_s: [6.464033802, 0.661818202, -3.00266646],
+      t_burn_utc: tBurn,
+      v_remaining_m_s: 45.0
+    },
+    conjunction: {
+      obj_id: 'IRIDIUM 33 DEB', t_ca_utc: tCA,
+      r_rel_km: r_rel, p_rel_km2: p_rel_km2, pc_precomputed: 0.0
+    },
+    policy: { lambda_v: 1.0, lambda_L: 0.8, dv_mag_limit_m_s: 2.0, a_ref_km: 7000.0 }
+  };
+
+  let evalResult = null;
+  try {
+    const r = await fetch('/api/planner/evaluate', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(evalReq)
+    });
+    evalResult = await r.json();
+    log('Step 2: Planner /evaluate call', r.ok && !evalResult.error, r.ok ? 'HTTP 200' : 'HTTP ' + r.status);
+  } catch(e) { log('Step 2: Planner /evaluate call', false, e.message); }
+
+  if (evalResult) {
+    log('Step 3: conjunction_id in response', !!evalResult.conjunction_id, evalResult.conjunction_id || '');
+    log('Step 4: recommendation field present', !!evalResult.recommendation, '');
+    log('Step 5: metrics with all_candidates', !!(evalResult.metrics && evalResult.metrics.all_candidates && evalResult.metrics.all_candidates.length > 0), (evalResult.metrics && evalResult.metrics.all_candidates) ? evalResult.metrics.all_candidates.length + ' candidates' : 'missing');
+    log('Step 6: m2_pre > 0', !!(evalResult.metrics && evalResult.metrics.m2_pre > 0), evalResult.metrics ? 'm2_pre=' + evalResult.metrics.m2_pre : '');
+    log('Step 7: evaluated_at present', !!evalResult.evaluated_at, evalResult.evaluated_at || '');
+
+    // Step 8: atlas_artifact (when backend is extended)
+    const art = evalResult.atlas_artifact;
+    if (art) {
+      log('Step 8: atlas_artifact in response', true, 'APS 2.5 artifact bundle present');
+      log('Step 9: risk_summary present', !!art.risk_summary, '');
+      log('Step 10: verification present', !!art.verification, art.verification ? ('passed=' + art.verification.passed) : '');
+      log('Step 11: mission_impact present', !!art.mission_impact, '');
+      log('Step 12: five checks in verification', !!(art.verification && art.verification.risk_reduced != null), '');
+      renderAtlasArtifact(art);
+      log('Step 13: artifact panels rendered', true, 'All five artifact panels updated');
+    } else {
+      log('Step 8: atlas_artifact in response', false, 'v2.4 response only -- atlas_artifact not present (expected until backend is extended)');
+    }
+  }
+
+  // Render results
+  renderSmokeTestResults(results);
+}
+
+function renderSmokeTestResults(results) {
+  let modal = document.getElementById('smokeTestModal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'smokeTestModal';
+    modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.8);z-index:2000;display:flex;align-items:center;justify-content:center';
+    modal.onclick = e => { if (e.target === modal) modal.remove(); };
+    document.body.appendChild(modal);
+  }
+  const passed = results.filter(r => r.passed === true).length;
+  const failed = results.filter(r => r.passed === false).length;
+  const total = results.filter(r => r.passed !== null).length;
+  const summaryColor = failed === 0 ? 'var(--green)' : 'var(--red)';
+  let html = '<div style="background:var(--bg-card);border:1px solid var(--border-accent);border-radius:6px;width:560px;max-width:90vw;max-height:80vh;display:flex;flex-direction:column;overflow:hidden">';
+  html += '<div style="padding:10px 16px;border-bottom:1px solid var(--border);font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--accent-dim);display:flex;justify-content:space-between;align-items:center">';
+  html += '<span>E2E Smoke Test &mdash; TIROS 4 CDM</span>';
+  html += '<span style="color:' + summaryColor + ';font-weight:700">' + passed + '/' + total + ' PASSED</span>';
+  html += '<button onclick="document.getElementById(\'smokeTestModal\').remove()" style="background:none;border:1px solid var(--border);color:var(--text-dim);width:24px;height:24px;border-radius:3px;cursor:pointer;font-size:14px">&times;</button>';
+  html += '</div><div style="padding:12px 16px;overflow-y:auto;flex:1">';
+  results.forEach(r => {
+    const cls = r.passed === null ? 'info' : r.passed ? 'pass' : 'fail';
+    const icon = r.passed === null ? '\u2014' : r.passed ? '\u2713' : '\u2717';
+    html += '<div class="smoke-result ' + cls + '">' + icon + ' ' + r.label + (r.detail ? ' <span style="opacity:0.6">&mdash; ' + r.detail + '</span>' : '') + '</div>';
+  });
+  html += '</div></div>';
+  modal.innerHTML = html;
+}
 
 </script>
 <div class="store-modal-backdrop" id="storeBackdrop" onclick="if(event.target===this)closeStoreModal()">

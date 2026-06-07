@@ -38,7 +38,7 @@ import math
 import pytest
 import numpy as np
 
-from services.planner.common.atlas_artifact import (
+from common.atlas_artifact import (
     RiskSummary,
     ManeuverRecommendation,
     DecisionRationale,
@@ -54,17 +54,17 @@ from services.planner.common.atlas_artifact import (
     _build_verification_result,
     _build_mission_impact,
 )
-from services.planner.common.satellite_capability import (
+from common.satellite_capability import (
     SatelliteCapability,
     LifetimeProfile,
     ConstellationSlot,
 )
-from services.planner.common.operator_policy import OperatorPolicy, ScoringWeights
-from services.planner.common.maneuver_scorer import (
+from common.operator_policy import OperatorPolicy, ScoringWeights
+from common.maneuver_scorer import (
     score_maneuver_candidates,
     _passes_feasibility,
 )
-from services.planner.common.constellation_geometry import (
+from common.constellation_geometry import (
     leo_constellation_482km,
     _mean_motion_to_sma_km,
 )

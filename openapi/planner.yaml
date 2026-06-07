@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: APS Planner – Avoidance Decision Model
   description: |
-    Microservice wrapper for the APS v2.4 decision model (decision_model.py).
+    Microservice wrapper for the APS v2.5 decision model.
 
     **Position in the xOrbita stack**
     - Upstream: Propagator service supplies relative state & covariance at TCA;
@@ -29,16 +29,21 @@ info:
     converts to km² (divides by 1e6) before returning. The planner receives and
     passes km² throughout. Do not apply further unit conversion.
 
-    **Changes in 2.4.2 (relative to 2.4.1)**
-    - ConjunctionState: added optional covariance_source field
-    - EvaluateResponse: added covariance_source field (echoed from request)
-    - Added CovarianceSourceEnum schema component
-    - Added unit conversion note to p_rel_km2 description
-    - Renamed inline_response schemas to explicit named schemas
-    - Updated info.description to document ingest service dependency
+    **Changes in 2.5.0 (relative to 2.4.3)**
+    - /v1/evaluate now calls evaluate_conjunction_v25() (maneuver_scorer.py)
+      which returns a ManeuverScoringResult — a strict superset of the v2.4
+      response. All v2.4 output fields preserved with identical names.
+    - EvaluateResponse: added optional atlas_artifact field (ATLASManeuverArtifact).
+      Present on all successful /v1/evaluate calls. Never present on batch calls.
+    - Added ATLASManeuverArtifact, RiskSummary, ManeuverRecommendation2_5,
+      DecisionRationale, PostManeuverProjection, NoGoReasoning,
+      VerificationResult, MissionImpactSummary, SecondaryConflictCheck schema
+      components.
+    - info.version bumped from 2.4.3 to 2.5.0.
+    - No fields renamed or removed (SCRUM-281 constraint satisfied).
   contact:
     name: xOrbita APS Team
-  version: 2.4.3
+  version: 2.5.0
 servers:
 - url: http://localhost:8060
   description: Local / Jetson dev
@@ -62,10 +67,11 @@ paths:
       description: |
         Accepts the relative state, covariance, satellite inertial state,
         and operator policy for one conjunction event. Returns the best
-        burn candidate with decision metrics.
+        burn candidate with decision metrics and the full ATLASManeuverArtifact.
 
-        This is the REST equivalent of evaluate_candidates() in
-        avoid/decision_model.py.
+        This is the REST equivalent of evaluate_conjunction_v25() in
+        common/maneuver_scorer.py (APS 2.5). The v2.4 request shape is
+        accepted unchanged.
 
         The caller (planner adapter) is responsible for:
         1. Fetching covariance_combined_rtn from the ingest service
@@ -82,7 +88,7 @@ paths:
         required: true
       responses:
         "200":
-          description: Recommended maneuver and decision metrics
+          description: Recommended maneuver, decision metrics, and ATLAS artifact
           content:
             application/json:
               schema:
@@ -99,7 +105,8 @@ paths:
       description: |
         Accepts an array of conjunction events. Returns a ranked list of
         recommended maneuvers, one per conjunction, sorted by utility score
-        descending.
+        descending. Uses the v2.4 evaluate_batch() path — atlas_artifact is
+        not included in batch responses (9.6 scope).
       operationId: evaluateBatch
       requestBody:
         content:
@@ -158,10 +165,7 @@ components:
           minItems: 3
           type: array
           description: "Satellite ECI position at burn time [x, y, z] (km)"
-          example:
-          - 6878
-          - 0
-          - 0
+          example: [6878, 0, 0]
           items:
             type: number
         v_sat_km_s:
@@ -169,10 +173,7 @@ components:
           minItems: 3
           type: array
           description: "Satellite ECI velocity at burn time [vx, vy, vz] (km/s)"
-          example:
-          - 0
-          - 7.668
-          - 0
+          example: [0, 7.668, 0]
           items:
             type: number
         t_burn_utc:
@@ -215,10 +216,7 @@ components:
           minItems: 3
           type: array
           description: "Relative position at TCA [x, y, z] (km). dr = r_obj - r_sat"
-          example:
-          - 0.5
-          - -0.3
-          - 0.1
+          example: [0.5, -0.3, 0.1]
           items:
             type: number
         p_rel_km2:
@@ -227,25 +225,11 @@ components:
           type: array
           description: |
             Relative covariance at TCA in km², ECI frame.
-            3x3 symmetric matrix in row-major flat form:
-            [c11, c12, c13, c21, c22, c23, c31, c32, c33]
-            P_rel = P_obj + P_sat (assuming independence).
-
+            3x3 symmetric matrix in row-major flat form.
             Unit note: raw CCSDS 508.0-B-1 values are in m². The ingest
-            service converts to km² (divides by 1e6) before returning
-            covariance_combined_rtn. The planner adapter rotates RTN to ECI
-            and flattens to this 9-element field. Do not apply further
+            service converts to km² before returning. Do not apply further
             unit conversion here.
-          example:
-          - 0.01
-          - 0
-          - 0
-          - 0
-          - 0.01
-          - 0
-          - 0
-          - 0
-          - 0.01
+          example: [0.01, 0, 0, 0, 0.01, 0, 0, 0, 0.01]
           items:
             type: number
         pc_precomputed:
@@ -254,6 +238,13 @@ components:
             Optional pre-computed collision probability from ingest
             (Space-Track published Pc, if available).
             If null the planner uses Mahalanobis distance as risk surrogate.
+          nullable: true
+        miss_distance_km:
+          type: number
+          description: |
+            Optional miss distance at TCA [km]. Used by build_atlas_artifact()
+            for RiskSummary and feasibility checks. If omitted, miss distance
+            checks are skipped.
           nullable: true
         covariance_source:
           $ref: "#/components/schemas/CovarianceSourceEnum"
@@ -340,6 +331,16 @@ components:
           type: string
           description: Timestamp when the evaluation was computed
           format: date-time
+        atlas_artifact:
+          description: |
+            Full ATLASManeuverArtifact bundle (APS 2.5 / 9.6). Present on all
+            successful /v1/evaluate calls. Contains all five required operator
+            artifacts (RiskSummary, ManeuverRecommendation, DecisionRationale,
+            PostManeuverProjection, NoGoReasoning) plus VerificationResult and
+            MissionImpactSummary. Absent on /v1/evaluate/batch responses.
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/ATLASManeuverArtifact"
     ManeuverRecommendation:
       required:
       - direction
@@ -351,21 +352,22 @@ components:
       properties:
         direction:
           type: string
-          description: Named burn direction (best of the three candidates)
+          description: Named burn direction (best of the evaluated candidates)
           example: prograde
           enum:
           - prograde
+          - retrograde
           - radial
+          - anti-radial
           - cross-track
+          - anti-cross
+          - no-burn
         dv_eci_km_s:
           maxItems: 3
           minItems: 3
           type: array
           description: "Recommended delta-v vector in ECI [dvx, dvy, dvz] (km/s)"
-          example:
-          - 0
-          - 0.001
-          - 0
+          example: [0, 0.001, 0]
           items:
             type: number
         dv_magnitude_m_s:
@@ -392,7 +394,7 @@ components:
       properties:
         delta_C:
           type: number
-          description: "Confidence gain: delta_C = m2_pre - m2_post (Mahalanobis)"
+          description: "Confidence gain: delta_C = m2_pre - m2_post (Mahalanobis, v2.4 convention)"
           example: 5.12
         m2_pre:
           type: number
@@ -447,6 +449,235 @@ components:
       enum:
       - real_cdm
       - surrogate_identity
+    ATLASManeuverArtifact:
+      type: object
+      description: |
+        Complete artifact bundle for ATLAS display, operator review, and audit.
+        Assembles all five required sub-artifacts (APS_2_5_Research_V3.ipynb §5.3)
+        plus VerificationResult and MissionImpactSummary. All v2.4 fields are
+        preserved for backward compatibility.
+      properties:
+        conjunction_id:
+          type: string
+        sat_id:
+          type: string
+        evaluated_at:
+          type: string
+          format: date-time
+        direction:
+          type: string
+          description: v2.4 preserved field
+        utility:
+          type: number
+          description: v2.4 preserved field
+        delta_C:
+          type: number
+          description: v2.4 preserved field
+        m2_pre:
+          type: number
+        m2_post:
+          type: number
+        risk_summary:
+          $ref: "#/components/schemas/RiskSummary"
+        recommendation:
+          description: "A2: What should be done? Null if no-go."
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/ManeuverRecommendation2_5"
+        rationale:
+          $ref: "#/components/schemas/DecisionRationale"
+        post_maneuver:
+          description: "A4: What happens if we execute? Null if no-go."
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/PostManeuverProjection"
+        no_go:
+          description: "A5: Why are we not acting? Null if maneuver recommended."
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/NoGoReasoning"
+        verification:
+          $ref: "#/components/schemas/VerificationResult"
+        mission_impact:
+          $ref: "#/components/schemas/MissionImpactSummary"
+    RiskSummary:
+      type: object
+      description: "A1: Why is action needed?"
+      properties:
+        pc_pre:
+          type: number
+          nullable: true
+          description: Collision probability before maneuver. Null if not supplied.
+        miss_distance_km:
+          type: number
+          nullable: true
+        mahalanobis_pre:
+          type: number
+          description: sqrt(m2_pre)
+        tca_utc:
+          type: string
+          format: date-time
+        covariance_quality:
+          type: string
+          enum: [good, degraded, dilution_region]
+        maneuver_required:
+          type: boolean
+        monitor_only:
+          type: boolean
+    ManeuverRecommendation2_5:
+      type: object
+      description: "A2: What should be done? (v2.5 extended fields)"
+      properties:
+        direction:
+          type: string
+        dv_eci_km_s:
+          type: array
+          items:
+            type: number
+        dv_magnitude_m_s:
+          type: number
+        dv_return_m_s:
+          type: number
+          description: Return burn cost [m/s]. 0.0 for non-constellated satellites.
+        dv_total_m_s:
+          type: number
+          description: Total mission delta-v cost including return [m/s].
+        burn_time_utc:
+          type: string
+          format: date-time
+        drag_correction_applied:
+          type: boolean
+    DecisionRationale:
+      type: object
+      description: "A3: Why this maneuver?"
+      properties:
+        utility_score:
+          type: number
+        delta_C:
+          type: number
+        dv_cost_term:
+          type: number
+        lifetime_cost_term:
+          type: number
+        slot_cost_term:
+          type: number
+        lifetime_fraction_used:
+          type: number
+        policy_constraints_applied:
+          type: array
+          items:
+            type: string
+        candidate_rank:
+          type: integer
+        n_candidates_evaluated:
+          type: integer
+        all_candidates:
+          type: array
+          items:
+            $ref: "#/components/schemas/CandidateResult"
+        scoring_weights:
+          type: object
+          additionalProperties:
+            type: number
+    PostManeuverProjection:
+      type: object
+      description: "A4: What happens if we execute?"
+      properties:
+        m2_post:
+          type: number
+        mahalanobis_post:
+          type: number
+        risk_surrogate_post:
+          type: number
+        slot_recovery_orbits:
+          type: number
+        slot_recovery_time_s:
+          type: number
+        slot_recovery_feasible:
+          type: boolean
+        secondary_conflict:
+          $ref: "#/components/schemas/SecondaryConflictCheck"
+    NoGoReasoning:
+      type: object
+      description: "A5: Why are we not acting?"
+      properties:
+        reason_code:
+          type: string
+          enum:
+          - pc_below_threshold
+          - propulsion_infeasible
+          - no_utility_gain
+          - trivial_event
+          - blackout_window
+        human_readable:
+          type: string
+        pc_at_decision:
+          type: number
+          nullable: true
+        mahalanobis_at_decision:
+          type: number
+    VerificationResult:
+      type: object
+      description: Post-burn pass/fail assessment (planning-time estimate, not real-time)
+      properties:
+        passed:
+          type: boolean
+        risk_reduced:
+          type: boolean
+        utility_positive:
+          type: boolean
+        secondary_clear:
+          type: boolean
+        budget_within_limits:
+          type: boolean
+        recovery_within_limits:
+          type: boolean
+        failure_reasons:
+          type: array
+          items:
+            type: string
+        m2_pre:
+          type: number
+        m2_post:
+          type: number
+        delta_m2:
+          type: number
+        verification_note:
+          type: string
+    MissionImpactSummary:
+      type: object
+      properties:
+        dv_consumed_m_s:
+          type: number
+        v_remaining_after_m_s:
+          type: number
+        lifetime_fraction_before:
+          type: number
+        lifetime_fraction_after:
+          type: number
+        slot_drift_km:
+          type: number
+        slot_tolerance_km:
+          type: number
+        slot_recovery_required:
+          type: boolean
+        slot_recovery_orbits:
+          type: number
+        constellation_impact_note:
+          type: string
+    SecondaryConflictCheck:
+      type: object
+      properties:
+        secondary_check_performed:
+          type: boolean
+        secondary_conjunction_clear:
+          type: boolean
+        flagged_objects:
+          type: array
+          items:
+            type: string
+        operator_note:
+          type: string
     EvaluateBatchRequest:
       required:
       - conjunctions
@@ -475,7 +706,7 @@ components:
           example: ok
         version:
           type: string
-          example: 2.4.3
+          example: 2.5.0
     ErrorResponse:
       type: object
       properties:

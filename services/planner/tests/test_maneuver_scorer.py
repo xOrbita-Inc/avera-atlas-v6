@@ -35,7 +35,7 @@ import math
 import pytest
 import numpy as np
 
-from services.planner.common.maneuver_scorer import (
+from common.maneuver_scorer import (
     compute_lifetime_fraction,
     score_maneuver_candidates,
     evaluate_conjunction_v25,
@@ -47,15 +47,15 @@ from services.planner.common.maneuver_scorer import (
     ManeuverScoringResult,
     CandidateScore,
 )
-from services.planner.common.satellite_capability import (
+from common.satellite_capability import (
     SatelliteCapability,
     PropulsionProfile,
     LifetimeProfile,
     ManeuverCadence,
     ConstellationSlot,
 )
-from services.planner.common.operator_policy import OperatorPolicy, ScoringWeights
-from services.planner.common.constellation_geometry import (
+from common.operator_policy import OperatorPolicy, ScoringWeights
+from common.constellation_geometry import (
     leo_constellation_482km,
     _mean_motion_to_sma_km,
     _return_burn_cost_m_s,
