@@ -30,6 +30,8 @@ MU_EARTH = 3.986004418e14  # Earth gravitational parameter (m³/s²)
 MU_EARTH_KM = 3.986004418e5  # (km³/s²)
 RE_EARTH = 6378.137  # Earth equatorial radius (km)
 J2000_EPOCH = datetime(2000, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+MAX_ACCEPTED_RMS_RESIDUAL_ARCSEC = 900.0
+MAX_ACCEPTED_TOTAL_RESIDUAL_ARCSEC = 1800.0
 
 
 # =============================================================================
@@ -751,115 +753,161 @@ def range_search_iod(
     mu: float = MU_EARTH_KM,
     range_min: float = 50.0,
     range_max: float = 5000.0,
-    n_search: int = 40
+    n_search: int = 150,
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], str]:
     """
     Range search IOD for space-based observers.
-    
+
     Searches over possible slant ranges to find a consistent orbital solution.
-    More robust than Gauss's method for short arcs and space-based sensors.
-    
+    This version uses a finer initial grid plus two local zoom passes around
+    the best rho2 value. The physics is unchanged from the original range
+    search; only the search resolution is improved.
+
     Args:
         obs1, obs2, obs3: Three observations
-        mu: Gravitational parameter (km³/s²)
+        mu: Gravitational parameter (km^3/s^2)
         range_min, range_max: Search bounds for slant range (km)
-        n_search: Number of search points
-        
+        n_search: Number of coarse search points for rho2
+
     Returns:
         (position_km, velocity_km_s, status_message) at obs2 epoch
     """
     R1 = obs1.observer_position_km
     R2 = obs2.observer_position_km
     R3 = obs3.observer_position_km
-    
+
     L1 = obs1.line_of_sight
     L2 = obs2.line_of_sight
     L3 = obs3.line_of_sight
-    
-    # Time intervals
-    t1 = 0
+
+    # Time intervals measured from obs1.
+    t1 = 0.0
     t2 = time_difference_seconds(obs1.timestamp, obs2.timestamp)
     t3 = time_difference_seconds(obs1.timestamp, obs3.timestamp)
-    
+
     if t3 < 1.0:
         return None, None, "Observations too close in time"
-    
-    best_solution = None
-    best_residual = float('inf')
-    
-    # Search over slant range to target at obs2
-    for rho2 in np.linspace(range_min, range_max, n_search):
-        # Target position at obs2
-        r2 = R2 + rho2 * L2
-        r2_mag = norm(r2)
-        
-        # Skip if inside Earth
-        if r2_mag < RE_EARTH + 100:
-            continue
-        
-        # Search for consistent rho1 and rho3
-        for rho1_factor in np.linspace(0.5, 2.0, 15):
-            rho1 = rho2 * rho1_factor
-            r1 = R1 + rho1 * L1
-            r1_mag = norm(r1)
-            
-            if r1_mag < RE_EARTH + 100:
+
+    factor_pts = 31
+    zoom_passes = 2
+
+    def search_window(
+        rho2_min: float,
+        rho2_max: float,
+        rho2_points: int,
+    ) -> tuple[Optional[tuple[np.ndarray, np.ndarray]], float, Optional[float]]:
+        best_solution: Optional[tuple[np.ndarray, np.ndarray]] = None
+        best_residual = float("inf")
+        best_rho2: Optional[float] = None
+
+        for rho2 in np.linspace(rho2_min, rho2_max, rho2_points):
+            r2 = R2 + rho2 * L2
+            r2_mag = norm(r2)
+
+            if r2_mag < RE_EARTH + 100:
                 continue
-            
-            for rho3_factor in np.linspace(0.5, 2.0, 15):
-                rho3 = rho2 * rho3_factor
-                r3 = R3 + rho3 * L3
-                r3_mag = norm(r3)
-                
-                if r3_mag < RE_EARTH + 100:
+
+            for rho1_factor in np.linspace(0.5, 2.0, factor_pts):
+                rho1 = rho2 * rho1_factor
+                r1 = R1 + rho1 * L1
+                r1_mag = norm(r1)
+
+                if r1_mag < RE_EARTH + 100:
                     continue
-                
-                # Compute velocity at r2 using Herrick-Gibbs
-                v2 = herrick_gibbs_velocity(r1, r2, r3, t1, t2, t3, mu)
-                v2_mag = norm(v2)
-                
-                # Check velocity is reasonable for Earth orbit
-                if v2_mag < 2.0 or v2_mag > 12.0:
-                    continue
-                
-                # Compute orbital energy
-                energy = v2_mag**2 / 2 - mu / r2_mag
-                
-                # For bound orbit, energy should be negative
-                if energy >= 0:
-                    continue
-                
-                # Semi-major axis
-                a = -mu / (2 * energy)
-                
-                # Check reasonable orbit
-                if a < RE_EARTH + 100 or a > 100000:
-                    continue
-                
-                # Propagate from r2,v2 to t1 and t3, check angular consistency
-                r1_prop, _ = kepler_propagate(r2, v2, t1 - t2, mu)
-                r3_prop, _ = kepler_propagate(r2, v2, t3 - t2, mu)
-                
-                # Compute angular residuals
-                los1_pred = unit(r1_prop - R1)
-                los3_pred = unit(r3_prop - R3)
-                
-                ang_err1 = math.acos(np.clip(np.dot(los1_pred, L1), -1, 1))
-                ang_err3 = math.acos(np.clip(np.dot(los3_pred, L3), -1, 1))
-                
-                total_residual = (ang_err1 + ang_err3) * 206265  # arcsec
-                
-                if total_residual < best_residual:
-                    best_residual = total_residual
-                    best_solution = (r2.copy(), v2.copy())
-    
-    if best_solution is None:
+
+                for rho3_factor in np.linspace(0.5, 2.0, factor_pts):
+                    rho3 = rho2 * rho3_factor
+                    r3 = R3 + rho3 * L3
+                    r3_mag = norm(r3)
+
+                    if r3_mag < RE_EARTH + 100:
+                        continue
+
+                    v2 = herrick_gibbs_velocity(r1, r2, r3, t1, t2, t3, mu)
+                    v2_mag = norm(v2)
+
+                    if v2_mag < 2.0 or v2_mag > 12.0:
+                        continue
+
+                    energy = v2_mag**2 / 2.0 - mu / r2_mag
+
+                    # Bound orbit only.
+                    if energy >= 0:
+                        continue
+
+                    a = -mu / (2.0 * energy)
+
+                    if a < RE_EARTH + 100 or a > 100000:
+                        continue
+
+                    try:
+                        r1_prop, _ = kepler_propagate(r2, v2, t1 - t2, mu)
+                        r3_prop, _ = kepler_propagate(r2, v2, t3 - t2, mu)
+                    except (OverflowError, ValueError, FloatingPointError):
+                        continue
+
+                    if not np.all(np.isfinite(r1_prop)) or not np.all(np.isfinite(r3_prop)):
+                        continue
+
+                    los1_pred = unit(r1_prop - R1)
+                    los3_pred = unit(r3_prop - R3)
+
+                    ang_err1 = math.acos(np.clip(np.dot(los1_pred, L1), -1.0, 1.0))
+                    ang_err3 = math.acos(np.clip(np.dot(los3_pred, L3), -1.0, 1.0))
+
+                    total_residual = (ang_err1 + ang_err3) * 206265.0
+
+                    if total_residual < best_residual:
+                        best_residual = total_residual
+                        best_solution = (r2.copy(), v2.copy())
+                        best_rho2 = float(rho2)
+
+        return best_solution, best_residual, best_rho2
+
+    best_solution, best_residual, best_rho2 = search_window(
+        range_min,
+        range_max,
+        n_search,
+    )
+
+    if best_solution is None or best_rho2 is None:
         return None, None, "No valid solution found in range search"
-    
-    if best_residual > 1800:  # 30 arcminutes
-        return None, None, f"Best solution has poor consistency: {best_residual:.1f} arcsec"
-    
-    return best_solution[0], best_solution[1], f"Success (residual: {best_residual:.1f} arcsec)"
+
+    span = (range_max - range_min) / max(n_search, 1)
+
+    for _ in range(zoom_passes):
+        local_min = max(range_min, best_rho2 - 2.0 * span)
+        local_max = min(range_max, best_rho2 + 2.0 * span)
+
+        zoom_solution, zoom_residual, zoom_rho2 = search_window(
+            local_min,
+            local_max,
+            80,
+        )
+
+        if (
+            zoom_solution is not None
+            and zoom_rho2 is not None
+            and zoom_residual < best_residual
+        ):
+            best_solution = zoom_solution
+            best_residual = zoom_residual
+            best_rho2 = zoom_rho2
+
+        span = (local_max - local_min) / 80.0
+
+    if best_residual > MAX_ACCEPTED_TOTAL_RESIDUAL_ARCSEC:
+        return None, None, (
+            "Best solution rejected by residual ceiling: "
+            f"{best_residual:.1f} arcsec > "
+            f"{MAX_ACCEPTED_TOTAL_RESIDUAL_ARCSEC:.1f} arcsec"
+        )
+
+    return (
+        best_solution[0],
+        best_solution[1],
+        f"Success refined range-search (residual: {best_residual:.1f} arcsec)",
+    )
 
 
 def double_r_iod(
@@ -1704,10 +1752,11 @@ class IODSolver:
                             obs_sorted, r2_try, v2_try, obs2.timestamp
                         )
 
-                        if method_name == "gooding" and rms_try > 1000.0:
+                        if rms_try > MAX_ACCEPTED_RMS_RESIDUAL_ARCSEC:
                             attempt_record["success"] = False
                             attempt_record["status"] = (
-                                f"{status_try}; rejected: Gooding residual too high ({rms_try:.1f} arcsec)"
+                                f"{status_try}; rejected: RMS residual too high "
+                                f"({rms_try:.1f} arcsec > {MAX_ACCEPTED_RMS_RESIDUAL_ARCSEC:.1f} arcsec)"
                             )
                         else:
                             physical_penalty = score_try - rms_try
@@ -1732,10 +1781,11 @@ class IODSolver:
 
             attempted_methods.append(attempt_record)
 
-        try_method("double-r", double_r_iod)
+        # Active committed optical IOD path.
+        # range-search is currently the validated workhorse across LEO and HEO cases.
         try_method("range-search", range_search_iod)
-        try_method("gauss", gauss_iod)
-        try_method("gooding", gooding_iod)
+        # gauss_iod, double_r_iod, and gooding_iod remain available as experimental
+        # helpers, but are not active candidates until they pass multi-orbit validation.
 
         if not candidates:
             r2, v2, status = estimate_orbit_from_directions(obs1, obs2, obs3, self.mu)
