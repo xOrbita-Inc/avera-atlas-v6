@@ -401,8 +401,6 @@ class TestTLEParseAndPropagate:
         for obj in result:
             actual_sep = float(np.linalg.norm(r_sat - np.array(obj["r_km"])))
             assert abs(actual_sep - obj["separation_km"]) < 0.01
-<<<<<<< Updated upstream
-=======
 
 
 # ---------------------------------------------------------------------------
@@ -482,4 +480,3 @@ class TestClosestApproachFields:
         result = _run_secondary_conflict_check(r_post, known_objects)
         assert result.closest_object_id == "CLOSEST-NOT-FLAGGED"
         assert "CLOSEST-NOT-FLAGGED" in result.flagged_objects
->>>>>>> Stashed changes
