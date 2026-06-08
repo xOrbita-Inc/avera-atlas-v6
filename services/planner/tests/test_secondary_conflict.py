@@ -401,3 +401,85 @@ class TestTLEParseAndPropagate:
         for obj in result:
             actual_sep = float(np.linalg.norm(r_sat - np.array(obj["r_km"])))
             assert abs(actual_sep - obj["separation_km"]) < 0.01
+<<<<<<< Updated upstream
+=======
+
+
+# ---------------------------------------------------------------------------
+# SCRUM-330 follow-on: closest_approach_km and closest_object_id fields
+# ---------------------------------------------------------------------------
+
+class TestClosestApproachFields:
+    """AC2 extension: SecondaryConflictCheck must carry closest approach
+    distance and object ID, not just a list of flagged object IDs."""
+
+    def test_closest_approach_km_present_when_check_performed(self):
+        """closest_approach_km must be set when check is performed."""
+        r_post = [6778.0, 0.0, 0.0]
+        known_objects = [{"obj_id": "OBJ-A", "r_km": [6780.0, 0.0, 0.0]}]
+        result = _run_secondary_conflict_check(r_post, known_objects)
+        assert result.closest_approach_km is not None
+        assert isinstance(result.closest_approach_km, float)
+
+    def test_closest_approach_km_none_when_not_performed(self):
+        """closest_approach_km must be None when check is not performed."""
+        result = _run_secondary_conflict_check(None, None)
+        assert result.closest_approach_km is None
+
+    def test_closest_object_id_matches_nearest_object(self):
+        """closest_object_id must identify the nearest object, not just flagged ones."""
+        r_post = [6778.0, 0.0, 0.0]
+        known_objects = [
+            {"obj_id": "NEAR", "r_km": [6779.0, 0.0, 0.0]},   # 1.0 km -- not flagged
+            {"obj_id": "FAR",  "r_km": [6790.0, 0.0, 0.0]},   # 12.0 km
+        ]
+        result = _run_secondary_conflict_check(r_post, known_objects)
+        assert result.closest_object_id == "NEAR"
+
+    def test_closest_approach_km_is_accurate(self):
+        """closest_approach_km must equal the actual separation to nearest object."""
+        r_post = [6778.0, 0.0, 0.0]
+        known_objects = [
+            {"obj_id": "OBJ-A", "r_km": [6781.0, 0.0, 0.0]},  # 3.0 km
+            {"obj_id": "OBJ-B", "r_km": [6785.0, 0.0, 0.0]},  # 7.0 km
+        ]
+        result = _run_secondary_conflict_check(r_post, known_objects)
+        assert abs(result.closest_approach_km - 3.0) < 0.01
+        assert result.closest_object_id == "OBJ-A"
+
+    def test_closest_object_id_none_when_not_performed(self):
+        """closest_object_id must be None when check is not performed."""
+        result = _run_secondary_conflict_check(None, None)
+        assert result.closest_object_id is None
+
+    def test_screening_epoch_utc_carried_through(self):
+        """screening_epoch_utc must be passed through from the caller."""
+        r_post = [6778.0, 0.0, 0.0]
+        known_objects = [{"obj_id": "OBJ-A", "r_km": [6790.0, 0.0, 0.0]}]
+        epoch = "2024-01-01T12:00:00Z"
+        result = _run_secondary_conflict_check(r_post, known_objects, epoch)
+        assert result.screening_epoch_utc == epoch
+
+    def test_screening_epoch_utc_none_when_not_performed(self):
+        """screening_epoch_utc must be None when check is not performed and not supplied."""
+        result = _run_secondary_conflict_check(None, None)
+        assert result.screening_epoch_utc is None
+
+    def test_closest_approach_in_operator_note(self):
+        """operator_note must mention the closest approach distance."""
+        r_post = [6778.0, 0.0, 0.0]
+        known_objects = [{"obj_id": "TEST", "r_km": [6780.5, 0.0, 0.0]}]
+        result = _run_secondary_conflict_check(r_post, known_objects)
+        assert str(result.closest_approach_km) in result.operator_note or "km" in result.operator_note
+
+    def test_flagged_object_separate_from_closest(self):
+        """A flagged object and closest object can differ -- closest may not be flagged."""
+        r_post = [6778.0, 0.0, 0.0]
+        known_objects = [
+            {"obj_id": "CLOSEST-NOT-FLAGGED", "r_km": [6778.8, 0.0, 0.0]},  # 0.8 km -- flagged
+            {"obj_id": "FAR", "r_km": [6800.0, 0.0, 0.0]},                  # 22 km
+        ]
+        result = _run_secondary_conflict_check(r_post, known_objects)
+        assert result.closest_object_id == "CLOSEST-NOT-FLAGGED"
+        assert "CLOSEST-NOT-FLAGGED" in result.flagged_objects
+>>>>>>> Stashed changes
