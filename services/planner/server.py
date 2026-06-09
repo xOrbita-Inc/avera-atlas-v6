@@ -45,6 +45,7 @@ from common.maneuver_scorer import evaluate_conjunction_v25, _policy_from_dict
 from common.atlas_artifact import build_atlas_artifact
 from common.satellite_capability import SatelliteCapability
 from common.logging_setup import build_logger, _POLICY_CONFIG_PATH, SERVICE_NAME, SERVICE_VERSION
+from common.spacetrack_tle import fetch_catalog_objects
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -331,13 +332,40 @@ async def post_evaluate(request: Request):
             "evaluated_at":      scoring.evaluated_at,
         }
 
-        # --- 9.6: ATLASManeuverArtifact -----------------------------------
+        # --- 9.6 + SCRUM-330: ATLASManeuverArtifact + secondary conflict ----
+        # Catalog fetch is fire-and-forget: on any failure known_objects=[]
+        # which preserves the not_performed fallback in atlas_artifact.py.
         try:
             conj_dict = body.get("conjunction", {})
             sat_dict  = body.get("satellite", {})
 
             cap     = SatelliteCapability.from_request(sat_dict)
             policy  = _policy_from_dict(body.get("policy", {}))
+
+            # SCRUM-330: fetch TLE catalog for secondary conflict screening.
+            # r_post_km approximated as r_sat_km -- position barely changes
+            # during a short avoidance burn; only velocity changes.
+            r_sat_km_req = sat_dict.get("r_sat_km", [])
+            t_burn_utc   = sat_dict.get("t_burn_utc", "")
+            known_objects = []
+            try:
+                known_objects = fetch_catalog_objects(
+                    r_sat_km=r_sat_km_req,
+                    burn_time_utc=t_burn_utc,
+                )
+                log.info(
+                    "catalog screening complete",
+                    extra={
+                        "event": "catalog_screening_complete",
+                        "nearby_count": len(known_objects),
+                        "conjunction_id": scoring.conjunction_id,
+                    },
+                )
+            except Exception as exc:
+                log.warning(
+                    "catalog fetch failed, secondary check will be not_performed",
+                    extra={"event": "catalog_fetch_failed", "exc": str(exc)},
+                )
 
             artifact = build_atlas_artifact(
                 scoring=scoring,
@@ -346,6 +374,8 @@ async def post_evaluate(request: Request):
                 tca_utc=conj_dict.get("t_ca_utc", ""),
                 pc_precomputed=conj_dict.get("pc_precomputed"),
                 miss_distance_km=conj_dict.get("miss_distance_km"),
+                known_objects=known_objects if known_objects else None,
+                r_post_km=r_sat_km_req if r_sat_km_req else None,
             )
             result["atlas_artifact"] = artifact.to_dict()
             log.info("atlas artifact built", extra={"event": "artifact_built", "conjunction_id": scoring.conjunction_id, "summary": artifact.operator_summary()})

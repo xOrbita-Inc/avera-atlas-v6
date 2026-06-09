@@ -236,16 +236,30 @@ class SecondaryConflictCheck:
         Object IDs of any new conjunctions detected.
     operator_note : str
         Human-readable explanation of the check result.
+    closest_approach_km : float or None
+        Separation to the closest catalog object at the screening epoch [km].
+        None when check was not performed.
+    closest_object_id : str or None
+        Object ID of the closest catalog object at the screening epoch.
+        None when check was not performed or catalog was empty.
+    screening_epoch_utc : str or None
+        ISO-8601 UTC timestamp of the screening epoch (burn time).
+        Single-epoch SGP4 check -- TCA is approximated as this epoch.
+        None when check was not performed.
     """
     secondary_check_performed: bool
     secondary_conjunction_clear: bool
     flagged_objects: List[str]
     operator_note: str
+    closest_approach_km: Optional[float] = None
+    closest_object_id: Optional[str] = None
+    screening_epoch_utc: Optional[str] = None
 
 
 def _run_secondary_conflict_check(
     r_post_km: Optional[List[float]],
     known_objects: Optional[List[Dict[str, Any]]],
+    screening_epoch_utc: Optional[str] = None,
 ) -> SecondaryConflictCheck:
     """Run secondary conflict check against a list of known objects.
 
@@ -256,18 +270,21 @@ def _run_secondary_conflict_check(
     known_objects : list[dict] or None
         List of conjunction objects with 'obj_id' and 'r_km' fields.
         If None, check is not performed.
+    screening_epoch_utc : str or None
+        ISO-8601 UTC timestamp of the screening epoch (burn time).
+        Carried through to SecondaryConflictCheck for operator display.
 
     Returns
     -------
     SecondaryConflictCheck
-        Result with performed flag, clear flag, and any flagged objects.
+        Result with performed flag, clear flag, flagged objects, and
+        closest approach distance and object ID.
 
     Notes
     -----
-    Full catalog integration is APS 3.0 scope. This implementation
-    performs a simple proximity check against a supplied list only.
+    Performs a single-epoch proximity check at the burn time epoch.
     The 1 km separation threshold matches policy.min_miss_distance_km
-    default.
+    default. Full time-window propagation is APS 3.0 scope.
     """
     if not known_objects or r_post_km is None:
         return SecondaryConflictCheck(
@@ -279,6 +296,9 @@ def _run_secondary_conflict_check(
                 "supplied. Full catalog integration is APS 3.0 scope. "
                 "Operator should verify manually against current TLE set."
             ),
+            closest_approach_km=None,
+            closest_object_id=None,
+            screening_epoch_utc=screening_epoch_utc,
         )
 
     import numpy as np
@@ -286,25 +306,42 @@ def _run_secondary_conflict_check(
     flagged = []
     THRESHOLD_KM = 1.0
 
+    closest_sep = float("inf")
+    closest_id = None
+
     for obj in known_objects:
         obj_id = obj.get("obj_id", "UNKNOWN")
         r_obj = obj.get("r_km")
         if r_obj is None:
             continue
         sep = float(np.linalg.norm(r_post - np.array(r_obj, dtype=float)))
+        if sep < closest_sep:
+            closest_sep = sep
+            closest_id = obj_id
         if sep < THRESHOLD_KM:
             flagged.append(obj_id)
 
+    closest_approach_km = round(closest_sep, 3) if closest_id is not None else None
+
     if flagged:
         note = (
-            f"Secondary conjunction detected with {len(flagged)} object(s): "
-            f"{', '.join(flagged)}. Separation below 1 km threshold. "
-            "Maneuver direction should be reconsidered."
+            f"Proximity screening at burn epoch flagged {len(flagged)} object(s) "
+            f"within 1 km: {', '.join(flagged)}. Closest object at burn epoch: "
+            f"{closest_approach_km} km ({closest_id}). "
+            "This is a single-epoch proximity check at burn time, not a full "
+            "post-maneuver conjunction assessment. Tracks have not yet diverged "
+            "at this epoch. Treat as a screening proxy -- operator should verify "
+            "manually. Time-window propagation is APS 3.0 scope."
         )
     else:
         note = (
-            f"Secondary conflict check clear against {len(known_objects)} "
-            "known objects. No new conjunctions introduced by this maneuver."
+            f"Proximity screening at burn epoch found no objects within 1 km "
+            f"across {len(known_objects)} catalog objects screened. Closest object "
+            f"at burn epoch: {closest_approach_km} km ({closest_id}). "
+            "This is a single-epoch proximity check at burn time only -- it screens "
+            "for immediate conflicts at the burn instant, not along the full "
+            "post-maneuver trajectory. Treat as a screening proxy until APS 3.0 "
+            "time-window propagation is available."
         )
 
     return SecondaryConflictCheck(
@@ -312,6 +349,9 @@ def _run_secondary_conflict_check(
         secondary_conjunction_clear=len(flagged) == 0,
         flagged_objects=flagged,
         operator_note=note,
+        closest_approach_km=closest_approach_km,
+        closest_object_id=closest_id,
+        screening_epoch_utc=screening_epoch_utc,
     )
 
 
@@ -903,7 +943,9 @@ def build_atlas_artifact(
     )
 
     # --- Secondary conflict check ---
-    secondary = _run_secondary_conflict_check(r_post_km, known_objects)
+    # screening_epoch_utc is the burn time (t_burn_utc from request), passed
+    # as tca_utc here since build_atlas_artifact receives tca_utc at assembly.
+    secondary = _run_secondary_conflict_check(r_post_km, known_objects, tca_utc)
 
     # --- A4: PostManeuverProjection ---
     post_maneuver: Optional[PostManeuverProjection] = None
