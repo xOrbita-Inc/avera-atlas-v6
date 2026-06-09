@@ -325,16 +325,23 @@ def _run_secondary_conflict_check(
 
     if flagged:
         note = (
-            f"Secondary conjunction detected with {len(flagged)} object(s): "
-            f"{', '.join(flagged)}. Closest approach: {closest_approach_km} km "
-            f"({closest_id}). Separation below 1 km threshold. "
-            "Maneuver direction should be reconsidered."
+            f"Proximity screening at burn epoch flagged {len(flagged)} object(s) "
+            f"within 1 km: {', '.join(flagged)}. Closest object at burn epoch: "
+            f"{closest_approach_km} km ({closest_id}). "
+            "This is a single-epoch proximity check at burn time, not a full "
+            "post-maneuver conjunction assessment. Tracks have not yet diverged "
+            "at this epoch. Treat as a screening proxy -- operator should verify "
+            "manually. Time-window propagation is APS 3.0 scope."
         )
     else:
         note = (
-            f"Secondary conflict check clear against {len(known_objects)} "
-            f"known objects. Closest approach: {closest_approach_km} km "
-            f"({closest_id}). No new conjunctions introduced by this maneuver."
+            f"Proximity screening at burn epoch found no objects within 1 km "
+            f"across {len(known_objects)} catalog objects screened. Closest object "
+            f"at burn epoch: {closest_approach_km} km ({closest_id}). "
+            "This is a single-epoch proximity check at burn time only -- it screens "
+            "for immediate conflicts at the burn instant, not along the full "
+            "post-maneuver trajectory. Treat as a screening proxy until APS 3.0 "
+            "time-window propagation is available."
         )
 
     return SecondaryConflictCheck(
