@@ -21,6 +21,12 @@ from PIL import Image
 
 from detector_yolo import YOLODetector
 
+from confidence_scoring import (
+    DebrisSizeClass,
+    RangeConfidenceTier,
+    calculate_range_confidence,
+)
+
 # === CONFIGURATION ===
 # Tracker connection: prefer TRACKER_HOST/PORT, fall back to legacy PLANNER_HOST/PORT
 TRACKER_HOST = os.getenv("TRACKER_HOST", os.getenv("PLANNER_HOST", "tracker"))
@@ -56,7 +62,6 @@ CLASS_NAME_MAP = {
     "Unknown": "unknown",
 }
 
-
 class CameraPose(BaseModel):
     position_eci_km: List[float] = Field(..., min_length=3, max_length=3)
     quaternion_eci_body: List[float] = Field(..., min_length=4, max_length=4)
@@ -69,6 +74,16 @@ class InferenceRequest(BaseModel):
     sensor_id: Optional[str] = None
     camera_pose: Optional[CameraPose] = None
 
+    estimated_range_km: Optional[float] = Field(
+        None,
+        ge=0.0,
+        description="Estimated sensor-to-object range in km",
+    )
+    debris_size_class: Optional[DebrisSizeClass] = Field(
+        None,
+        description="Approximate debris size class used for ADR-007 R_max lookup",
+    )
+
 
 class Detection(BaseModel):
     track_id: Optional[str] = None
@@ -77,6 +92,22 @@ class Detection(BaseModel):
     spacecraft_type: Optional[str] = Field(None, description="Specific spacecraft type (e.g., CubeSat, Calipso)")
     confidence: float
     bbox: List[float] = Field(..., min_length=4, max_length=4)
+
+    # ADR-007 range-confidence metadata. `confidence` remains the YOLO/model
+    # confidence float for backward compatibility.
+    estimated_range_km: Optional[float] = Field(
+        None,
+        ge=0.0,
+        description="Estimated sensor-to-object range in km",
+    )
+    debris_size_class: Optional[DebrisSizeClass] = Field(
+        None,
+        description="Approximate debris size class used for ADR-007 R_max lookup",
+    )
+    range_confidence: Optional[RangeConfidenceTier] = Field(
+        None,
+        description="ADR-007 physics-based confidence tier from range/R_max",
+    )
 
 
 class DetectionFrame(BaseModel):
@@ -105,7 +136,12 @@ class DetectorWrapper:
             print(f"[CRITICAL] Failed to load model: {e}")
             self.detector = None
 
-    def predict(self, image: Image.Image) -> List[Detection]:
+    def predict(
+        self,
+        image: Image.Image,
+        estimated_range_km: Optional[float] = None,
+        debris_size_class: Optional[DebrisSizeClass] = None,
+    ) -> List[Detection]:
         """
         Run detection and convert to API format.
 
@@ -121,6 +157,13 @@ class DetectorWrapper:
         result = self.detector.detect(image)
         detections = []
 
+        range_confidence = None
+        if estimated_range_km is not None and debris_size_class is not None:
+            range_confidence = calculate_range_confidence(
+                estimated_range_km=estimated_range_km,
+                debris_size_class=debris_size_class,
+            )
+
         for det in result.get('all_detections', []):
             # Map class name to Planner-accepted category
             class_name = det['class_name']
@@ -133,7 +176,10 @@ class DetectorWrapper:
                 object_class=api_class,
                 spacecraft_type=class_name,  # Original specific type for UI
                 confidence=float(det['confidence']),
-                bbox=bbox
+                bbox=bbox,
+                estimated_range_km=estimated_range_km,
+                debris_size_class=debris_size_class,
+                range_confidence=range_confidence,
             ))
 
         return detections
@@ -180,6 +226,9 @@ def build_tracker_payload(frame: DetectionFrame) -> Dict[str, Any]:
             **xywh,
             "confidence": det.confidence,
             "object_class": det.object_class,
+            "estimated_range_km": det.estimated_range_km,
+            "debris_size_class": det.debris_size_class,
+            "range_confidence": det.range_confidence,
             "platform_state": None,
         })
     return {"detections": records}
@@ -241,7 +290,11 @@ async def run_inference(request: InferenceRequest, background_tasks: BackgroundT
         image = Image.open(io.BytesIO(img_bytes)).convert('RGB')
 
         # 2. Inference
-        detections = detector.predict(image)
+        detections = detector.predict(
+            image,
+            estimated_range_km=request.estimated_range_km,
+            debris_size_class=request.debris_size_class,
+        )
 
         # 3. Create Response
         frame_id = request.frame_id or request.image_id or "unknown"

@@ -70,7 +70,10 @@ All endpoints defined in `openapi/planner.yaml` (v2.4.2).
     "t_ca_utc": "2024-01-15T12:17:00Z",
     "r_rel_km": [0.5, 0.0, 0.0],
     "p_rel_km2": [0.01, 0, 0, 0, 0.01, 0, 0, 0, 0.01],
-    "pc_precomputed": 3.57e-04
+    "pc_precomputed": 3.57e-04,
+    "estimated_range_km": 45.2,
+    "debris_size_class": "5cm",
+    "range_confidence": "HIGH"
   },
   "policy": {
     "lambda_v": 0.01,
@@ -105,9 +108,43 @@ All endpoints defined in `openapi/planner.yaml` (v2.4.2).
       {"direction": "radial", "dv_eci_km_s": [0.001, 0, 0], "delta_C": -0.381, "utility": -0.391},
       {"direction": "cross-track", "dv_eci_km_s": [0, 0, 0.001], "delta_C": 0.001, "utility": -0.009}
     ]
+  },
+   "detection_confidence": {
+    "estimated_range_km": 45.2,
+    "debris_size_class": "5cm",
+    "range_confidence": "HIGH"
   }
 }
 ```
+
+### ADR-007 Detection Range Confidence Pass-Through
+
+The Planner can pass ADR-007 range-confidence metadata through the conjunction assessment response when the upstream detector/tracker pipeline provides it.
+
+The detector reports two confidence concepts:
+
+| Field | Meaning |
+|---|---|
+| `confidence` | Neural network/model confidence from YOLO inference. |
+| `range_confidence` | Physics-based confidence tier based on estimated range and debris size class. |
+
+ADR-007 defines median-case detection range constraints for the CQD-CMOS sensor:
+
+| Debris size class | R_max |
+|---|---:|
+| `1cm` | 20 km |
+| `5cm` | 98 km |
+| `10cm` | 195 km |
+
+The range-confidence tier is calculated as:
+
+| Condition | `range_confidence` | Description |
+|---|---|---|
+| `range < 0.5 * R_max` | `HIGH` | Strong detection |
+| `0.5 * R_max <= range < 0.85 * R_max` | `MEDIUM` | Reliable detection |
+| `range >= 0.85 * R_max` | `LOW` | Near sensor limit |
+
+If the conjunction request includes `estimated_range_km`, `debris_size_class`, and `range_confidence`, the Planner returns them under `detection_confidence` in the `/v1/evaluate` response. This is additive and does not change the existing maneuver recommendation or APS scoring logic.
 
 ## File Structure
 

@@ -156,6 +156,31 @@ class TestBuildTrackerPayload:
         payload = build_tracker_payload(single_detection_frame)
         # Should not raise
         uuid.UUID(payload["detections"][0]["detection_id"])
+        
+    def test_range_confidence_fields_in_payload(self):
+        frame = DetectionFrame(
+            frame_id="test-frame-range-confidence",
+            timestamp_utc="2026-04-21T12:00:00Z",
+            sensor_id="UI-UPLOAD-SWIR",
+            camera_pose=None,
+            detections=[
+                Detection(
+                    object_class="debris",
+                    confidence=0.91,
+                    bbox=[100.0, 200.0, 150.0, 260.0],
+                    estimated_range_km=45.2,
+                    debris_size_class="5cm",
+                    range_confidence="HIGH",
+                )
+            ],
+        )
+
+        payload = build_tracker_payload(frame)
+        rec = payload["detections"][0]
+
+        assert rec["estimated_range_km"] == 45.2
+        assert rec["debris_size_class"] == "5cm"
+        assert rec["range_confidence"] == "HIGH"
 
 
 # ---------------------------------------------------------------------------

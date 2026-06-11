@@ -380,6 +380,31 @@ async def post_evaluate(request: Request):
             "evaluated_at":      scoring.evaluated_at,
         }
 
+        detection_confidence = None
+        conj_input = body.get("conjunction", {})
+
+        if isinstance(conj_input, dict):
+            detection_confidence = conj_input.get("detection_confidence")
+
+            if detection_confidence is None:
+                confidence_keys = (
+                    "estimated_range_km",
+                    "debris_size_class",
+                    "range_confidence",
+                )
+                if any(key in conj_input for key in confidence_keys):
+                    detection_confidence = {
+                        key: conj_input.get(key)
+                        for key in confidence_keys
+                        if key in conj_input
+                    }
+
+        if detection_confidence is None:
+            detection_confidence = body.get("detection_confidence")
+
+        if detection_confidence is not None:
+            result["detection_confidence"] = detection_confidence
+
         # --- 9.6 + SCRUM-330: ATLASManeuverArtifact + secondary conflict ----
         # Catalog fetch is fire-and-forget: on any failure known_objects=[]
         # which preserves the not_performed fallback in atlas_artifact.py.

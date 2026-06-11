@@ -35,7 +35,9 @@ Stars detected in the field of view are classified as `star` and excluded from c
 {
   "frame_id": "frame_001",
   "sensor_id": "swir_001",
-  "image_base64": "<base64-encoded SWIR frame>",
+  "base64_data": "<base64-encoded SWIR frame>",
+  "estimated_range_km": 45.2,
+  "debris_size_class": "5cm",
   "camera_pose": {
     "position_eci_km": [6878.0, 0.0, 0.0],
     "quaternion_eci_body": [1.0, 0.0, 0.0, 0.0]
@@ -45,7 +47,46 @@ Stars detected in the field of view are classified as `star` and excluded from c
 
 ### Inference Response
 
-Returns detection frame compatible with the Ingest service schema, including bounding boxes, confidence scores, and classified object types.
+Returns detection frame compatible with the Ingest service schema, including bounding boxes, model confidence scores, range-confidence tiers, and classified object types.
+
+### ADR-007 Range-Based Detection Confidence
+
+The detector reports two confidence concepts:
+
+| Field | Meaning |
+|---|---|
+| `confidence` | Neural network/model confidence from YOLO inference. |
+| `range_confidence` | Physics-based confidence tier based on estimated range and debris size class. |
+
+ADR-007 defines median-case detection range constraints for the CQD-CMOS sensor:
+
+| Debris size class | R_max |
+|---|---:|
+| `1cm` | 20 km |
+| `5cm` | 98 km |
+| `10cm` | 195 km |
+
+The range-confidence tier is calculated as:
+
+| Condition | `range_confidence` | Description |
+|---|---|---|
+| `range < 0.5 * R_max` | `HIGH` | Strong detection |
+| `0.5 * R_max <= range < 0.85 * R_max` | `MEDIUM` | Reliable detection |
+| `range >= 0.85 * R_max` | `LOW` | Near sensor limit |
+
+Example response fields:
+
+```json
+{
+  "confidence": 0.87,
+  "estimated_range_km": 45.2,
+  "debris_size_class": "5cm",
+  "range_confidence": "HIGH"
+}
+```
+
+`confidence` remains the YOLO/model confidence float for backward compatibility. `range_confidence` is the ADR-007 physics-based confidence tier.
+
 
 ## Model
 
