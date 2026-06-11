@@ -267,13 +267,12 @@ class TestParseConjunction:
         result = _parse_conjunction({"id": "bad", "tca": None})
         assert result is None
 
-    def test_no_crash_on_missing_state_vector(self):
-        """Missing stateVector1 must not crash -- falls back gracefully."""
+    def test_returns_none_on_missing_state_vector(self):
+        """Missing stateVector1 must return None -- zero fabrication is not acceptable."""
         record = _make_conjunction_record()
         del record["stateVector1"]
         result = _parse_conjunction(record)
-        # May return None or a partial result -- either is acceptable, no crash
-        assert result is None or isinstance(result, dict)
+        assert result is None
 
 
 # ---------------------------------------------------------------------------

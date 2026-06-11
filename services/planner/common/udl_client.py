@@ -198,13 +198,15 @@ def _parse_conjunction(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             rot = _rtn_to_eci_rotation(r_sat, v_sat)
             r_rel_km = (rot @ dr_rtn_m / 1000.0).tolist()
         else:
-            # State vector missing -- fall back to zero relative position
-            r_rel_km = [0.0, 0.0, 0.0]
+            # State vector missing -- cannot compute r_rel_km or rotate covariance.
+            # Return None so the caller discards this record rather than passing
+            # fabricated zero position and covariance to evaluate_conjunction().
             log.warning(
-                "UDL conjunction %s has no state vector -- r_rel_km set to zero",
+                "UDL conjunction %s has no state vector -- record discarded",
                 record.get("id", "?"),
                 extra={"event": "udl_missing_state_vector", "id": record.get("id")},
             )
+            return None
 
         # --- Covariance (RTN, m^2) -> ECI (km^2) ---
         sv2 = record.get("stateVector2") or {}

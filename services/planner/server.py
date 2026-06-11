@@ -46,7 +46,7 @@ from common.atlas_artifact import build_atlas_artifact
 from common.satellite_capability import SatelliteCapability
 from common.logging_setup import build_logger, _POLICY_CONFIG_PATH, SERVICE_NAME, SERVICE_VERSION
 from common.spacetrack_tle import fetch_catalog_objects
-from common.udl_client import UDL_ENABLED, get_conjunctions as _udl_get_conjunctions
+from common.udl_client import UDL_ENABLED
 
 # ---------------------------------------------------------------------------
 # Constants
