@@ -727,14 +727,36 @@ function fmtM2(v){if(Math.abs(v)>=10000)return v.toExponential(2);if(Math.abs(v)
 function updateClock(){document.getElementById('clock').textContent=new Date().toISOString().substr(11,8)+' UTC'}
 setInterval(updateClock,1000);updateClock();
 
-// SCRUM-329 AC5: fetch source mode from ingest service and update label.
+// SCRUM-329 AC5 + SCRUM-331 AC7: fetch source mode and UDL status, update label.
+// Priority: UDL live > Space-Track live > reference CDM.
 async function loadSourceMode(){
   try{
+    const dot=document.getElementById('cdmSourceDot');
+    const label=document.getElementById('cdmSourceLabel');
+
+    // Check UDL status first (SCRUM-331 AC7)
+    try{
+      const udlResp=await fetch('/api/planner/udl-status');
+      if(udlResp.ok){
+        const udl=await udlResp.json();
+        if(udl.mode==='live'){
+          dot.style.background='var(--green)';dot.style.boxShadow='0 0 6px var(--green)';
+          label.style.color='var(--green)';
+          label.textContent='UDL LIVE';
+          return;
+        } else if(udl.mode==='misconfigured'){
+          dot.style.background='var(--red,#ff4444)';dot.style.boxShadow='0 0 6px var(--red,#ff4444)';
+          label.style.color='var(--red,#ff4444)';
+          label.textContent='UDL MISCONFIGURED';
+          return;
+        }
+      }
+    } catch(e){}
+
+    // Fall back to Space-Track / reference CDM source mode (SCRUM-329 AC5)
     const resp=await fetch('/api/ingest/cdm/source_mode');
     if(!resp.ok)return;
     const data=await resp.json();
-    const dot=document.getElementById('cdmSourceDot');
-    const label=document.getElementById('cdmSourceLabel');
     if(data.mode==='live'){
       dot.style.background='var(--green)';dot.style.boxShadow='0 0 6px var(--green)';
       label.style.color='var(--green)';

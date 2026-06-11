@@ -272,6 +272,38 @@ def fetch_catalog_objects(
 
     r_post = np.array(r_sat_km, dtype=float)
 
+    # SCRUM-331: prefer UDL elsets when UDL is enabled.
+    # UDL returns line1/line2 TLE strings directly -- same format as Space-Track.
+    try:
+        from common.udl_client import UDL_ENABLED, get_elsets
+        if UDL_ENABLED:
+            tle_text = get_elsets(epoch_window_days=7)
+            if tle_text:
+                log.info(
+                    "spacetrack_tle: using UDL elsets for catalog screening",
+                    extra={"event": "tle_source_udl"},
+                )
+                try:
+                    nearby = _parse_and_propagate_tle(
+                        tle_text, epoch_utc, r_post, screening_radius_km
+                    )
+                    log.info(
+                        "spacetrack_tle: catalog screening complete (UDL), %d nearby objects",
+                        len(nearby),
+                        extra={"event": "tle_screening_complete", "nearby_count": len(nearby),
+                               "source": "udl", "screening_radius_km": screening_radius_km},
+                    )
+                    return nearby
+                except Exception as exc:
+                    log.warning(
+                        "spacetrack_tle: UDL propagation failed: %s -- falling back to Space-Track",
+                        exc,
+                        extra={"event": "tle_udl_propagation_fail", "reason": str(exc)},
+                    )
+    except ImportError:
+        pass
+
+    # Fall back to Space-Track TLE catalog.
     session = requests.Session()
     try:
         _login(session)

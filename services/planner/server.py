@@ -46,6 +46,7 @@ from common.atlas_artifact import build_atlas_artifact
 from common.satellite_capability import SatelliteCapability
 from common.logging_setup import build_logger, _POLICY_CONFIG_PATH, SERVICE_NAME, SERVICE_VERSION
 from common.spacetrack_tle import fetch_catalog_objects
+from common.udl_client import UDL_ENABLED
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -257,6 +258,53 @@ async def ready() -> Dict[str, Any]:
     except Exception as exc:
         log.warning("readiness check failed", extra={"event": "readiness_fail", "exc": str(exc)})
         raise HTTPException(status_code=503, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# UDL status (SCRUM-331 AC6)
+# ---------------------------------------------------------------------------
+
+@svc.get("/udl-status")
+async def udl_status() -> Dict[str, Any]:
+    """UDL credential and connection status.
+
+    SCRUM-331 AC6: reflects live credential and connection state.
+
+    Returns:
+      enabled          : bool   -- reflects UDL_ENABLED env var
+      credentials_set  : bool   -- UDL_USER and UDL_PASS are present
+      mode             : str    -- 'live' | 'disabled'
+      label            : str    -- human-readable label for the UI badge
+      note             : str    -- additional context for the operator
+    """
+    import os
+    credentials_set = bool(
+        os.environ.get("UDL_USER") and os.environ.get("UDL_PASS")
+    )
+
+    if UDL_ENABLED and credentials_set:
+        mode = "live"
+        label = "UDL LIVE"
+        note = "UDL enabled and credentials present. Live conjunction data active."
+    elif UDL_ENABLED and not credentials_set:
+        mode = "misconfigured"
+        label = "UDL MISCONFIGURED"
+        note = "UDL_ENABLED=true but UDL_USER or UDL_PASS is missing. Set both env vars."
+    else:
+        mode = "disabled"
+        label = "UDL DISABLED"
+        note = (
+            "UDL_ENABLED=false. Set UDL_ENABLED=true after service account "
+            "is confirmed to activate live UDL conjunction data."
+        )
+
+    return {
+        "enabled":         UDL_ENABLED,
+        "credentials_set": credentials_set,
+        "mode":            mode,
+        "label":           label,
+        "note":            note,
+    }
 
 
 # ---------------------------------------------------------------------------
