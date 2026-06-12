@@ -118,6 +118,37 @@ write_scenario(generate_scenario('critical'))
 
 ---
 
+## Testing
+
+Python tests run under pytest. There are two canonical invocations.
+
+Full suite from the repo root (the CI gate):
+```bash
+cd avera-atlas-v6
+python3 -m pytest
+```
+This collects every service suite in a single session. Each service that ships
+a top-level `main.py` (detector, ingest, tracker) has a `conftest.py` that
+anchors its own directory on `sys.path` and isolates its `main` module, so the
+suites do not collide on the shared module name when collected together.
+
+A single service:
+```bash
+cd services/planner
+python3 -m pytest
+```
+
+Per-service runs and the root run report the same outcome for a given service.
+
+Notes:
+- Use `python3`, not `python`.
+- The planner policy-file tests resolve the operator policy from the container
+  path first, then the in-repo copy at `services/planner/config/`. When neither
+  is present (outside a container, without the repo file) they skip rather than
+  fail.
+
+---
+
 ## V2.4 Decision Model
 
 The planner implements Sreejit Sarma's physics-based optimization model:
