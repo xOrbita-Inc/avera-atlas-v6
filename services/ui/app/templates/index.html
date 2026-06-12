@@ -34,6 +34,8 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 .main{flex:1;display:flex;overflow:hidden}
 .sidebar-left{width:285px;flex-shrink:0;background:var(--bg-panel);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow-y:auto}
 .sidebar-right{width:340px;flex-shrink:0;background:var(--bg-panel);border-left:1px solid var(--border);display:flex;flex-direction:column;overflow-y:auto}
+/* SCRUM-353: pin every sidebar panel to its natural content height so none collapse when the column overflows. The column is the single scroll context; the Active Conjunctions table keeps its own internal scroll. */
+.sidebar-right>*{flex-shrink:0}
 .panel{margin:8px;border-radius:4px;background:var(--bg-card);border:1px solid var(--border)}
 .panel-hdr{padding:8px 12px;border-bottom:1px solid var(--border);font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--accent-dim);font-weight:500;display:flex;justify-content:space-between;align-items:center}
 .panel-body{padding:10px 12px}
