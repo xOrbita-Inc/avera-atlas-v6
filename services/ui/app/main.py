@@ -91,6 +91,34 @@ async def planner_health():
         })
 
 
+@app.get("/api/planner/udl-status")
+async def planner_udl_status():
+    """Passthrough proxy to the planner UDL status endpoint (SCRUM-347).
+
+    The dashboard badge (loadSourceMode) calls this on page load to decide
+    the data source label. The planner computes the status from its env;
+    ATLAS relays it verbatim and never reshapes or caches it.
+
+    On any upstream failure (unreachable, timeout, or an error response) we
+    return 502 with a JSON error body so the badge JS falls through cleanly
+    on resp.ok being false rather than seeing a 500 traceback or a hang.
+    """
+    try:
+        resp = requests.get(f"{PLANNER_SERVICE_URL}/udl-status", timeout=5)
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"error": str(e)})
+    if not resp.ok:
+        return JSONResponse(status_code=502, content={
+            "error": f"planner udl-status returned {resp.status_code}"
+        })
+    try:
+        return JSONResponse(status_code=resp.status_code, content=resp.json())
+    except ValueError:
+        return JSONResponse(status_code=502, content={
+            "error": "planner udl-status returned invalid JSON"
+        })
+
+
 # ---------- Ingest CDM proxy ----------
 
 @app.post("/api/ingest/poll")
@@ -113,6 +141,38 @@ async def ingest_poll(request: Request):
         })
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/ingest/cdm/source_mode")
+async def ingest_cdm_source_mode():
+    """Passthrough proxy to the ingest CDM source-mode endpoint (SCRUM-347).
+
+    The dashboard badge calls this after the planner UDL check to label the
+    CDM data source (live Space-Track polling vs reference CDM). ATLAS relays
+    the ingest response verbatim and never reshapes or caches it.
+
+    Defined BEFORE the /cdm/{primary_norad}/{secondary_norad} route as
+    defensive ordering so the literal source_mode path can never be shadowed
+    by the two-segment record lookup.
+
+    On any upstream failure (unreachable, timeout, or an error response) we
+    return 502 with a JSON error body so the badge JS falls through cleanly
+    on resp.ok being false.
+    """
+    try:
+        resp = requests.get(f"{INGEST_SERVICE_URL}/cdm/source_mode", timeout=5)
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"error": str(e)})
+    if not resp.ok:
+        return JSONResponse(status_code=502, content={
+            "error": f"ingest cdm/source_mode returned {resp.status_code}"
+        })
+    try:
+        return JSONResponse(status_code=resp.status_code, content=resp.json())
+    except ValueError:
+        return JSONResponse(status_code=502, content={
+            "error": "ingest cdm/source_mode returned invalid JSON"
+        })
 
 
 @app.get("/api/ingest/cdm/{primary_norad}/{secondary_norad}")
