@@ -2787,6 +2787,10 @@ async function runTiros4SmokeTest() {
       log('Step 11: mission_impact present', !!art.mission_impact, '');
       log('Step 12: five checks in verification', !!(art.verification && art.verification.risk_reduced != null), '');
       renderAtlasArtifact(art);
+      // SCRUM-350: this rebuilds A1, so refresh the Published Pc row the same way
+      // the normal evaluate path does. Step 1 injected the TIROS 4 (226) /
+      // IRIDIUM 33 DEB (35929) CDM, so key the lookup to that pair.
+      updatePublishedPc('226', '35929');
       log('Step 13: artifact panels rendered', true, 'All five artifact panels updated');
     } else {
       log('Step 8: atlas_artifact in response', false, 'v2.4 response only -- atlas_artifact not present (expected until backend is extended)');
