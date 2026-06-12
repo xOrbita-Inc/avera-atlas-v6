@@ -331,6 +331,32 @@ components:
           type: string
           description: Timestamp when the evaluation was computed
           format: date-time
+        detection_confidence:
+          type: object
+          nullable: true
+          description: ADR-007 detection range-confidence metadata passed through from the upstream detector/tracker pipeline when provided.
+          properties:
+            estimated_range_km:
+              type: number
+              format: float
+              description: Estimated sensor-to-object range in kilometers.
+              example: 45.2
+            debris_size_class:
+              type: string
+              description: Debris size class used for ADR-007 R_max lookup.
+              enum:
+              - 1cm
+              - 5cm
+              - 10cm
+              example: 5cm
+            range_confidence:
+              type: string
+              description: ADR-007 physics-based confidence tier based on estimated range divided by R_max.
+              enum:
+              - HIGH
+              - MEDIUM
+              - LOW
+              example: HIGH
         atlas_artifact:
           description: |
             Full ATLASManeuverArtifact bundle (APS 2.5 / 9.6). Present on all
