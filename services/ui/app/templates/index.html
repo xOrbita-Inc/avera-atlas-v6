@@ -250,6 +250,7 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 .artifact-key{font-size:9px;color:var(--text-dim);letter-spacing:0.5px;text-transform:uppercase}
 .artifact-val{font-size:11px;font-weight:500;color:var(--text);text-align:right;max-width:60%}
 .artifact-val.accent{color:var(--accent)}
+.artifact-val.pc-published{color:#b59cff;font-style:italic}
 .artifact-val.green{color:var(--green)}
 .artifact-val.red{color:var(--red)}
 .artifact-val.amber{color:var(--amber)}
@@ -865,6 +866,7 @@ async function evaluateConjunction(conj,idx){
     updateRiskBar(result,conj);
     drawEncounter(conj,result);
     if(result.atlas_artifact)renderAtlasArtifact(result.atlas_artifact);
+    updatePublishedPc(assetNoradId, secondaryNoradId);
   }catch(e){console.error('Planner call failed:',e)}
 }
 
@@ -2475,12 +2477,53 @@ function renderRiskSummary(rs) {
   badge.innerHTML = ' <span style="font-size:8px;padding:2px 6px;border-radius:2px;background:rgba(107,109,138,0.15);color:var(--text-dim)">' +
     cq.replace('_', ' ').toUpperCase() + '</span>';
   let html = '';
-  if (rs.pc_pre != null) html += _ar('Pc pre-maneuver', rs.pc_pre > 0 ? rs.pc_pre.toExponential(2) : '0.00', rs.pc_pre > 1e-4 ? 'red' : rs.pc_pre > 1e-5 ? 'amber' : 'green');
+  if (rs.pc_pre != null) html += _ar('Pc pre-maneuver (APS)', rs.pc_pre > 0 ? rs.pc_pre.toExponential(2) : '0.00', rs.pc_pre > 1e-4 ? 'red' : rs.pc_pre > 1e-5 ? 'amber' : 'green');
+  // SCRUM-350: published Pc from the source CDM (Space-Track), shown next to the
+  // APS-computed value above and styled distinctly. The value is filled in by
+  // updatePublishedPc after this render; it reads "not provided" until then and
+  // on any miss (no NORAD ids, no CDM record, null Pc, or fetch failure).
+  html += _ar('Published Pc (Space-Track)', '<span id="pcSpaceTrackVal">' + pcSpaceTrackDisplay + '</span>', 'pc-published');
   if (rs.miss_distance_km != null) html += _ar('Miss distance', (rs.miss_distance_km * 1000).toFixed(0) + ' m');
   html += _ar('Mahalanobis pre', rs.mahalanobis_pre != null ? rs.mahalanobis_pre.toFixed(3) : '--');
   html += _ar('Covariance quality', cq.replace('_', ' ').toUpperCase(), cqColor);
   html += _ar('Maneuver required', rs.maneuver_required ? 'YES' : 'NO', rs.maneuver_required ? 'red' : 'green');
   el.innerHTML = html;
+}
+
+// SCRUM-350: surface the Space-Track published Pc from the source CDM record,
+// keyed by the asset and secondary NORAD ids the page already holds. Display
+// only: it fetches the existing /api/ingest/cdm proxy and shows the published
+// value next to the APS-computed Pc, performing no comparison.
+//
+// The value is cached in front-end state (pcSpaceTrackDisplay) so it survives
+// A1 panel rebuilds: renderRiskSummary renders the cached value, and
+// applyPublishedPc re-queries the live node after the await instead of writing
+// to a node captured before it. Without this, any A1 repaint triggered while
+// the fetch is in flight (or after it resolves) reverted the row to its
+// default. Any miss (no ids, no CDM record, null Pc, or fetch failure) caches
+// "not provided"; the row is never left as null, 0, or blank.
+let pcSpaceTrackDisplay = 'not provided';
+
+function applyPublishedPc() {
+  const el = document.getElementById('pcSpaceTrackVal');
+  if (el) el.textContent = pcSpaceTrackDisplay;
+}
+
+async function updatePublishedPc(primaryNorad, secondaryNorad) {
+  pcSpaceTrackDisplay = 'not provided';
+  applyPublishedPc();
+  if (!primaryNorad || !secondaryNorad) return;
+  try {
+    const resp = await fetch('/api/ingest/cdm/' + encodeURIComponent(primaryNorad) + '/' + encodeURIComponent(secondaryNorad));
+    if (resp.ok) {
+      const data = await resp.json();
+      const pc = data.pc_space_track;
+      pcSpaceTrackDisplay = (pc === null || pc === undefined) ? 'not provided' : Number(pc).toExponential(2);
+    }
+  } catch (e) {
+    pcSpaceTrackDisplay = 'not provided';
+  }
+  applyPublishedPc();
 }
 
 function renderManeuverRecommendation(rec) {
@@ -2744,6 +2787,10 @@ async function runTiros4SmokeTest() {
       log('Step 11: mission_impact present', !!art.mission_impact, '');
       log('Step 12: five checks in verification', !!(art.verification && art.verification.risk_reduced != null), '');
       renderAtlasArtifact(art);
+      // SCRUM-350: this rebuilds A1, so refresh the Published Pc row the same way
+      // the normal evaluate path does. Step 1 injected the TIROS 4 (226) /
+      // IRIDIUM 33 DEB (35929) CDM, so key the lookup to that pair.
+      updatePublishedPc('226', '35929');
       log('Step 13: artifact panels rendered', true, 'All five artifact panels updated');
     } else {
       log('Step 8: atlas_artifact in response', false, 'v2.4 response only -- atlas_artifact not present (expected until backend is extended)');
