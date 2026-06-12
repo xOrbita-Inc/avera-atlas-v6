@@ -2482,7 +2482,7 @@ function renderRiskSummary(rs) {
   // APS-computed value above and styled distinctly. The value is filled in by
   // updatePublishedPc after this render; it reads "not provided" until then and
   // on any miss (no NORAD ids, no CDM record, null Pc, or fetch failure).
-  html += _ar('Published Pc (Space-Track)', '<span id="pcSpaceTrackVal">not provided</span>', 'pc-published');
+  html += _ar('Published Pc (Space-Track)', '<span id="pcSpaceTrackVal">' + pcSpaceTrackDisplay + '</span>', 'pc-published');
   if (rs.miss_distance_km != null) html += _ar('Miss distance', (rs.miss_distance_km * 1000).toFixed(0) + ' m');
   html += _ar('Mahalanobis pre', rs.mahalanobis_pre != null ? rs.mahalanobis_pre.toFixed(3) : '--');
   html += _ar('Covariance quality', cq.replace('_', ' ').toUpperCase(), cqColor);
@@ -2493,21 +2493,37 @@ function renderRiskSummary(rs) {
 // SCRUM-350: surface the Space-Track published Pc from the source CDM record,
 // keyed by the asset and secondary NORAD ids the page already holds. Display
 // only: it fetches the existing /api/ingest/cdm proxy and shows the published
-// value next to the APS-computed Pc, performing no comparison. Any miss renders
-// "not provided" and never disturbs the rest of the A1 panel.
-async function updatePublishedPc(primaryNorad, secondaryNorad) {
+// value next to the APS-computed Pc, performing no comparison.
+//
+// The value is cached in front-end state (pcSpaceTrackDisplay) so it survives
+// A1 panel rebuilds: renderRiskSummary renders the cached value, and
+// applyPublishedPc re-queries the live node after the await instead of writing
+// to a node captured before it. Without this, any A1 repaint triggered while
+// the fetch is in flight (or after it resolves) reverted the row to its
+// default. Any miss (no ids, no CDM record, null Pc, or fetch failure) caches
+// "not provided"; the row is never left as null, 0, or blank.
+let pcSpaceTrackDisplay = 'not provided';
+
+function applyPublishedPc() {
   const el = document.getElementById('pcSpaceTrackVal');
-  if (!el) return;
-  if (!primaryNorad || !secondaryNorad) { el.textContent = 'not provided'; return; }
+  if (el) el.textContent = pcSpaceTrackDisplay;
+}
+
+async function updatePublishedPc(primaryNorad, secondaryNorad) {
+  pcSpaceTrackDisplay = 'not provided';
+  applyPublishedPc();
+  if (!primaryNorad || !secondaryNorad) return;
   try {
     const resp = await fetch('/api/ingest/cdm/' + encodeURIComponent(primaryNorad) + '/' + encodeURIComponent(secondaryNorad));
-    if (!resp.ok) { el.textContent = 'not provided'; return; }
-    const data = await resp.json();
-    const pc = data.pc_space_track;
-    el.textContent = (pc === null || pc === undefined) ? 'not provided' : Number(pc).toExponential(2);
+    if (resp.ok) {
+      const data = await resp.json();
+      const pc = data.pc_space_track;
+      pcSpaceTrackDisplay = (pc === null || pc === undefined) ? 'not provided' : Number(pc).toExponential(2);
+    }
   } catch (e) {
-    el.textContent = 'not provided';
+    pcSpaceTrackDisplay = 'not provided';
   }
+  applyPublishedPc();
 }
 
 function renderManeuverRecommendation(rec) {
