@@ -332,6 +332,7 @@ async def get_cdm(
     _SOURCE_MAP = {
         "space_track": "real_cdm",
         "synthetic":   "surrogate_identity",
+        "real_cdm":    "real_cdm",
     }
 
     def _assemble(row: CdmRecord) -> dict:
