@@ -43,7 +43,7 @@ info:
     - No fields renamed or removed (SCRUM-281 constraint satisfied).
   contact:
     name: xOrbita APS Team
-  version: 2.5.0
+  version: 2.5.1
 servers:
 - url: http://localhost:8060
   description: Local / Jetson dev
@@ -704,6 +704,29 @@ components:
             type: string
         operator_note:
           type: string
+        closest_approach_km:
+          type: number
+          format: float
+          nullable: true
+          description: >
+            Separation to the closest catalog object at the screening epoch, in
+            kilometers. Null when the check was not performed or no screened
+            object had a usable position.
+        closest_object_id:
+          type: string
+          nullable: true
+          description: >
+            Object ID (NORAD catalog ID) of the closest catalog object at the
+            screening epoch. Null when the check was not performed or the
+            catalog had no usable positions.
+        screening_epoch_utc:
+          type: string
+          format: date-time
+          nullable: true
+          description: >
+            ISO 8601 UTC timestamp of the screening epoch. This is the burn
+            epoch, not TCA; the single-epoch proximity check approximates TCA
+            as this epoch. Null when the check was not performed.
     EvaluateBatchRequest:
       required:
       - conjunctions

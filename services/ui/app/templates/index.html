@@ -34,6 +34,8 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 .main{flex:1;display:flex;overflow:hidden}
 .sidebar-left{width:285px;flex-shrink:0;background:var(--bg-panel);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow-y:auto}
 .sidebar-right{width:340px;flex-shrink:0;background:var(--bg-panel);border-left:1px solid var(--border);display:flex;flex-direction:column;overflow-y:auto}
+/* SCRUM-353: pin every sidebar panel to its natural content height so none collapse when the column overflows. The column is the single scroll context; the Active Conjunctions table keeps its own internal scroll. */
+.sidebar-right>*{flex-shrink:0}
 .panel{margin:8px;border-radius:4px;background:var(--bg-card);border:1px solid var(--border)}
 .panel-hdr{padding:8px 12px;border-bottom:1px solid var(--border);font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--accent-dim);font-weight:500;display:flex;justify-content:space-between;align-items:center}
 .panel-body{padding:10px 12px}
@@ -451,7 +453,7 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
       <!-- A1: Risk Summary -->
       <div class="artifact-panel">
         <div class="artifact-panel-hdr" onclick="toggleArtifactPanel('riskSummaryBody')">
-          A1 &mdash; Risk Summary<span id="riskSummaryBadge"></span>
+          A1 - Risk Summary<span id="riskSummaryBadge"></span>
         </div>
         <div class="artifact-panel-body" id="riskSummaryBody">
           <div class="empty-state">No data</div>
@@ -461,7 +463,7 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
       <!-- A2: Maneuver Recommendation -->
       <div class="artifact-panel" id="a2Panel">
         <div class="artifact-panel-hdr" onclick="toggleArtifactPanel('maneuverRecBody')">
-          A2 &mdash; Maneuver Recommendation
+          A2 - Maneuver Recommendation
         </div>
         <div class="artifact-panel-body" id="maneuverRecBody">
           <div class="empty-state">No data</div>
@@ -471,7 +473,7 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
       <!-- A3: Decision Rationale -->
       <div class="artifact-panel">
         <div class="artifact-panel-hdr" onclick="toggleArtifactPanel('decisionRationaleBody')">
-          A3 &mdash; Decision Rationale
+          A3 - Decision Rationale
         </div>
         <div class="artifact-panel-body" id="decisionRationaleBody">
           <div class="empty-state">No data</div>
@@ -481,7 +483,7 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
       <!-- A4: Post-Maneuver Projection -->
       <div class="artifact-panel" id="a4Panel">
         <div class="artifact-panel-hdr" onclick="toggleArtifactPanel('postManeuverBody')">
-          A4 &mdash; Post-Maneuver Projection
+          A4 - Post-Maneuver Projection
         </div>
         <div class="artifact-panel-body" id="postManeuverBody">
           <div class="empty-state">No data</div>
@@ -491,7 +493,7 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
       <!-- A5: No-Go Reasoning (shown only on no-go) -->
       <div class="artifact-panel" id="a5Panel" style="display:none">
         <div class="artifact-panel-hdr" onclick="toggleArtifactPanel('nogoReasoningBody')">
-          A5 &mdash; No-Go Reasoning
+          A5 - No-Go Reasoning
         </div>
         <div class="artifact-panel-body" id="nogoReasoningBody">
           <div class="empty-state">No data</div>
@@ -520,10 +522,10 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 
     </div>
     <!-- End APS 2.5 panels -->
-    <div class="planner-section" style="flex:1;display:flex;flex-direction:column;min-height:0">
-      <div class="panel" style="flex:1;display:flex;flex-direction:column;min-height:0">
+    <div class="planner-section" style="display:flex;flex-direction:column;flex-shrink:0">
+      <div class="panel" style="display:flex;flex-direction:column">
         <div class="panel-hdr"><span class="panel-hdr-clickable" onclick="openConjunctionsInfoModal()">Active Conjunctions<i class="info-icon">&#x24D8;</i></span><span><button class="refresh-btn" onclick="clearAll()" style="margin-right:4px">CLEAR</button><button class="refresh-btn" onclick="refreshData()">REFRESH</button></span></div>
-        <div style="flex:1;overflow-y:auto;padding:0">
+        <div style="max-height:260px;overflow-y:auto;padding:0">
           <table class="conj-table"><thead><tr><th>Object</th><th>Miss (m)</th><th>Pc</th><th>TCA</th><th>Risk</th></tr></thead>
           <tbody id="conjBody"><tr><td colspan="5" class="empty-state">No data - run a scenario</td></tr></tbody></table>
         </div>
@@ -535,7 +537,7 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 <div class="detect-modal-backdrop" id="detectBackdrop" onclick="if(event.target===this)closeDetectModal()">
   <div class="detect-modal">
     <div class="detect-modal-hdr">
-      <span>Detector &mdash; Object Classification</span>
+      <span>Detector - Object Classification</span>
       <button class="detect-modal-close" onclick="closeDetectModal()">&times;</button>
     </div>
     <div class="detect-tabs">
@@ -573,7 +575,7 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 <div class="payload-modal-backdrop" id="payloadBackdrop" onclick="if(event.target===this)closePayloadModal()">
   <div class="payload-modal">
     <div class="payload-modal-hdr">
-      <span id="payloadModalTitle">SCENARIO &mdash; APS INPUT PAYLOAD</span>
+      <span id="payloadModalTitle">SCENARIO - APS INPUT PAYLOAD</span>
       <div class="payload-modal-hdr-actions">
         <button class="payload-modal-copy" id="payloadCopyBtn" onclick="copyPayloadJson()">COPY</button>
         <button class="payload-modal-close" onclick="closePayloadModal()">&times;</button>
@@ -617,11 +619,11 @@ async function triggerCdmPoll() {
       status.textContent = 'Poll complete';
       const saved = data.saved || 0;
       const skipped = data.skipped || 0;
-      lastResult.textContent = saved + ' CDMs saved, ' + skipped + ' skipped — ' + new Date().toISOString().substr(11,8) + ' UTC';
+      lastResult.textContent = saved + ' CDMs saved, ' + skipped + ' skipped - ' + new Date().toISOString().substr(11,8) + ' UTC';
     } else {
       status.className = 'poll-status err';
       status.textContent = 'Poll failed: ' + (data.error || resp.status);
-      lastResult.textContent = 'Error — check ingest service logs';
+      lastResult.textContent = 'Error - check ingest service logs';
     }
   } catch(e) {
     status.className = 'poll-status err';
@@ -686,13 +688,13 @@ async function injectExampleCdm() {
     if (resp.ok && data.saved > 0) {
       status.className = 'poll-status ok';
       status.textContent = 'Example CDM injected';
-      lastResult.textContent = 'TIROS 4 (226) / IRIDIUM 33 DEB (35929) — real CCSDS 508.0-B-1 covariance loaded';
+      lastResult.textContent = 'TIROS 4 (226) / IRIDIUM 33 DEB (35929) - real CCSDS 508.0-B-1 covariance loaded';
       // Auto-populate the asset NORAD field so planner picks it up immediately
       document.getElementById('assetNoradInput').value = '226';
       assetNoradId = '226';
       secondaryNoradId = '35929';
       document.getElementById('pollBtn').disabled = false;
-      lastResult.textContent = 'TIROS 4 (226) / IRIDIUM 33 DEB (35929) — real CCSDS 508.0-B-1 covariance loaded. Select any conjunction to evaluate with real CDM covariance.';
+      lastResult.textContent = 'TIROS 4 (226) / IRIDIUM 33 DEB (35929) - real CCSDS 508.0-B-1 covariance loaded. Select any conjunction to evaluate with real CDM covariance.';
     } else {
       status.className = 'poll-status err';
       status.textContent = 'Inject failed: ' + (data.errors?.[0] || JSON.stringify(data));
@@ -1792,7 +1794,7 @@ function renderPhysResults(data){
     (classColors[cls]||'var(--text)')+'">'+
     cls.replace('_',' ')+'</div>'+
     '<div class="phys-result-conf">'+conf+'% confidence</div>'+
-    '<div class="phys-result-ms">'+ms+'ms &mdash; '+mod+'</div>'+
+    '<div class="phys-result-ms">'+ms+'ms - '+mod+'</div>'+
     '</div>'+rows;
 }
 
@@ -2540,6 +2542,15 @@ function renderPostManeuverProjection(pm) {
     const scLabel = !sc.secondary_check_performed ? 'NOT CHECKED' : sc.secondary_conjunction_clear ? 'CLEAR' : 'CONFLICT DETECTED';
     const scCls = !sc.secondary_check_performed ? '' : sc.secondary_conjunction_clear ? 'green' : 'red';
     html += _ar('Secondary conflict', scLabel, scCls);
+    // SCRUM-349: the performed path carries the closest catalog object, the
+    // closest approach distance, and the screening epoch (the burn epoch, not
+    // TCA). A null field reads as "not available" rather than 0 or blank.
+    if (sc.secondary_check_performed) {
+      const closestId = (sc.closest_object_id != null && sc.closest_object_id !== '') ? sc.closest_object_id : 'not available';
+      html += _ar('Closest object', closestId);
+      html += _ar('Closest approach', sc.closest_approach_km != null ? sc.closest_approach_km.toFixed(3) + ' km' : 'not available');
+      html += _ar('Screening epoch (burn)', sc.screening_epoch_utc ? sc.screening_epoch_utc.replace('T', ' ').substring(0, 19) + ' UTC' : 'not available');
+    }
     if (sc.operator_note) {
       html += '<div style="margin-top:6px;padding:5px 6px;background:var(--bg-panel);border-radius:3px;font-size:9px;color:var(--text-dim);line-height:1.4">' + sc.operator_note + '</div>';
     }
@@ -2758,14 +2769,14 @@ function renderSmokeTestResults(results) {
   const summaryColor = failed === 0 ? 'var(--green)' : 'var(--red)';
   let html = '<div style="background:var(--bg-card);border:1px solid var(--border-accent);border-radius:6px;width:560px;max-width:90vw;max-height:80vh;display:flex;flex-direction:column;overflow:hidden">';
   html += '<div style="padding:10px 16px;border-bottom:1px solid var(--border);font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--accent-dim);display:flex;justify-content:space-between;align-items:center">';
-  html += '<span>E2E Smoke Test &mdash; TIROS 4 CDM</span>';
+  html += '<span>E2E Smoke Test - TIROS 4 CDM</span>';
   html += '<span style="color:' + summaryColor + ';font-weight:700">' + passed + '/' + total + ' PASSED</span>';
   html += '<button onclick="document.getElementById(\'smokeTestModal\').remove()" style="background:none;border:1px solid var(--border);color:var(--text-dim);width:24px;height:24px;border-radius:3px;cursor:pointer;font-size:14px">&times;</button>';
   html += '</div><div style="padding:12px 16px;overflow-y:auto;flex:1">';
   results.forEach(r => {
     const cls = r.passed === null ? 'info' : r.passed ? 'pass' : 'fail';
     const icon = r.passed === null ? '\u2014' : r.passed ? '\u2713' : '\u2717';
-    html += '<div class="smoke-result ' + cls + '">' + icon + ' ' + r.label + (r.detail ? ' <span style="opacity:0.6">&mdash; ' + r.detail + '</span>' : '') + '</div>';
+    html += '<div class="smoke-result ' + cls + '">' + icon + ' ' + r.label + (r.detail ? ' <span style="opacity:0.6">- ' + r.detail + '</span>' : '') + '</div>';
   });
   html += '</div></div>';
   modal.innerHTML = html;
@@ -2775,7 +2786,7 @@ function renderSmokeTestResults(results) {
 <div class="store-modal-backdrop" id="storeBackdrop" onclick="if(event.target===this)closeStoreModal()">
   <div class="store-modal">
     <div class="store-modal-hdr">
-      <span>CDM Store &mdash; SQLite Record Viewer</span>
+      <span>CDM Store - SQLite Record Viewer</span>
       <div style="display:flex;align-items:center;gap:6px">
         <button class="poll-btn" id="storeDedupeBtn" onclick="storeAction('deduplicate')">DEDUPLICATE</button>
         <button class="poll-btn" id="storeClearBtn" onclick="storeAction('clear')" style="border-color:var(--red);color:var(--red)">CLEAR ALL</button>
