@@ -43,7 +43,7 @@ info:
     - No fields renamed or removed (SCRUM-281 constraint satisfied).
   contact:
     name: xOrbita APS Team
-  version: 2.5.1
+  version: 2.5.2
 servers:
 - url: http://localhost:8060
   description: Local / Jetson dev
@@ -420,7 +420,12 @@ components:
       properties:
         delta_C:
           type: number
-          description: "Confidence gain: delta_C = m2_pre - m2_post (Mahalanobis, v2.4 convention)"
+          description: |
+            Confidence gain: delta_C = m2_pre - m2_post (Mahalanobis, v2.4 convention).
+            Uncalibrated Pc surrogate. Valid as a planning heuristic but not
+            cross-validated against actual Pc outcomes. For events near the dilution
+            boundary or with highly anisotropic covariances, delta_C may be positive
+            while actual Pc increases. Treat as indicative until APS 3.0 calibration.
           example: 5.12
         m2_pre:
           type: number
@@ -581,6 +586,11 @@ components:
           type: number
         delta_C:
           type: number
+          description: |
+            Mahalanobis gain: m2_pre - m2_post (v2.4 convention).
+            Negative = post-maneuver position is further from threat = safer.
+            Uncalibrated Pc surrogate. Treat as a planning heuristic until
+            APS 3.0 calibration against historical conjunction outcomes.
         dv_cost_term:
           type: number
         lifetime_cost_term:
@@ -623,6 +633,18 @@ components:
           type: boolean
         secondary_conflict:
           $ref: "#/components/schemas/SecondaryConflictCheck"
+        execution_error_modelled:
+          type: boolean
+          description: |
+            Always false in APS 2.5. Thrust misalignment and magnitude uncertainty
+            are not included in the post-maneuver covariance. m2_post,
+            mahalanobis_post, and risk_surrogate_post are therefore optimistic.
+            APS 3.0 scope.
+        operator_note:
+          type: string
+          description: |
+            Human-readable explanation of the execution error limitation.
+            Present whenever execution_error_modelled is false.
     NoGoReasoning:
       type: object
       description: "A5: Why are we not acting?"
