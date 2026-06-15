@@ -383,6 +383,12 @@ class PostManeuverProjection:
         Result of secondary conjunction check.
     recovery_plan : SlotRecoveryPlan or None
         Full slot recovery plan from 9.3/9.4. None for non-constellated.
+    execution_error_modelled : bool
+        Always False in APS 2.5. Thrust misalignment and magnitude uncertainty
+        are not included in the post-maneuver covariance. m2_post, mahalanobis_post,
+        and risk_surrogate_post are therefore optimistic. APS 3.0 scope.
+    operator_note : str
+        Human-readable explanation of the execution error limitation.
     """
     m2_post: float
     mahalanobis_post: float
@@ -392,6 +398,12 @@ class PostManeuverProjection:
     slot_recovery_feasible: bool
     secondary_conflict: SecondaryConflictCheck
     recovery_plan: Optional[SlotRecoveryPlan]
+    execution_error_modelled: bool = False
+    operator_note: str = (
+        "m2_post excludes execution error covariance. Thrust misalignment and "
+        "magnitude uncertainty are not modelled. Post-maneuver separation may be "
+        "optimistic. APS 3.0 scope."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -551,6 +563,12 @@ def _build_verification_result(
             f"VERIFICATION FAILED ({len(failures)} check(s)): "
             + " | ".join(failures)
         )
+
+    note += (
+        " Pass/fail based on nominal burn assumption. Execution error covariance "
+        "(thrust misalignment, magnitude uncertainty) not yet modelled. "
+        "Verification result may be optimistic. APS 3.0 scope."
+    )
 
     return VerificationResult(
         passed=passed,
@@ -969,6 +987,12 @@ def build_atlas_artifact(
             ),
             secondary_conflict=secondary,
             recovery_plan=scoring.recovery_plan,
+            execution_error_modelled=False,
+            operator_note=(
+                "m2_post excludes execution error covariance. Thrust misalignment and "
+                "magnitude uncertainty are not modelled. Post-maneuver separation may be "
+                "optimistic. APS 3.0 scope."
+            ),
         )
 
     # --- A2: ManeuverRecommendation ---
@@ -999,6 +1023,7 @@ def build_atlas_artifact(
     )
     if scoring.covariance_quality == "dilution_region":
         constraints_applied.append("covariance_dilution_region_flagged")
+    constraints_applied.append("execution_error_not_modelled")
 
     # Determine candidate rank of recommended direction
     best_dir = scoring.direction
