@@ -43,7 +43,7 @@ info:
     - No fields renamed or removed (SCRUM-281 constraint satisfied).
   contact:
     name: xOrbita APS Team
-  version: 2.5.1
+  version: 2.5.2
 servers:
 - url: http://localhost:8060
   description: Local / Jetson dev
