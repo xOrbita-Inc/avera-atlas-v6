@@ -169,6 +169,14 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 .panel-hdr-clickable:hover{color:var(--accent)}
 .info-icon{font-style:normal;margin-left:6px;font-size:10px;color:var(--text-dim);transition:color 0.2s}
 .panel-hdr-clickable:hover .info-icon{color:var(--accent)}
+.panel-title{display:flex;align-items:center;gap:6px;min-width:0}
+.panel-ctrls{display:flex;align-items:center;gap:4px;flex-shrink:0}
+.portlet-btn{background:none;border:1px solid var(--border);color:var(--text-dim);font-family:inherit;font-size:10px;line-height:1;width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;border-radius:2px;cursor:pointer;padding:0;transition:color 0.2s,border-color 0.2s}
+.portlet-btn:hover{color:var(--accent);border-color:var(--accent-dim)}
+.panel.portlet-minimized > *:not(.panel-hdr){display:none}
+.panel.portlet-maximized{width:88vw;max-width:1100px;max-height:88vh;overflow:auto;margin:0}
+.artifact-panel.portlet-minimized > *:not(.artifact-panel-hdr){display:none}
+.artifact-panel.portlet-maximized{width:88vw;max-width:1100px;max-height:88vh;overflow:auto;margin:0}
 
 .payload-modal-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:1000;align-items:center;justify-content:center}
 .payload-modal-backdrop.open{display:flex}
@@ -242,7 +250,7 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 /* ── APS 2.5 ATLAS ARTIFACT PANELS ─────────────────────────────────────── */
 .artifact-section{margin:0 8px 8px}
 .artifact-panel{border-radius:4px;background:var(--bg-card);border:1px solid var(--border);margin-bottom:6px}
-.artifact-panel-hdr{padding:7px 12px;border-bottom:1px solid var(--border);font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--accent-dim);font-weight:500;display:flex;justify-content:space-between;align-items:center;cursor:pointer}
+.artifact-panel-hdr{padding:7px 12px;border-bottom:1px solid var(--border);font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--accent-dim);font-weight:500;display:flex;justify-content:space-between;align-items:center}
 .artifact-panel-hdr:hover{color:var(--accent)}
 .artifact-panel-body{padding:10px 12px}
 .artifact-row{display:flex;justify-content:space-between;align-items:baseline;padding:3px 0;border-bottom:1px solid var(--border)}
@@ -312,8 +320,8 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 </div>
 <div class="main">
   <div class="sidebar-left">
-    <div class="panel">
-      <div class="panel-hdr"><span class="panel-hdr-clickable" onclick="openPayloadModal()">Scenario<i class="info-icon">&#x24D8;</i></span></div>
+    <div class="panel" id="portlet-scenario" data-portlet data-portlet-title="Scenario">
+      <div class="panel-hdr"><span class="panel-title">Scenario</span><div class="panel-ctrls"><button type="button" class="portlet-btn" data-portlet-action="minimize" title="Minimize">&#x2212;</button><button type="button" class="portlet-btn" data-portlet-action="maximize" title="Maximize">&#x26F6;</button><button type="button" class="portlet-btn portlet-info" data-portlet-action="info" title="Field reference" onclick="openPayloadModal()">&#x24D8;</button></div></div>
       <div class="panel-body">
         <div class="scenario-grid">
           <button class="scenario-btn" data-scenario="nominal" onclick="selectScenario(this)">Nominal</button>
@@ -325,8 +333,8 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
         <div style="text-align:center;margin-top:6px;font-size:9px;color:var(--text-dim)" id="scenarioMsg">Select scenario and run</div>
       </div>
     </div>
-    <div class="panel">
-      <div class="panel-hdr panel-hdr-clickable" onclick="openOperatorPolicyInfoModal()">Operator Policy<i class="info-icon">&#x24D8;</i></div>
+    <div class="panel" id="portlet-operator-policy" data-portlet data-portlet-title="Operator Policy">
+      <div class="panel-hdr"><span class="panel-title">Operator Policy</span><div class="panel-ctrls"><button type="button" class="portlet-btn" data-portlet-action="minimize" title="Minimize">&#x2212;</button><button type="button" class="portlet-btn" data-portlet-action="maximize" title="Maximize">&#x26F6;</button><button type="button" class="portlet-btn portlet-info" data-portlet-action="info" title="Field reference" onclick="openOperatorPolicyInfoModal()">&#x24D8;</button></div></div>
       <div class="panel-body" style="padding:10px 14px">
         <div class="policy-control">
           <div class="policy-label"><span>Fuel Weight (&lambda;<sub>v</sub>)</span><span class="policy-val" id="lvVal">0.010</span></div>
@@ -347,8 +355,8 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
         <div style="text-align:center;font-size:8px;color:var(--text-dim);margin-top:4px" id="policyMsg">Adjust weights to see ranking changes</div>
       </div>
     </div>
-    <div class="panel cdm-ops-panel">
-      <div class="panel-hdr">CDM Operations</div>
+    <div class="panel cdm-ops-panel" id="portlet-cdm-ops" data-portlet data-portlet-title="CDM Operations">
+      <div class="panel-hdr"><span class="panel-title">CDM Operations</span><div class="panel-ctrls"><button type="button" class="portlet-btn" data-portlet-action="minimize" title="Minimize">&#x2212;</button><button type="button" class="portlet-btn" data-portlet-action="maximize" title="Maximize">&#x26F6;</button><button type="button" class="portlet-btn portlet-info" data-portlet-action="info" title="Field reference" onclick="openCdmOpsInfoModal()">&#x24D8;</button></div></div>
       <div class="panel-body" style="padding:10px 14px">
         <div id="cdmSourceMode" style="display:flex;align-items:center;gap:6px;margin-bottom:8px;padding:4px 6px;border:1px solid var(--border);border-radius:3px;background:var(--bg-panel)"><span id="cdmSourceDot" style="width:6px;height:6px;border-radius:50%;background:var(--text-dim);flex-shrink:0"></span><span id="cdmSourceLabel" style="font-size:8px;letter-spacing:1px;text-transform:uppercase;color:var(--text-dim)">CHECKING SOURCE MODE...</span></div>
         <div style="font-size:8px;color:var(--text-dim);letter-spacing:0.5px;margin-bottom:6px">Asset NORAD ID (leave blank for surrogate covariance)</div>
@@ -364,8 +372,8 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
         <button class="poll-btn" onclick="runTiros4SmokeTest()" style="width:100%;margin-top:6px;border-color:var(--accent-dim);color:var(--accent-dim)">RUN TIROS 4 E2E TEST</button>
       </div>
     </div>
-    <div class="panel">
-      <div class="panel-hdr panel-hdr-clickable" onclick="openTrackingSummaryInfoModal()">Tracking Summary<i class="info-icon">&#x24D8;</i></div>
+    <div class="panel" id="portlet-tracking" data-portlet data-portlet-title="Tracking Summary">
+      <div class="panel-hdr"><span class="panel-title">Tracking Summary</span><div class="panel-ctrls"><button type="button" class="portlet-btn" data-portlet-action="minimize" title="Minimize">&#x2212;</button><button type="button" class="portlet-btn" data-portlet-action="maximize" title="Maximize">&#x26F6;</button><button type="button" class="portlet-btn portlet-info" data-portlet-action="info" title="Field reference" onclick="openTrackingSummaryInfoModal()">&#x24D8;</button></div></div>
       <div class="panel-body">
         <div class="metrics-row">
           <div class="metric"><div class="val" id="mTotal">--</div><div class="lbl">Tracked</div></div>
@@ -381,8 +389,8 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
         </div>
       </div>
     </div>
-    <div class="panel">
-      <div class="panel-hdr panel-hdr-clickable" onclick="openApsInfoModal()">APS v2.4 Output<i class="info-icon">&#x24D8;</i><span id="plannerVer" style="font-size:8px;color:var(--text-dim)">--</span></div>
+    <div class="panel" id="portlet-aps-output" data-portlet data-portlet-title="APS Output">
+      <div class="panel-hdr"><span class="panel-title">APS v2.4 Output<span id="plannerVer" style="font-size:8px;color:var(--text-dim)">--</span></span><div class="panel-ctrls"><button type="button" class="portlet-btn" data-portlet-action="minimize" title="Minimize">&#x2212;</button><button type="button" class="portlet-btn" data-portlet-action="maximize" title="Maximize">&#x26F6;</button><button type="button" class="portlet-btn portlet-info" data-portlet-action="info" title="Field reference" onclick="openApsInfoModal()">&#x24D8;</button></div></div>
       <div class="panel-body" id="plannerDetails"><div class="empty-state">Run a scenario to see planner output</div></div>
     </div>
   </div>
@@ -438,8 +446,8 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
       </div>
     </div>
     <div class="planner-section">
-      <div class="panel">
-        <div class="panel-hdr panel-hdr-clickable" onclick="openBurnCandidatesInfoModal()">Burn Candidates<i class="info-icon">&#x24D8;</i></div>
+      <div class="panel" id="portlet-burn-candidates" data-portlet data-portlet-title="Burn Candidates">
+        <div class="panel-hdr"><span class="panel-title">Burn Candidates</span><div class="panel-ctrls"><button type="button" class="portlet-btn" data-portlet-action="minimize" title="Minimize">&#x2212;</button><button type="button" class="portlet-btn" data-portlet-action="maximize" title="Maximize">&#x26F6;</button><button type="button" class="portlet-btn portlet-info" data-portlet-action="info" title="Field reference" onclick="openBurnCandidatesInfoModal()">&#x24D8;</button></div></div>
         <div class="panel-body" style="padding:0">
           <table class="candidates-table"><thead><tr><th>Direction</th><th>&Delta;C</th><th>dv (m/s)</th><th>Utility</th></tr></thead>
           <tbody id="candidatesBody"><tr><td colspan="4" class="empty-state">No evaluation yet</td></tr></tbody></table>
@@ -452,70 +460,56 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
     <div class="artifact-section" id="aps25ArtifactSection" style="display:none">
 
       <!-- A1: Risk Summary -->
-      <div class="artifact-panel">
-        <div class="artifact-panel-hdr" onclick="toggleArtifactPanel('riskSummaryBody')">
-          A1 - Risk Summary<span id="riskSummaryBadge"></span>
-        </div>
+      <div class="artifact-panel" id="portlet-risk-summary" data-portlet data-portlet-title="Risk Summary">
+        <div class="artifact-panel-hdr"><span class="panel-title">A1 - Risk Summary<span id="riskSummaryBadge"></span></span><div class="panel-ctrls"><button type="button" class="portlet-btn" data-portlet-action="minimize" title="Minimize">&#x2212;</button><button type="button" class="portlet-btn" data-portlet-action="maximize" title="Maximize">&#x26F6;</button><button type="button" class="portlet-btn portlet-info" data-portlet-action="info" title="Field reference" onclick="openRiskSummaryInfoModal()">&#x24D8;</button></div></div>
         <div class="artifact-panel-body" id="riskSummaryBody">
           <div class="empty-state">No data</div>
         </div>
       </div>
 
       <!-- A2: Maneuver Recommendation -->
-      <div class="artifact-panel" id="a2Panel">
-        <div class="artifact-panel-hdr" onclick="toggleArtifactPanel('maneuverRecBody')">
-          A2 - Maneuver Recommendation
-        </div>
+      <div class="artifact-panel" id="portlet-maneuver-recommendation" data-portlet data-portlet-title="Maneuver Recommendation">
+        <div class="artifact-panel-hdr"><span class="panel-title">A2 - Maneuver Recommendation</span><div class="panel-ctrls"><button type="button" class="portlet-btn" data-portlet-action="minimize" title="Minimize">&#x2212;</button><button type="button" class="portlet-btn" data-portlet-action="maximize" title="Maximize">&#x26F6;</button><button type="button" class="portlet-btn portlet-info" data-portlet-action="info" title="Field reference" onclick="openManeuverRecommendationInfoModal()">&#x24D8;</button></div></div>
         <div class="artifact-panel-body" id="maneuverRecBody">
           <div class="empty-state">No data</div>
         </div>
       </div>
 
       <!-- A3: Decision Rationale -->
-      <div class="artifact-panel">
-        <div class="artifact-panel-hdr" onclick="toggleArtifactPanel('decisionRationaleBody')">
-          A3 - Decision Rationale
-        </div>
+      <div class="artifact-panel" id="portlet-decision-rationale" data-portlet data-portlet-title="Decision Rationale">
+        <div class="artifact-panel-hdr"><span class="panel-title">A3 - Decision Rationale</span><div class="panel-ctrls"><button type="button" class="portlet-btn" data-portlet-action="minimize" title="Minimize">&#x2212;</button><button type="button" class="portlet-btn" data-portlet-action="maximize" title="Maximize">&#x26F6;</button><button type="button" class="portlet-btn portlet-info" data-portlet-action="info" title="Field reference" onclick="openDecisionRationaleInfoModal()">&#x24D8;</button></div></div>
         <div class="artifact-panel-body" id="decisionRationaleBody">
           <div class="empty-state">No data</div>
         </div>
       </div>
 
       <!-- A4: Post-Maneuver Projection -->
-      <div class="artifact-panel" id="a4Panel">
-        <div class="artifact-panel-hdr" onclick="toggleArtifactPanel('postManeuverBody')">
-          A4 - Post-Maneuver Projection
-        </div>
+      <div class="artifact-panel" id="portlet-post-maneuver-projection" data-portlet data-portlet-title="Post-Maneuver Projection">
+        <div class="artifact-panel-hdr"><span class="panel-title">A4 - Post-Maneuver Projection</span><div class="panel-ctrls"><button type="button" class="portlet-btn" data-portlet-action="minimize" title="Minimize">&#x2212;</button><button type="button" class="portlet-btn" data-portlet-action="maximize" title="Maximize">&#x26F6;</button><button type="button" class="portlet-btn portlet-info" data-portlet-action="info" title="Field reference" onclick="openPostManeuverInfoModal()">&#x24D8;</button></div></div>
         <div class="artifact-panel-body" id="postManeuverBody">
           <div class="empty-state">No data</div>
         </div>
       </div>
 
       <!-- A5: No-Go Reasoning (shown only on no-go) -->
-      <div class="artifact-panel" id="a5Panel" style="display:none">
-        <div class="artifact-panel-hdr" onclick="toggleArtifactPanel('nogoReasoningBody')">
-          A5 - No-Go Reasoning
-        </div>
+      <div class="artifact-panel" id="portlet-no-go-reasoning" data-portlet data-portlet-title="No-Go Reasoning" style="display:none">
+        <div class="artifact-panel-hdr"><span class="panel-title">A5 - No-Go Reasoning</span><div class="panel-ctrls"><button type="button" class="portlet-btn" data-portlet-action="minimize" title="Minimize">&#x2212;</button><button type="button" class="portlet-btn" data-portlet-action="maximize" title="Maximize">&#x26F6;</button><button type="button" class="portlet-btn portlet-info" data-portlet-action="info" title="Field reference" onclick="openNoGoReasoningInfoModal()">&#x24D8;</button></div></div>
         <div class="artifact-panel-body" id="nogoReasoningBody">
           <div class="empty-state">No data</div>
         </div>
       </div>
 
       <!-- Verification Result -->
-      <div class="artifact-panel">
-        <div class="artifact-panel-hdr" onclick="toggleArtifactPanel('verificationBody')">
-          Verification<span id="verifyOverallBadge" style="margin-left:6px;font-size:9px"></span>
-        </div>
+      <div class="artifact-panel" id="portlet-verification" data-portlet data-portlet-title="Verification">
+        <div class="artifact-panel-hdr"><span class="panel-title">Verification<span id="verifyOverallBadge" style="margin-left:6px;font-size:9px"></span></span><div class="panel-ctrls"><button type="button" class="portlet-btn" data-portlet-action="minimize" title="Minimize">&#x2212;</button><button type="button" class="portlet-btn" data-portlet-action="maximize" title="Maximize">&#x26F6;</button><button type="button" class="portlet-btn portlet-info" data-portlet-action="info" title="Field reference" onclick="openVerificationInfoModal()">&#x24D8;</button></div></div>
         <div class="artifact-panel-body" id="verificationBody">
           <div class="empty-state">No data</div>
         </div>
       </div>
 
       <!-- Mission Impact Summary -->
-      <div class="artifact-panel">
-        <div class="artifact-panel-hdr" onclick="toggleArtifactPanel('missionImpactBody')">
-          Mission Impact
-        </div>
+      <div class="artifact-panel" id="portlet-mission-impact" data-portlet data-portlet-title="Mission Impact">
+        <div class="artifact-panel-hdr"><span class="panel-title">Mission Impact</span><div class="panel-ctrls"><button type="button" class="portlet-btn" data-portlet-action="minimize" title="Minimize">&#x2212;</button><button type="button" class="portlet-btn" data-portlet-action="maximize" title="Maximize">&#x26F6;</button><button type="button" class="portlet-btn portlet-info" data-portlet-action="info" title="Field reference" onclick="openMissionImpactInfoModal()">&#x24D8;</button></div></div>
         <div class="artifact-panel-body" id="missionImpactBody">
           <div class="empty-state">No data</div>
         </div>
@@ -524,8 +518,8 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
     </div>
     <!-- End APS 2.5 panels -->
     <div class="planner-section" style="display:flex;flex-direction:column;flex-shrink:0">
-      <div class="panel" style="display:flex;flex-direction:column">
-        <div class="panel-hdr"><span class="panel-hdr-clickable" onclick="openConjunctionsInfoModal()">Active Conjunctions<i class="info-icon">&#x24D8;</i></span><span><button class="refresh-btn" onclick="clearAll()" style="margin-right:4px">CLEAR</button><button class="refresh-btn" onclick="refreshData()">REFRESH</button></span></div>
+      <div class="panel" id="portlet-conjunctions" data-portlet data-portlet-title="Active Conjunctions" style="display:flex;flex-direction:column">
+        <div class="panel-hdr"><span class="panel-title">Active Conjunctions</span><div class="panel-ctrls"><button class="refresh-btn" onclick="clearAll()" style="margin-right:4px">CLEAR</button><button class="refresh-btn" onclick="refreshData()">REFRESH</button><button type="button" class="portlet-btn" data-portlet-action="minimize" title="Minimize">&#x2212;</button><button type="button" class="portlet-btn" data-portlet-action="maximize" title="Maximize">&#x26F6;</button><button type="button" class="portlet-btn portlet-info" data-portlet-action="info" title="Field reference" onclick="openConjunctionsInfoModal()">&#x24D8;</button></div></div>
         <div style="max-height:260px;overflow-y:auto;padding:0">
           <table class="conj-table"><thead><tr><th>Object</th><th>Miss (m)</th><th>Pc</th><th>TCA</th><th>Risk</th></tr></thead>
           <tbody id="conjBody"><tr><td colspan="5" class="empty-state">No data - run a scenario</td></tr></tbody></table>
@@ -1460,6 +1454,158 @@ document.addEventListener('keydown',function(e){
   if(e.key==='Escape'&&document.getElementById('infoModalBackdrop'))closeInfoModal();
 });
 
+// ==========================================================
+// PORTLET PANEL CONTROLS (minimize / maximize / restore)
+// In-memory state only. No persistence, no localStorage.
+// Display-only: the live panel element is moved, not cloned,
+// so updates keep flowing while maximized.
+// ==========================================================
+const portletState = {};            // panel id -> 'normal' | 'minimized' | 'maximized'
+let maximizedPortletId = null;      // only one panel may be maximized at a time
+
+function updatePortletButtons(id){
+  const panel = document.getElementById(id);
+  if(!panel) return;
+  const st = portletState[id] || 'normal';
+  const minB = panel.querySelector('[data-portlet-action="minimize"]');
+  const maxB = panel.querySelector('[data-portlet-action="maximize"]');
+  if(minB){
+    const min = st === 'minimized';
+    minB.innerHTML = min ? '&#x2b;' : '&#x2212;';
+    minB.title = min ? 'Restore' : 'Minimize';
+  }
+  if(maxB){
+    const max = st === 'maximized';
+    maxB.innerHTML = max ? '&times;' : '&#x26F6;';
+    maxB.title = max ? 'Restore' : 'Maximize';
+  }
+}
+
+function minimizePortlet(id){
+  const panel = document.getElementById(id);
+  if(!panel) return;
+  if(portletState[id] === 'maximized') restorePortlet(id);   // leave the overlay first
+  panel.classList.add('portlet-minimized');
+  portletState[id] = 'minimized';
+  updatePortletButtons(id);
+}
+
+function unminimizePortlet(id){
+  const panel = document.getElementById(id);
+  if(!panel) return;
+  panel.classList.remove('portlet-minimized');
+  portletState[id] = 'normal';
+  updatePortletButtons(id);
+}
+
+function maximizePortlet(id){
+  const panel = document.getElementById(id);
+  if(!panel) return;
+  if(maximizedPortletId && maximizedPortletId !== id) restorePortlet(maximizedPortletId);
+  panel.classList.remove('portlet-minimized');   // states are mutually exclusive
+  // Remember the exact original slot with a hidden placeholder.
+  const ph = document.createElement('div');
+  ph.className = 'portlet-placeholder';
+  ph.id = 'portlet-ph-' + id;
+  ph.style.display = 'none';
+  panel.parentNode.insertBefore(ph, panel);
+  // Overlay reuses the info-modal backdrop pattern; the live panel is MOVED in.
+  const backdrop = document.createElement('div');
+  backdrop.id = 'portletMaxBackdrop';
+  backdrop.className = 'info-modal-backdrop open';
+  backdrop.onclick = function(e){ if(e.target === backdrop) restorePortlet(id); };
+  document.body.appendChild(backdrop);
+  backdrop.appendChild(panel);
+  panel.classList.add('portlet-maximized');
+  portletState[id] = 'maximized';
+  maximizedPortletId = id;
+  updatePortletButtons(id);
+}
+
+function restorePortlet(id){    // restore from maximized to the original slot
+  const panel = document.getElementById(id);
+  const ph = document.getElementById('portlet-ph-' + id);
+  const backdrop = document.getElementById('portletMaxBackdrop');
+  if(panel) panel.classList.remove('portlet-maximized');
+  if(panel && ph && ph.parentNode){ ph.parentNode.insertBefore(panel, ph); }
+  if(ph) ph.remove();
+  if(backdrop) backdrop.remove();
+  portletState[id] = 'normal';
+  if(maximizedPortletId === id) maximizedPortletId = null;
+  updatePortletButtons(id);
+}
+
+function togglePortletMinimize(id){
+  if(portletState[id] === 'minimized') unminimizePortlet(id);
+  else minimizePortlet(id);
+}
+
+function togglePortletMaximize(id){
+  if(portletState[id] === 'maximized') restorePortlet(id);
+  else maximizePortlet(id);
+}
+
+function initPortletControls(){
+  document.querySelectorAll('[data-portlet] [data-portlet-action="minimize"]').forEach(b=>{
+    b.addEventListener('click', ()=>{ const p = b.closest('[data-portlet]'); if(p) togglePortletMinimize(p.id); });
+  });
+  document.querySelectorAll('[data-portlet] [data-portlet-action="maximize"]').forEach(b=>{
+    b.addEventListener('click', ()=>{ const p = b.closest('[data-portlet]'); if(p) togglePortletMaximize(p.id); });
+  });
+}
+
+document.addEventListener('keydown', function(e){
+  if(e.key === 'Escape' && maximizedPortletId) restorePortlet(maximizedPortletId);
+});
+
+function openCdmOpsInfoModal(){
+  openInfoModal('CDM Operations \u2014 Field Reference',[
+    {label:'Placeholder',description:'Content to be supplied.'}
+  ]);
+}
+
+function openRiskSummaryInfoModal(){
+  openInfoModal('Risk Summary \u2014 Field Reference',[
+    {label:'Placeholder',description:'Content to be supplied.'}
+  ]);
+}
+
+function openManeuverRecommendationInfoModal(){
+  openInfoModal('Maneuver Recommendation \u2014 Field Reference',[
+    {label:'Placeholder',description:'Content to be supplied.'}
+  ]);
+}
+
+function openDecisionRationaleInfoModal(){
+  openInfoModal('Decision Rationale \u2014 Field Reference',[
+    {label:'Placeholder',description:'Content to be supplied.'}
+  ]);
+}
+
+function openPostManeuverInfoModal(){
+  openInfoModal('Post-Maneuver Projection \u2014 Field Reference',[
+    {label:'Placeholder',description:'Content to be supplied.'}
+  ]);
+}
+
+function openNoGoReasoningInfoModal(){
+  openInfoModal('No-Go Reasoning \u2014 Field Reference',[
+    {label:'Placeholder',description:'Content to be supplied.'}
+  ]);
+}
+
+function openVerificationInfoModal(){
+  openInfoModal('Verification \u2014 Field Reference',[
+    {label:'Placeholder',description:'Content to be supplied.'}
+  ]);
+}
+
+function openMissionImpactInfoModal(){
+  openInfoModal('Mission Impact \u2014 Field Reference',[
+    {label:'Placeholder',description:'Content to be supplied.'}
+  ]);
+}
+
 function openApsInfoModal(){
   openInfoModal('APS v2.4 Output \u2014 Field Reference',[
     {label:'m\u00B2 pre',description:'Mahalanobis distance before maneuver. Unitless measure of conjunction severity relative to covariance geometry. Higher = greater separation relative to uncertainty.'},
@@ -1870,7 +2016,7 @@ function renderDetectionTable(detections){
 }
 
 document.addEventListener('DOMContentLoaded',async()=>{
-  initEncounter();refreshPipeline();await refreshData();
+  initPortletControls();initEncounter();refreshPipeline();await refreshData();
   if(conjunctionData?.conjunctions?.length>0){const idx=selectedConjunction||0;evaluateConjunction(conjunctionData.conjunctions[idx]||conjunctionData.conjunctions[0],idx)}
   setInterval(refreshPipeline,10000);setInterval(refreshData,15000);
 });
@@ -2528,7 +2674,7 @@ async function updatePublishedPc(primaryNorad, secondaryNorad) {
 
 function renderManeuverRecommendation(rec) {
   const el = document.getElementById('maneuverRecBody');
-  const panel = document.getElementById('a2Panel');
+  const panel = document.getElementById('portlet-maneuver-recommendation');
   if (!el) return;
   if (!rec || rec.direction === 'no-burn') { panel.style.opacity = '0.4'; el.innerHTML = '<div class="empty-state">No maneuver recommended</div>'; return; }
   panel.style.opacity = '1';
@@ -2567,7 +2713,7 @@ function renderDecisionRationale(rat) {
 
 function renderPostManeuverProjection(pm) {
   const el = document.getElementById('postManeuverBody');
-  const panel = document.getElementById('a4Panel');
+  const panel = document.getElementById('portlet-post-maneuver-projection');
   if (!el) return;
   if (!pm) { panel.style.opacity = '0.4'; el.innerHTML = '<div class="empty-state">No maneuver recommended</div>'; return; }
   panel.style.opacity = '1';
@@ -2603,7 +2749,7 @@ function renderPostManeuverProjection(pm) {
 
 function renderNoGoReasoning(ng) {
   const el = document.getElementById('nogoReasoningBody');
-  const panel = document.getElementById('a5Panel');
+  const panel = document.getElementById('portlet-no-go-reasoning');
   if (!el || !panel) return;
   if (!ng) { panel.style.display = 'none'; return; }
   panel.style.display = '';
@@ -2676,8 +2822,20 @@ function renderMissionImpactSummary(mi) {
   el.innerHTML = html;
 }
 
+function restoreMaximizedArtifact(){
+  // Q3 guard: restore a maximized ARTIFACT panel to its slot before the artifact
+  // shells are re-rendered or cleared, so it is never stranded in the overlay
+  // (e.g. A5 flipping to display:none, or a clear). Scoped to .artifact-panel so
+  // a maximized side panel (APS Output, Active Conjunctions) keeps live-updating
+  // while maximized, per SCRUM-356.
+  if(!maximizedPortletId) return;
+  const mp = document.getElementById(maximizedPortletId);
+  if(mp && mp.classList.contains('artifact-panel')) restorePortlet(maximizedPortletId);
+}
+
 function renderAtlasArtifact(artifact) {
   if (!artifact) return;
+  restoreMaximizedArtifact();
   const section = document.getElementById('aps25ArtifactSection');
   if (section) section.style.display = '';
 
@@ -2691,6 +2849,7 @@ function renderAtlasArtifact(artifact) {
 }
 
 function clearAtlasArtifact() {
+  restoreMaximizedArtifact();
   const section = document.getElementById('aps25ArtifactSection');
   if (section) section.style.display = 'none';
   ['riskSummaryBody','maneuverRecBody','decisionRationaleBody',
@@ -2698,7 +2857,7 @@ function clearAtlasArtifact() {
     const el = document.getElementById(id);
     if (el) el.innerHTML = '<div class="empty-state">No data</div>';
   });
-  const a5 = document.getElementById('a5Panel');
+  const a5 = document.getElementById('portlet-no-go-reasoning');
   if (a5) a5.style.display = 'none';
 }
 
