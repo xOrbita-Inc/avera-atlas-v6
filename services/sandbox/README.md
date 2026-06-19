@@ -1,6 +1,6 @@
 # Sandbox Service
 
-Simulation and sensor-model foundation for APS 3.0 sandbox development.
+Simulation, sensor-model, and observation-emission foundation for APS 3.0 sandbox development.
 
 ## Goal
 
@@ -9,9 +9,11 @@ Provide an Earth-centered sandbox that can:
 * propagate debris and host satellite ground-truth states;
 * produce deterministic state snapshots;
 * apply realistic sensor visibility gates;
-* emit noisy angular observations for downstream IOD processing.
+* emit noisy angular observations for downstream IOD processing;
+* export sensor-visible observations using the tracker-compatible `observations_multi.npz` schema;
+* enforce strict god-view / sensor-knowledge isolation.
 
-The package currently includes the SCRUM-290 simulation core and the SCRUM-291 TT240-40 sensor and FOV model.
+The package currently includes the SCRUM-290 simulation core, the SCRUM-291 TT240-40 sensor and FOV model, and the SCRUM-292 observation schema emission and isolation layer.
 
 ## SCRUM-290: Simulation core
 
@@ -67,17 +69,43 @@ Detected observations include:
 
 The observation contract is validated against the existing tracker IOD interface.
 
+## SCRUM-292: Observation schema emission and sensor-knowledge isolation
+
+The schema-emission layer converts detected sandbox observations into the tracker-compatible `observations_multi.npz` contract.
+
+The emitted artifact includes:
+
+* UTC timestamps;
+* stable observer IDs and target IDs;
+* observer and target index arrays;
+* observation time index arrays;
+* observation type;
+* observer ECI position in metres;
+* observer ECI velocity in metres per second;
+* RA and Dec in radians;
+* angular uncertainty in arcseconds;
+* observation quality labels;
+* optional range and range-rate fields using `NaN` when unavailable;
+* metadata describing frame, units, schema version, sensor type, and god-view isolation.
+
+The emitted `observations_multi.npz` artifact is loaded directly through the existing tracker observation loader and converted to tracker `IODObservation` records without sandbox-specific adapter code.
+
+The sensor-knowledge layer exposes only the observations actually emitted by each sensor. It deliberately blocks access to simulation objects, snapshots, and truth states from the sensor-facing interface. Attempts to access god-view state from sensor knowledge raise an error.
+
+Deterministic replay is also validated: the same simulation seed and sensor seed produce the same loaded observation stream.
+
 ## Deferred scope
 
-The following remain outside SCRUM-290 and SCRUM-291:
+The following remain outside SCRUM-290, SCRUM-291, and SCRUM-292:
 
 * full radiometric background modeling;
 * thermal-emission detection;
-* production NPZ or JSONL export;
+* JSONL debug mirror export;
 * complete admissible-region integration;
 * tracker custody management;
 * APS planner integration;
-* UI integration.
+* UI integration;
+* emergent encounter-rate validation from an operationally representative debris population.
 
 ## Package layout
 
@@ -93,8 +121,10 @@ The following remain outside SCRUM-290 and SCRUM-291:
 * `observations.py` — noisy RA/Dec observation and angular-rate generation
 * `observation_bundle.py` — observation generation across simulation snapshots
 * `sensor_benchmark.py` — deterministic SCRUM-291 sensor acceptance benchmark
+* `schema_emission.py` — tracker-compatible `observations_multi.npz` emission
+* `sensor_knowledge.py` — sensor-visible observation streams with god-view access blocked
 * `Dockerfile` — reproducible sandbox test image
-* `tests/` — simulation, sensor, transit, determinism, and IOD compatibility tests
+* `tests/` — simulation, sensor, transit, schema, isolation, determinism, and IOD compatibility tests
 
 ## Simulation hello world
 
@@ -125,6 +155,59 @@ python -c "import random, numpy as np; from services.sandbox.scenario import cre
 ```
 
 This creates a deterministic in-FOV, in-range, sunlit target and emits a noisy angular observation.
+
+## Observation schema emission
+
+The sandbox can emit tracker-compatible observation artifacts from detected sensor observations.
+
+The primary artifact is:
+
+```text
+observations_multi.npz
+```
+
+This file is generated at runtime and should not normally be committed.
+
+The emitted NPZ follows the existing tracker loader contract:
+
+```text
+times_utc
+observer_ids
+target_ids
+obs_observer_idx
+obs_target_idx
+obs_time_idx
+obs_type
+observer_eci_m
+observer_eci_m_s
+obs_ra_rad
+obs_dec_rad
+obs_sigma_ra_arcsec
+obs_sigma_dec_arcsec
+obs_quality
+obs_range_m
+obs_range_rate_m_s
+meta
+```
+
+For TT240-40 optical observations, `obs_type` is `angles`, and unavailable range/range-rate values are emitted as `NaN`.
+
+The emitted artifact is validated by loading it through:
+
+```text
+services/tracker/observation_loader.py
+```
+
+and converting it to tracker `IODObservation` records without a sandbox-specific adapter.
+
+## God-view / sensor-knowledge isolation
+
+The sandbox maintains two separate views of the same run:
+
+* **God view:** full simulation truth, including every object state at every saved time step.
+* **Sensor knowledge:** only the ordered observations actually emitted by each sensor.
+
+IOD-facing code should consume only the sensor-knowledge stream or the emitted observation artifact. The sensor-knowledge interface intentionally raises an error if code attempts to access simulation objects, snapshots, or truth states.
 
 ## SCRUM-290 performance benchmark
 
@@ -209,15 +292,23 @@ A committed propagator test initializes a host satellite at 600 km, propagates i
 
 ## IOD compatibility
 
-Committed compatibility tests verify that detected sandbox observations can be mapped into the tracker IOD interface with:
+Committed compatibility tests verify that detected sandbox observations can be emitted to the tracker-compatible `observations_multi.npz` schema and then loaded into the tracker IOD path with:
 
 * timezone-aware timestamps;
 * RA and Dec in radians;
 * angular uncertainties;
-* observer ECI position in kilometres;
-* observer ECI velocity in kilometres per second.
+* observer ECI position in kilometres after loader conversion;
+* observer ECI velocity in kilometres per second after loader conversion.
 
-Three converted observations are accepted by the existing IOD solver interface. Single-observation angular rates are retained for future partial-tracklet and admissible-region integration.
+The schema-emission tests verify:
+
+* emitted artifacts load with the tracker observation loader;
+* emitted artifacts convert to tracker `IODObservation` records without sandbox-specific adapter code;
+* the converted observation stream reaches `IODSolver().solve(...)`;
+* same-seed replay produces the same loaded observation stream;
+* different seeds preserve schema identity while changing noisy angles.
+
+Single-observation angular rates are retained in sandbox observations for future partial-tracklet and admissible-region integration, but the current tracker `IODObservation` contract does not consume angular-rate fields directly.
 
 ## Tests
 
@@ -236,15 +327,15 @@ python -m pytest
 Build and run the sandbox suite in Docker:
 
 ```bash
-docker build -f services/sandbox/Dockerfile -t avera-sandbox-scrum-291 .
-docker run --rm avera-sandbox-scrum-291
+docker build -f services/sandbox/Dockerfile -t avera-sandbox-scrum-292 .
+docker run --rm avera-sandbox-scrum-292
 ```
 
 Latest validation:
 
 ```text
+SCRUM-292 schema/isolation tests: 9 passed
 sensor acceptance benchmark: passed
-services/sandbox/tests: 97 passed
-full repository: 539 passed, 10 warnings
-docker sandbox run: 97 passed
+services/sandbox/tests: 106 passed
+full repository: 548 passed, 10 warnings
 ```
