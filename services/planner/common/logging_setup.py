@@ -41,11 +41,9 @@ SERVICE_NAME = "planner"
 
 # Service semantic version. Surfaced by /health, /ready and the FastAPI app
 # metadata in server.py. Lives here so server.py and any future importer share
-# one definition. Matches the APS 2.5 OpenAPI contract version in
-# openapi/planner.yaml. The SCRUM-341 logging extraction moved the import of
-# this constant into server.py but did not carry the definition across, which
-# left server.py unimportable; this restores it.
-SERVICE_VERSION = "2.5.0"
+# one definition. openapi/planner.yaml is the source of truth for the
+# contract version; this constant must be kept in sync with it manually.
+SERVICE_VERSION = "2.5.2"
 
 # Default config path -- baked into image via COPY config/ /app/config/
 # Can be overridden via env var for future operator policy hot-swap support.
