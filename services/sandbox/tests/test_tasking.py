@@ -9,6 +9,8 @@ from services.sandbox.schema_emission import write_observations_multi_npz
 from services.sandbox.sensor_model import SensorConfig
 from services.sandbox.observation_bundle import generate_observation_bundle
 from services.sandbox.snapshot import make_snapshot
+from services.sandbox.observation_bundle import _state_to_sim_object
+from services.sandbox.sensor_model import detect_object
 from services.sandbox.tasking import (
     TaskingCommand,
     TaskingTarget,
@@ -78,6 +80,31 @@ def make_two_snapshot_forced_detection_sim_result() -> SimulationResult:
 def test_predicted_point_task_repoints_and_detects_target() -> None:
     sim_result = make_forced_detection_sim_result()
     target_position = sim_result.objects["debris_001"].r_eci_km
+
+    snapshot = sim_result.snapshots[0]
+
+    host_state = snapshot.states["host_001"]
+    debris_state = snapshot.states["debris_001"]
+
+    host_object = _state_to_sim_object(
+        base_object=sim_result.objects["host_001"],
+        r_eci_km=host_state.r_eci_km,
+        v_eci_km_s=host_state.v_eci_km_s,
+    )
+    debris_object = _state_to_sim_object(
+        base_object=sim_result.objects["debris_001"],
+        r_eci_km=debris_state.r_eci_km,
+        v_eci_km_s=debris_state.v_eci_km_s,
+    )
+
+    survey_detection = detect_object(
+        host=host_object,
+        debris=debris_object,
+        sensor_cfg=SensorConfig(pointing_mode="nadir_minus_30"),
+    )
+
+    assert not survey_detection.detected
+    assert survey_detection.reason == "outside_fov"
 
     command = TaskingCommand(
         task_id="task_001",
