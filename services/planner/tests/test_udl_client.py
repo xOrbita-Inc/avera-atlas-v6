@@ -267,6 +267,18 @@ class TestParseConjunction:
         result = _parse_conjunction({"id": "bad", "tca": None})
         assert result is None
 
+    def test_returns_none_when_covariance_missing(self):
+        """_parse_conjunction must return None when both covariance fields are absent.
+        A record with state vectors but no covariance must be rejected rather than
+        passed through with all-zero p_rel_km2. Mirrors the missing-state-vector guard.
+        """
+        record = _make_conjunction_record(cov1=[], cov2=[])
+        # Strip cov from state vectors entirely to simulate missing fields
+        record["stateVector1"].pop("cov", None)
+        record["stateVector2"].pop("cov", None)
+        result = _parse_conjunction(record)
+        assert result is None
+
     def test_returns_none_on_missing_state_vector(self):
         """Missing stateVector1 must return None -- zero fabrication is not acceptable."""
         record = _make_conjunction_record()

@@ -35,7 +35,7 @@ Unit notes
   Expand to 3x3, sum object1 + object2, rotate RTN->ECI, convert m^2->km^2
 
 AC3 (state vector / elset retrieval for secondary conflict screening)
-is deferred -- Elset schema not yet captured. Stub included.
+is implemented in get_elsets() below. Fully live on the screening path.
 
 Feature flag
 ------------
@@ -213,14 +213,22 @@ def _parse_conjunction(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         cov1_raw = sv1.get("cov") or []
         cov2_raw = sv2.get("cov") or []
 
+        if not cov1_raw and not cov2_raw:
+            # Covariance fields missing -- cannot compute p_rel_km2.
+            # Return None so the caller discards this record rather than passing
+            # an all-zero covariance to evaluate_conjunction(). Mirrors the
+            # missing-state-vector guard above.
+            log.warning(
+                "UDL conjunction %s has no covariance fields -- record discarded",
+                record.get("id", "?"),
+                extra={"event": "udl_missing_covariance", "id": record.get("id")},
+            )
+            return None
+
         p1_rtn = _expand_cov_upper_triangle(cov1_raw)  # m^2
         p2_rtn = _expand_cov_upper_triangle(cov2_raw)  # m^2
         p_rel_rtn = p1_rtn + p2_rtn                    # combined, m^2
-
-        if np.linalg.norm(r_sat) > 0 and np.linalg.norm(v_sat) > 0:
-            p_rel_eci_m2 = rot @ p_rel_rtn @ rot.T
-        else:
-            p_rel_eci_m2 = p_rel_rtn
+        p_rel_eci_m2 = rot @ p_rel_rtn @ rot.T
 
         p_rel_km2 = (p_rel_eci_m2 / 1e6).flatten().tolist()  # m^2 -> km^2
 
@@ -386,8 +394,8 @@ def get_conjunctions(
 
 
 # ---------------------------------------------------------------------------
-# AC3 stub -- state vector / elset retrieval
-# Deferred: Elset schema not yet captured from UDL portal.
+# AC3 -- state vector / elset retrieval
+# Implemented: get_elsets() is fully live on the secondary conflict screening path.
 # ---------------------------------------------------------------------------
 
 def get_elsets(
