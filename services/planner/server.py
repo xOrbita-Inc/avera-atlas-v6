@@ -46,13 +46,17 @@ from common.atlas_artifact import build_atlas_artifact
 from common.satellite_capability import SatelliteCapability
 from common.logging_setup import build_logger, _POLICY_CONFIG_PATH, SERVICE_NAME, SERVICE_VERSION
 from common.spacetrack_tle import fetch_catalog_objects
-from common.udl_client import UDL_ENABLED
+from common.udl_client import UDL_ENABLED, get_conjunctions
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 log = build_logger()
+
+# Last successful UDL fetch timestamp (UTC ISO-8601). Updated by /v1/evaluate
+# when UDL_ENABLED=true and get_conjunctions() returns at least one record.
+_udl_last_fetch_utc: str | None = None
 
 # ---------------------------------------------------------------------------
 # Ingest service URL
@@ -272,7 +276,7 @@ async def udl_status() -> Dict[str, Any]:
 
     Returns:
       enabled          : bool   -- reflects UDL_ENABLED env var
-      credentials_set  : bool   -- UDL_USER and UDL_PASS are present
+      credentials_set  : bool   -- UDL_USER and UDL_PASS are present (not validated)
       mode             : str    -- 'live' | 'disabled'
       label            : str    -- human-readable label for the UI badge
       note             : str    -- additional context for the operator
@@ -285,7 +289,7 @@ async def udl_status() -> Dict[str, Any]:
     if UDL_ENABLED and credentials_set:
         mode = "live"
         label = "UDL LIVE"
-        note = "UDL enabled and credentials present. Live conjunction data active."
+        note = "UDL enabled and credentials present (not confirmed). Live conjunction data will flow once credentials are validated by a successful fetch."
     elif UDL_ENABLED and not credentials_set:
         mode = "misconfigured"
         label = "UDL MISCONFIGURED"
@@ -304,6 +308,7 @@ async def udl_status() -> Dict[str, Any]:
         "mode":            mode,
         "label":           label,
         "note":            note,
+        "last_fetch_utc":  _udl_last_fetch_utc,
     }
 
 
@@ -329,30 +334,100 @@ async def post_evaluate(request: Request):
             content=error_response("Invalid JSON body"),
         )
 
-    # --- Covariance adapter (ADR-008) -------------------------------------
-    covariance_source = "surrogate_identity"
-    cdm_record_id = None
-    try:
-        conj = body.get("conjunction", {})
-        sat = body.get("satellite", {})
-        primary_norad = conj.get("primary_norad")
-        secondary_norad = str(conj.get("secondary_norad") or conj.get("obj_id", ""))
-
-        if primary_norad and secondary_norad:
-            r_sat_km = sat.get("r_sat_km", [])
-            v_sat_km_s = sat.get("v_sat_km_s", [])
-            p_rel_km2, covariance_source, cdm_record_id = _fetch_cdm_covariance(
-                str(primary_norad),
-                secondary_norad,
-                r_sat_km,
-                v_sat_km_s,
+    # --- UDL live conjunction fetch (SCRUM-331 AC5) ----------------------
+    # When UDL_ENABLED=true, UDL is the authoritative conjunction source.
+    # The injected body's conjunction block is replaced with the highest-risk
+    # UDL record (highest Pc, earliest TCA as tie-break). Satellite state stays
+    # from the request body. If UDL returns no records, treat as no-maneuver
+    # needed -- do not fall back to injected data (would mislabel the source).
+    udl_record_id: str | None = None
+    if UDL_ENABLED:
+        global _udl_last_fetch_utc
+        primary_norad_udl = (body.get("conjunction") or {}).get("primary_norad")
+        if not primary_norad_udl:
+            return JSONResponse(
+                status_code=422,
+                content=error_response(
+                    "UDL_ENABLED=true requires primary_norad in the conjunction block"
+                ),
             )
-            body["conjunction"]["p_rel_km2"] = p_rel_km2
-            body["conjunction"]["covariance_source"] = covariance_source
-        else:
-            log.info("using surrogate covariance", extra={"event": "surrogate_covariance", "reason": "primary_norad_not_provided"})
-    except Exception as exc:
-        log.warning("covariance adapter error", extra={"event": "covariance_adapter_error", "exc": str(exc)})
+        try:
+            udl_records = get_conjunctions(sat_no=int(primary_norad_udl))
+            if not udl_records:
+                log.info(
+                    "UDL returned no conjunction records above threshold",
+                    extra={"event": "udl_no_conjunctions", "primary_norad": primary_norad_udl},
+                )
+                return JSONResponse(
+                    status_code=200,
+                    content={
+                        "conjunction_id": None,
+                        "recommendation": {"direction": "no_maneuver_needed"},
+                        "covariance_source": "UDL",
+                        "udl_record_id": None,
+                        "note": "UDL returned no conjunction records above threshold. No maneuver needed.",
+                    },
+                )
+            # Select highest-risk record: highest Pc, earliest TCA as tie-break.
+            best = min(
+                udl_records,
+                key=lambda r: (-(r.get("pc_precomputed") or 0.0), r.get("t_ca_utc") or ""),
+            )
+            udl_record_id = best.get("obj_id") or best.get("conjunction_id")
+            # Replace conjunction block fields from UDL; keep satellite state.
+            body["conjunction"].update(best)
+            body["conjunction"]["covariance_source"] = "UDL"
+            from datetime import datetime, timezone
+            _udl_last_fetch_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            log.info(
+                "UDL conjunction selected",
+                extra={
+                    "event": "udl_conjunction_selected",
+                    "primary_norad": primary_norad_udl,
+                    "udl_record_id": udl_record_id,
+                },
+            )
+        except Exception as exc:
+            log.warning(
+                "UDL fetch failed",
+                extra={"event": "udl_fetch_failed", "exc": str(exc)},
+            )
+            return JSONResponse(
+                status_code=503,
+                content=error_response(f"UDL fetch failed: {exc}"),
+            )
+    # ----------------------------------------------------------------------
+
+    # --- Covariance adapter (ADR-008) -------------------------------------
+    # When UDL_ENABLED=true, UDL already supplied the covariance in the block
+    # above. Skip the ingest CDM fetch so it cannot overwrite the UDL source.
+    if UDL_ENABLED:
+        covariance_source = "UDL"
+        cdm_record_id = None
+    else:
+        covariance_source = "surrogate_identity"
+        cdm_record_id = None
+        try:
+            conj = body.get("conjunction", {})
+            sat = body.get("satellite", {})
+            primary_norad = conj.get("primary_norad")
+            secondary_norad = str(conj.get("secondary_norad") or conj.get("obj_id", ""))
+
+            if primary_norad and secondary_norad:
+                r_sat_km = sat.get("r_sat_km", [])
+                v_sat_km_s = sat.get("v_sat_km_s", [])
+                p_rel_km2, covariance_source, cdm_record_id = _fetch_cdm_covariance(
+                    str(primary_norad),
+                    secondary_norad,
+                    r_sat_km,
+                    v_sat_km_s,
+                )
+                body["conjunction"]["p_rel_km2"] = p_rel_km2
+                body["conjunction"]["covariance_source"] = covariance_source
+            else:
+                log.info("using surrogate covariance", extra={"event": "surrogate_covariance", "reason": "primary_norad_not_provided"})
+        except Exception as exc:
+            log.warning("covariance adapter error", extra={"event": "covariance_adapter_error", "exc": str(exc)})
     # ----------------------------------------------------------------------
 
     try:
@@ -377,6 +452,7 @@ async def post_evaluate(request: Request):
                 "all_candidates":      scoring.all_candidates,
             },
             "covariance_source": covariance_source,
+            "udl_record_id":     udl_record_id,
             "evaluated_at":      scoring.evaluated_at,
         }
 
