@@ -369,9 +369,9 @@ async def post_evaluate(request: Request):
                     },
                 )
             # Select highest-risk record: highest Pc, earliest TCA as tie-break.
-            best = max(
+            best = min(
                 udl_records,
-                key=lambda r: (r.get("pc_precomputed") or 0.0, -(r.get("t_ca_utc") or "")),
+                key=lambda r: (-(r.get("pc_precomputed") or 0.0), r.get("t_ca_utc") or ""),
             )
             udl_record_id = best.get("obj_id") or best.get("conjunction_id")
             # Replace conjunction block fields from UDL; keep satellite state.
