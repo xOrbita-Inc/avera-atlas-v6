@@ -336,18 +336,20 @@ def passes_earth_limb_gate(
 
     return cone_nearest_edge_deg > earth_angular_radius_deg
 
-
-def detect_object(
+def detect_object_with_boresight(
     host: SimObject,
     debris: SimObject,
     sensor_cfg: SensorConfig,
+    boresight_eci: np.ndarray,
     sun_dir_eci: np.ndarray | None = None,
 ) -> DetectionResult:
     """
-    Apply FOV, range, sunlight, and Earth-limb gates to one target.
+    Apply FOV, range, sunlight, and Earth-limb gates using an explicit
+    commanded boresight.
 
-    Gates are evaluated in a deterministic order so rejection reasons are
-    stable and testable.
+    This is used by tasked re-observation. The existing detect_object()
+    path remains the survey-mode wrapper that computes boresight from the
+    configured fixed pointing mode.
     """
     if host.kind != "host":
         raise ValueError(
@@ -358,6 +360,8 @@ def detect_object(
         raise ValueError(
             f"{debris.object_id} is not a debris object."
         )
+
+    commanded_boresight = unit(boresight_eci)
 
     relative_position_km = (
         debris.r_eci_km - host.r_eci_km
@@ -377,15 +381,8 @@ def detect_object(
 
     line_of_sight_hat = unit(relative_position_km)
 
-    boresight_eci = boresight_from_velocity(
-        host_r_eci_km=host.r_eci_km,
-        host_v_eci_km_s=host.v_eci_km_s,
-        pointing_mode=sensor_cfg.pointing_mode,
-        nadir_offset_deg=sensor_cfg.nadir_offset_deg,
-    )
-
     in_fov, off_boresight_deg = is_within_fov(
-        boresight_eci=boresight_eci,
+        boresight_eci=commanded_boresight,
         line_of_sight_eci=line_of_sight_hat,
         fov_full_angle_deg=sensor_cfg.fov_full_angle_deg,
     )
@@ -440,7 +437,7 @@ def detect_object(
 
     earth_limb_clear = passes_earth_limb_gate(
         host_r_eci_km=host.r_eci_km,
-        boresight_eci=boresight_eci,
+        boresight_eci=commanded_boresight,
         fov_full_angle_deg=sensor_cfg.fov_full_angle_deg,
     )
 
@@ -463,4 +460,31 @@ def detect_object(
         off_boresight_deg=off_boresight_deg,
         sunlit=True,
         earth_limb_blocked=False,
+    )
+
+def detect_object(
+    host: SimObject,
+    debris: SimObject,
+    sensor_cfg: SensorConfig,
+    sun_dir_eci: np.ndarray | None = None,
+) -> DetectionResult:
+    """
+    Apply FOV, range, sunlight, and Earth-limb gates to one target.
+
+    Survey-mode wrapper: computes the boresight from the configured fixed
+    pointing mode, then evaluates the common explicit-boresight gate path.
+    """
+    boresight_eci = boresight_from_velocity(
+        host_r_eci_km=host.r_eci_km,
+        host_v_eci_km_s=host.v_eci_km_s,
+        pointing_mode=sensor_cfg.pointing_mode,
+        nadir_offset_deg=sensor_cfg.nadir_offset_deg,
+    )
+
+    return detect_object_with_boresight(
+        host=host,
+        debris=debris,
+        sensor_cfg=sensor_cfg,
+        boresight_eci=boresight_eci,
+        sun_dir_eci=sun_dir_eci,
     )
