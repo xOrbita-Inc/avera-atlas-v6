@@ -274,6 +274,21 @@ This benchmark uses a deterministic Section 4.3 acceptance population. It valida
 
 It is not intended to claim that a uniformly sampled 500-object debris swarm independently reproduces the operational debris population density.
 
+## SCRUM-293: Re-observation tasking interface
+
+The sandbox supports a minimum viable re-observation tasking interface for Tier 2 testing. APS-side tasking logic remains out of scope; this module only executes valid tasking commands inside the sandbox.
+
+Implemented tasking features:
+
+- `TaskingCommand` with `task_id`, `sensor_id`, `start_time`, `end_time`, `target`, and `priority`.
+- `predicted_point` target support using an explicit commanded ECI boresight.
+- Survey-mode detection remains unchanged; fixed pointing still flows through `detect_object(...)`.
+- Tasked detection uses `detect_object_with_boresight(...)`, which applies the same FOV, range, sunlight, and Earth-limb gates as survey mode.
+- Tasked observations are returned as normal `AngularObservation` records and can be emitted through the Sandbox 3 `observations_multi.npz` schema path.
+- Explicit task rejection is returned for unknown sensors, non-host sensors, missing task-window snapshots, unsupported admissible-region execution, invalid time windows, and blackout-window constraint conflicts.
+
+The end-to-end APS tasking-service-to-IOD closure remains part of Sandbox 5. SCRUM-293 provides the sandbox execution boundary needed for that test.
+
 ## Transit-time verification
 
 The sensor acceptance tests validate representative Section 5.2 transit cases through the production FOV gate:
@@ -334,8 +349,7 @@ docker run --rm avera-sandbox-scrum-292
 Latest validation:
 
 ```text
-SCRUM-292 schema/isolation tests: 9 passed
-sensor acceptance benchmark: passed
-services/sandbox/tests: 106 passed
-full repository: 548 passed, 10 warnings
+SCRUM-293 tasking tests: 10 passed
+services/sandbox/tests: 116 passed
+full repository: 564 passed, 10 warnings
 ```
