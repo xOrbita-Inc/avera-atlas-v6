@@ -1,6 +1,6 @@
 # Sandbox Service
 
-Simulation, sensor-model, and observation-emission foundation for APS 3.0 sandbox development.
+Simulation, sensor-model, tasking, and canonical regression-harness foundation for APS 3.0 sandbox development.
 
 ## Goal
 
@@ -11,9 +11,11 @@ Provide an Earth-centered sandbox that can:
 * apply realistic sensor visibility gates;
 * emit noisy angular observations for downstream IOD processing;
 * export sensor-visible observations using the tracker-compatible `observations_multi.npz` schema;
-* enforce strict god-view / sensor-knowledge isolation.
+* enforce strict god-view / sensor-knowledge isolation;
+* execute sandbox-side re-observation tasking commands;
+* run the canonical three-tier IOD regression harness.
 
-The package currently includes the SCRUM-290 simulation core, the SCRUM-291 TT240-40 sensor and FOV model, and the SCRUM-292 observation schema emission and isolation layer.
+The package currently includes the SCRUM-290 simulation core, the SCRUM-291 TT240-40 sensor and FOV model, the SCRUM-292 observation schema emission and isolation layer, the SCRUM-293 re-observation tasking interface, and the SCRUM-294 canonical regression harness.
 
 ## SCRUM-290: Simulation core
 
@@ -94,15 +96,80 @@ The sensor-knowledge layer exposes only the observations actually emitted by eac
 
 Deterministic replay is also validated: the same simulation seed and sensor seed produce the same loaded observation stream.
 
+## SCRUM-293: Re-observation tasking interface
+
+The sandbox supports a minimum viable re-observation tasking interface for Tier 2 testing. APS-side tasking logic remains out of scope; this module only executes valid tasking commands inside the sandbox.
+
+Implemented tasking features:
+
+- `TaskingCommand` with `task_id`, `sensor_id`, `start_time`, `end_time`, `target`, and `priority`.
+- `predicted_point` target support using an explicit commanded ECI boresight.
+- Survey-mode detection remains unchanged; fixed pointing still flows through `detect_object(...)`.
+- Tasked detection uses `detect_object_with_boresight(...)`, which applies the same FOV, range, sunlight, and Earth-limb gates as survey mode.
+- Tasked observations are returned as normal `AngularObservation` records and can be emitted through the Sandbox 3 `observations_multi.npz` schema path.
+- Explicit task rejection is returned for unknown sensors, non-host sensors, missing task-window snapshots, unsupported admissible-region execution, invalid time windows, and blackout-window constraint conflicts.
+
+The end-to-end APS tasking-service-to-IOD closure remains part of Sandbox 5. SCRUM-293 provides the sandbox execution boundary needed for that test.
+
+## SCRUM-294: Canonical regression harness
+
+The sandbox includes a canonical regression harness for exercising the three-tier IOD scenario structure and reporting which parts are fully validated versus scaffolded or deferred.
+
+Run all canonical scenarios:
+
+```bash
+python -m services.sandbox.regression_harness
+```
+
+Write the JSON report to disk:
+
+```bash
+python -m services.sandbox.regression_harness --output artifacts/sandbox_regression_report.json
+```
+
+The harness emits a deterministic JSON report with suite status, top-level acceptance status, per-scenario pass/fail status, IOD closure metrics, measured or deferred error metrics, tracked-object counts, and human-readable summaries.
+
+Implemented canonical scenarios:
+
+Scenario A — Tier 1 co-orbital single-pass
+* 1 host satellite.
+* 1 co-orbital debris object.
+* 5 observations over a 40 second pass.
+* Tracker IOD closes from the single-pass tracklet.
+* Along-track error is measured against scenario truth at the solver-selected epoch.
+* This scenario is acceptance-validated when the measured along-track error is under 10 km.
+  
+Scenario B — Tier 2 high-crossing tasked re-observation scaffold
+* 3 host satellites.
+* 1 high-crossing debris object.
+* Initial 2-observation partial tracklet fails IOD as expected.
+* Additional re-observation samples are combined with the partial tracklet and the final tracker IOD closes.
+* The current implementation does not yet route the re-observation through the SCRUM-293 execute_tasking_command(...) interface.
+* This scenario is retained as a closure scaffold only.
+* Tasking-interface-driven closure and final accuracy validation remain future work.
+
+Scenario C — Tier 3 custody maintenance deferred scaffold
+* 6 host satellites.
+* 50 debris objects.
+* 7 simulated days are represented in the report shape.
+* The reference custody-uncertainty timeline is recorded for traceability.
+* Emergent uncertainty computation is not performed in this harness.
+* Full-scale swarm runs and emergent custody-uncertainty validation are deferred to SCRUM-343.
+
+The harness can pass as an execution/reporting scaffold while the top-level `acceptance_validated` field remains `false` until all acceptance-level validation stories are complete. Scenario C must not be cited as uncertainty validation; it points to SCRUM-343 for that work.
+
 ## Deferred scope
 
-The following remain outside SCRUM-290, SCRUM-291, and SCRUM-292:
+The following remain outside SCRUM-290 through SCRUM-294:
 
 * full radiometric background modeling;
 * thermal-emission detection;
 * JSONL debug mirror export;
-* complete admissible-region integration;
-* tracker custody management;
+* production admissible-region integration;
+* Scenario B tasking-interface-driven closure through `execute_tasking_command(...)`;
+* Scenario B final accuracy validation from SCRUM-293-produced tasked observations;
+* production covariance propagation for custody management;
+* emergent custody-uncertainty validation, owned by SCRUM-343;
 * APS planner integration;
 * UI integration;
 * emergent encounter-rate validation from an operationally representative debris population.
@@ -123,8 +190,11 @@ The following remain outside SCRUM-290, SCRUM-291, and SCRUM-292:
 * `sensor_benchmark.py` — deterministic SCRUM-291 sensor acceptance benchmark
 * `schema_emission.py` — tracker-compatible `observations_multi.npz` emission
 * `sensor_knowledge.py` — sensor-visible observation streams with god-view access blocked
+*  `tasking.py` — re-observation tasking command execution, explicit-boresight detection, and task rejection handling
+* `canonical_scenarios.py` — canonical three-tier IOD scenario definitions and report models
+* `regression_harness.py` — CLI entry point for the SCRUM-294 canonical regression harness
 * `Dockerfile` — reproducible sandbox test image
-* `tests/` — simulation, sensor, transit, schema, isolation, determinism, and IOD compatibility tests
+* `tests/` — simulation, sensor, transit, schema, isolation, tasking, regression-harness, determinism, and IOD compatibility tests
 
 ## Simulation hello world
 
@@ -274,21 +344,6 @@ This benchmark uses a deterministic Section 4.3 acceptance population. It valida
 
 It is not intended to claim that a uniformly sampled 500-object debris swarm independently reproduces the operational debris population density.
 
-## SCRUM-293: Re-observation tasking interface
-
-The sandbox supports a minimum viable re-observation tasking interface for Tier 2 testing. APS-side tasking logic remains out of scope; this module only executes valid tasking commands inside the sandbox.
-
-Implemented tasking features:
-
-- `TaskingCommand` with `task_id`, `sensor_id`, `start_time`, `end_time`, `target`, and `priority`.
-- `predicted_point` target support using an explicit commanded ECI boresight.
-- Survey-mode detection remains unchanged; fixed pointing still flows through `detect_object(...)`.
-- Tasked detection uses `detect_object_with_boresight(...)`, which applies the same FOV, range, sunlight, and Earth-limb gates as survey mode.
-- Tasked observations are returned as normal `AngularObservation` records and can be emitted through the Sandbox 3 `observations_multi.npz` schema path.
-- Explicit task rejection is returned for unknown sensors, non-host sensors, missing task-window snapshots, unsupported admissible-region execution, invalid time windows, and blackout-window constraint conflicts.
-
-The end-to-end APS tasking-service-to-IOD closure remains part of Sandbox 5. SCRUM-293 provides the sandbox execution boundary needed for that test.
-
 ## Transit-time verification
 
 The sensor acceptance tests validate representative Section 5.2 transit cases through the production FOV gate:
@@ -342,14 +397,24 @@ python -m pytest
 Build and run the sandbox suite in Docker:
 
 ```bash
-docker build -f services/sandbox/Dockerfile -t avera-sandbox-scrum-292 .
-docker run --rm avera-sandbox-scrum-292
+docker build -f services/sandbox/Dockerfile -t avera-sandbox-scrum-294 .
+docker run --rm avera-sandbox-scrum-294
 ```
 
 Latest validation:
 
 ```text
 SCRUM-293 tasking tests: 10 passed
-services/sandbox/tests: 116 passed
-full repository: 564 passed, 10 warnings
+SCRUM-294 regression harness tests: 6 passed
+services/sandbox/tests: 122 passed
+full repository: 570 passed, 10 warnings
+```
+
+Current SCRUM-294 acceptance status:
+
+```text
+Scenario A acceptance validation: measured truth comparison complete
+Scenario B acceptance validation: deferred; closure scaffold only
+Scenario C acceptance validation: deferred to SCRUM-343
+Top-level acceptance_validated: false
 ```
