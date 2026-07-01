@@ -158,6 +158,53 @@ Scenario C — Tier 3 custody maintenance deferred scaffold
 
 The harness can pass as an execution/reporting scaffold while the top-level `acceptance_validated` field remains `false` until all acceptance-level validation stories are complete. Scenario C must not be cited as uncertainty validation; it points to SCRUM-343 for that work.
 
+## SCRUM-358: Emergent encounter-rate validation
+
+The sandbox includes an emergent encounter-rate benchmark for the SCRUM-291 AC2 follow-up. Unlike the original deterministic sensor benchmark, this benchmark does not schedule a fixed number of reference encounters. It builds a density-calibrated 500-object debris population, propagates the full swarm and host constellation through the sandbox simulation core, screens the resulting geometry through the production TT240-40 sensor gates, and measures detections per day from the propagated run.
+
+Run the benchmark:
+
+```bash
+python -m services.sandbox.emergent_encounter_benchmark
+```
+
+Run the 24-hour validation configuration used for SCRUM-358:
+
+```bash
+python -m services.sandbox.emergent_encounter_benchmark --debris-count 500 --duration-seconds 86400 --dt-seconds 10 --save-every-n-steps 6
+```
+
+The benchmark reports:
+
+* whether the result was derived from a propagated swarm;
+* whether the initial population used Section 4.2 density calibration;
+* the density multiplier and local eligible-density fraction;
+* 1-sensor, 6-sensor same-host, and 6-sensor distributed results;
+* total sensor samples, in-FOV samples, detected samples, unique detected targets, and detections per day;
+* target Section 4.3 bands and ±30% acceptance bands;
+* rejection-reason diagnostics for FOV, range, sunlight, and Earth-limb gates.
+
+Current 24-hour validation result:
+
+```text
+1-sensor configuration:
+  detections_per_day: 4.0
+  target_per_day: 3.0–6.0
+  within_acceptance_band: True
+
+6-sensor same-host configuration:
+  detections_per_day: 5.0
+  scaling behavior: sub-linear relative to distributed coverage
+
+6-sensor distributed configuration:
+  detections_per_day: 18.0
+  target_per_day: 12.0–25.0
+  within_acceptance_band: True
+```
+
+The measured rates are emergent from propagation plus the production FOV, range, sunlight, and Earth-limb gates. The benchmark uses a density-calibrated initial population rather than a hardcoded encounter list, so detections-per-day values are no longer fixture constants.
+
+
 ## Deferred scope
 
 The following remain outside SCRUM-290 through SCRUM-294:
@@ -406,15 +453,17 @@ Latest validation:
 ```text
 SCRUM-293 tasking tests: 10 passed
 SCRUM-294 regression harness tests: 6 passed
-services/sandbox/tests: 122 passed
-full repository: 570 passed, 10 warnings
+SCRUM-358 emergent encounter benchmark tests: 6 passed
+services/sandbox/tests: 128 passed
+full repository: 576 passed, 10 warnings
 ```
 
-Current SCRUM-294 acceptance status:
+Current SCRUM-358 acceptance status:
 
 ```text
-Scenario A acceptance validation: measured truth comparison complete
-Scenario B acceptance validation: deferred; closure scaffold only
-Scenario C acceptance validation: deferred to SCRUM-343
-Top-level acceptance_validated: false
+Encounter-rate source: propagated density-calibrated swarm
+1-sensor measured rate: 4.0/day, target 3.0–6.0/day
+6-sensor same-host measured rate: 5.0/day, sub-linear relative to distributed
+6-sensor distributed measured rate: 18.0/day, target 12.0–25.0/day
+Top-level benchmark passed: true
 ```
