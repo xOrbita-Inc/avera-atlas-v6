@@ -222,6 +222,24 @@ avera-atlas-v6/
 
 ---
 
+## Model files
+
+The ONNX model files are not committed to the repository because of their size.
+Download them from [shared model location] and place them locally before running
+the stack:
+
+- spark_detector.onnx into services/detector/
+  (electro-optical model for SWIR sensors)
+- orbital_classifier.onnx into services/physics-classifier/models/
+  (physics classifier model)
+- orbital_classifier.onnx.data into services/physics-classifier/models/
+  (physics classifier data file)
+
+Create the services/physics-classifier/models/ directory if it does not exist.
+After placing the files, rebuild the stack:
+
+    docker compose down && docker compose up --build -d
+
 ## Deployment
 
 ### Development (Docker Compose)
