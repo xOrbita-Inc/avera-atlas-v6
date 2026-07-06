@@ -51,6 +51,7 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -66,6 +67,7 @@ log = logging.getLogger("planner")
 _BASE_URL = "https://unifieddatalibrary.com"
 _CONJUNCTION_URL = f"{_BASE_URL}/udl/conjunction"
 _ELSET_URL = f"{_BASE_URL}/udl/elset"
+_ELSET_QUERYHELP_URL = f"{_BASE_URL}/udl/elset/queryhelp"
 
 # Feature flag -- default false until service account is confirmed and
 # SSA agreement is in place for registered spacecraft CDM access.
@@ -541,3 +543,153 @@ def get_elsets(
         },
     )
     return tle_text
+
+
+# ---------------------------------------------------------------------------
+# Credential validity probe (SCRUM-363)
+# ---------------------------------------------------------------------------
+#
+# Uses GET /udl/elset/queryhelp -- authenticated, no query params, returns
+# schema/help metadata instead of records. Confirms the credentials
+# authenticate without pulling real data. Does NOT confirm data-read
+# authorization for any specific record type (see team note on SCRUM-363).
+#
+# This is the RAW probe: one live call, no caching or throttling. The
+# throttled wrapper that /udl-status actually calls is added in step 3.
+
+def check_credential_validity() -> Dict[str, Any]:
+    """Perform a single live probe against UDL to check credential validity.
+
+    Returns a dict:
+      status      : 'valid' | 'invalid' | 'unreachable'
+      http_status : int or None (the raw HTTP status code, if one was received)
+      checked_at_utc : str -- ISO-8601 UTC timestamp of this probe attempt
+
+    status meanings:
+      'valid'       -- 200 OK, credentials authenticate right now
+      'invalid'     -- 401 or 403, credentials rejected or rotated
+      'unreachable' -- network error, timeout, or any other unexpected
+                       response (5xx etc). Not a credentials problem.
+    """
+    checked_at_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    try:
+        headers = _auth_header()
+    except RuntimeError as exc:
+        log.warning(
+            "UDL credential probe: credentials missing: %s",
+            exc,
+            extra={"event": "udl_probe_credentials_missing", "reason": str(exc)},
+        )
+        return {
+            "status": "invalid",
+            "http_status": None,
+            "checked_at_utc": checked_at_utc,
+        }
+
+    try:
+        resp = requests.get(
+            _ELSET_QUERYHELP_URL,
+            headers=headers,
+            timeout=10.0,
+        )
+    except Exception as exc:
+        log.warning(
+            "UDL credential probe failed (network): %s",
+            exc,
+            extra={"event": "udl_probe_unreachable", "reason": str(exc)},
+        )
+        return {
+            "status": "unreachable",
+            "http_status": None,
+            "checked_at_utc": checked_at_utc,
+        }
+
+    if resp.status_code == 200:
+        log.info(
+            "UDL credential probe: valid",
+            extra={"event": "udl_probe_valid"},
+        )
+        return {
+            "status": "valid",
+            "http_status": 200,
+            "checked_at_utc": checked_at_utc,
+        }
+
+    if resp.status_code in (401, 403):
+        log.warning(
+            "UDL credential probe: invalid (%d)",
+            resp.status_code,
+            extra={"event": "udl_probe_invalid", "http_status": resp.status_code},
+        )
+        return {
+            "status": "invalid",
+            "http_status": resp.status_code,
+            "checked_at_utc": checked_at_utc,
+        }
+
+    log.warning(
+        "UDL credential probe: unreachable, unexpected status %d",
+        resp.status_code,
+        extra={"event": "udl_probe_unexpected_status", "http_status": resp.status_code},
+    )
+    return {
+        "status": "unreachable",
+        "http_status": resp.status_code,
+        "checked_at_utc": checked_at_utc,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Throttled probe wrapper (SCRUM-363 AC2)
+# ---------------------------------------------------------------------------
+#
+# TESTING VALUE: 60 seconds. Change to 1800 (30 min) once confirmed working,
+# per team decision. Final production value still to be confirmed with team.
+_PROBE_INTERVAL_SECONDS = 1800  # 30 minutes
+
+# Stopwatch reference point (time.monotonic()) for the last real probe.
+# None until the first probe ever runs.
+_last_probe_monotonic: float | None = None
+
+# The last result returned by check_credential_validity(), reused for any
+# /udl-status call that arrives before _PROBE_INTERVAL_SECONDS has elapsed.
+_last_probe_result: Dict[str, Any] | None = None
+
+
+def get_credential_validity() -> Dict[str, Any]:
+    """Return credential validity, using a cached result if the throttle
+    interval has not yet elapsed. Runs a fresh live probe otherwise.
+
+    This is the function /udl-status should call, not check_credential_validity()
+    directly, since that always makes a live UDL call with no throttling.
+    """
+    global _last_probe_monotonic, _last_probe_result
+
+    now = time.monotonic()
+
+    if _last_probe_result is not None and _last_probe_monotonic is not None:
+        elapsed = now - _last_probe_monotonic
+        if elapsed < _PROBE_INTERVAL_SECONDS:
+            remaining = _PROBE_INTERVAL_SECONDS - elapsed
+            print(
+                f"[udl_probe] cached result reused | "
+                f"last_checked_at_utc={_last_probe_result['checked_at_utc']} | "
+                f"status={_last_probe_result['status']} | "
+                f"next_live_probe_in={remaining:.1f}s"
+            )
+            return _last_probe_result
+
+    # Throttle interval elapsed, or this is the very first call -- run a
+    # real probe against UDL.
+    result = check_credential_validity()
+    _last_probe_result = result
+    _last_probe_monotonic = now
+
+    print(
+        f"[udl_probe] live probe ran | "
+        f"checked_at_utc={result['checked_at_utc']} | "
+        f"status={result['status']} | "
+        f"next_live_probe_in={_PROBE_INTERVAL_SECONDS:.1f}s"
+    )
+    return result

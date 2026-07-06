@@ -46,7 +46,7 @@ from common.atlas_artifact import build_atlas_artifact
 from common.satellite_capability import SatelliteCapability
 from common.logging_setup import build_logger, _POLICY_CONFIG_PATH, SERVICE_NAME, SERVICE_VERSION
 from common.spacetrack_tle import fetch_catalog_objects
-from common.udl_client import UDL_ENABLED, get_conjunctions
+from common.udl_client import UDL_ENABLED, get_conjunctions, get_credential_validity
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -273,23 +273,65 @@ async def udl_status() -> Dict[str, Any]:
     """UDL credential and connection status.
 
     SCRUM-331 AC6: reflects live credential and connection state.
+    SCRUM-363: adds a real, throttled credential validity probe.
 
     Returns:
-      enabled          : bool   -- reflects UDL_ENABLED env var
-      credentials_set  : bool   -- UDL_USER and UDL_PASS are present (not validated)
-      mode             : str    -- 'live' | 'disabled'
+      enabled                    : bool -- reflects UDL_ENABLED env var
+      credentials_set             : bool -- UDL_USER and UDL_PASS are present (not validated)
+      credential_valid             : bool -- result of the live probe (SCRUM-363).
+                                             False if never probed (e.g. UDL disabled).
+      credential_check_status      : str  -- 'valid' | 'invalid' | 'unreachable' | 'not_checked'
+      last_credential_check_utc    : str or None -- timestamp of the last live probe
+                                             (may be older than now if the cached
+                                             result was reused -- see udl_client
+                                             throttle interval)
+      mode             : str    -- 'live' | 'invalid' | 'unconfirmed' | 'misconfigured' | 'disabled'
       label            : str    -- human-readable label for the UI badge
       note             : str    -- additional context for the operator
+      last_fetch_utc   : str or None -- last successful conjunction data fetch
+                                        (distinct from last_credential_check_utc --
+                                        AC3: these are never conflated)
     """
     import os
     credentials_set = bool(
         os.environ.get("UDL_USER") and os.environ.get("UDL_PASS")
     )
 
-    if UDL_ENABLED and credentials_set:
+    # --- SCRUM-363: throttled live credential probe -----------------------
+    credential_valid = False
+    credential_check_status = "not_checked"
+    last_credential_check_utc = None
+
+    if UDL_ENABLED:
+        try:
+            probe = get_credential_validity()
+            credential_check_status = probe["status"]
+            credential_valid = (probe["status"] == "valid")
+            last_credential_check_utc = probe["checked_at_utc"]
+        except Exception as exc:
+            # AC5: a probe failure must not break /udl-status. Fall back to
+            # an unconfirmed state and keep returning the rest of the fields.
+            log.warning(
+                "credential probe raised unexpectedly",
+                extra={"event": "udl_status_probe_error", "exc": str(exc)},
+            )
+            credential_check_status = "unreachable"
+            credential_valid = False
+            last_credential_check_utc = None
+    # ------------------------------------------------------------------
+
+    if UDL_ENABLED and credentials_set and credential_valid:
         mode = "live"
         label = "UDL LIVE"
-        note = "UDL enabled and credentials present (not confirmed). Live conjunction data will flow once credentials are validated by a successful fetch."
+        note = "UDL enabled, credentials present and confirmed valid by live probe."
+    elif UDL_ENABLED and credentials_set and credential_check_status == "invalid":
+        mode = "invalid"
+        label = "UDL CREDENTIALS INVALID"
+        note = "Credentials are set but did not authenticate on the last check. They may have been rotated or revoked."
+    elif UDL_ENABLED and credentials_set and credential_check_status == "unreachable":
+        mode = "unconfirmed"
+        label = "UDL UNCONFIRMED"
+        note = "Could not reach UDL to confirm credential validity. Credentials may still be valid; last check was inconclusive."
     elif UDL_ENABLED and not credentials_set:
         mode = "misconfigured"
         label = "UDL MISCONFIGURED"
@@ -303,12 +345,15 @@ async def udl_status() -> Dict[str, Any]:
         )
 
     return {
-        "enabled":         UDL_ENABLED,
-        "credentials_set": credentials_set,
-        "mode":            mode,
-        "label":           label,
-        "note":            note,
-        "last_fetch_utc":  _udl_last_fetch_utc,
+        "enabled":                    UDL_ENABLED,
+        "credentials_set":            credentials_set,
+        "credential_valid":           credential_valid,
+        "credential_check_status":    credential_check_status,
+        "last_credential_check_utc":  last_credential_check_utc,
+        "mode":                       mode,
+        "label":                      label,
+        "note":                       note,
+        "last_fetch_utc":             _udl_last_fetch_utc,
     }
 
 
