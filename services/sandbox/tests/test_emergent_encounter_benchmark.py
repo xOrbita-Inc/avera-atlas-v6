@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import pytest
 
+from services.sandbox.config import (
+    DebrisConfig,
+    HostConfig,
+    IntegratorConfig,
+    SimConfig,
+)
 from services.sandbox.emergent_encounter_benchmark import (
+    create_density_calibrated_encounter_swarm,
     run_emergent_encounter_benchmark,
     run_emergent_encounter_case,
 )
@@ -33,6 +40,43 @@ def test_emergent_encounter_case_uses_propagated_swarm() -> None:
     assert result.rejection_reasons
 
 
+def test_density_calibrated_shell_does_not_place_debris_in_front_of_hosts() -> None:
+    config = SimConfig(
+        seed=42,
+        debris=DebrisConfig(count=20),
+        hosts=HostConfig(
+            count=1,
+            mode="distributed",
+            altitude_km=600.0,
+            inclination_deg=97.5,
+        ),
+        integrator=IntegratorConfig(
+            dt_seconds=10.0,
+            duration_seconds=600.0,
+            save_every_n_steps=1,
+        ),
+    )
+
+    objects = create_density_calibrated_encounter_swarm(
+        config=config,
+    )
+
+    debris_objects = [
+        obj
+        for obj in objects.values()
+        if obj.kind == "debris"
+    ]
+
+    assert debris_objects
+
+    for debris in debris_objects:
+        assert debris.metadata["placement_model"] == (
+            "shell_random_orbital_elements"
+        )
+        assert debris.metadata["positioned_in_front_of_host"] is False
+        assert "host_id" not in debris.metadata
+
+
 def test_emergent_benchmark_reports_required_cases() -> None:
     report = run_emergent_encounter_benchmark(
         seed=42,
@@ -47,8 +91,13 @@ def test_emergent_benchmark_reports_required_cases() -> None:
         for result in report.results
     }
 
-    assert report.benchmark == "emergent_encounter_rate"
+    assert (
+        report.benchmark
+        == "measured_density_calibrated_encounter_rate"
+    )
     assert report.derived_from_propagated_swarm
+    assert report.density_calibrated_initial_population
+    assert report.positions_nothing_in_front_of_hosts
     assert report.debris_count == 20
     assert case_ids == {
         "one_sensor",

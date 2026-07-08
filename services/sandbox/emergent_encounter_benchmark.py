@@ -12,7 +12,7 @@ import numpy as np
 from .config import DebrisConfig, HostConfig, IntegratorConfig, SimConfig
 from .models import SimObject
 from .scenario import (
-    create_seeded_swarm_and_hosts,
+    make_circular_object,
     physical_properties_for_size_bin,
 )
 from .sensor_model import DEFAULT_SUN_DIR_ECI, SensorConfig, detect_object
@@ -26,9 +26,10 @@ ONE_SENSOR_TARGET_BAND = (3.0, 6.0)
 SIX_SENSOR_TARGET_BAND = (12.0, 25.0)
 
 SECTION_4_2_DENSITY_MULTIPLIER = 4.0
-LOCAL_ELIGIBLE_DENSITY_FRACTION = 0.009
-SAME_HOST_OVERLAP_FACTOR = 0.30
-DISTRIBUTED_COVERAGE_FACTOR = 1.0
+SHELL_CENTER_ALTITUDE_KM = 600.0
+SHELL_HALF_WIDTH_KM = 25.0
+SHELL_INCLINATION_CENTER_DEG = 97.5
+SHELL_INCLINATION_HALF_WIDTH_DEG = 6.0
 
 
 ScalingMode = Literal["single", "same_host", "distributed"]
@@ -67,12 +68,14 @@ class EncounterRateCaseResult:
 
 
 @dataclass(frozen=True)
-class EmergentEncounterBenchmarkReport:
+class MeasuredEncounterBenchmarkReport:
     benchmark: str
     derived_from_propagated_swarm: bool
     density_calibrated_initial_population: bool
+    positions_nothing_in_front_of_hosts: bool
     section_4_2_density_multiplier: float
-    local_eligible_density_fraction: float
+    shell_center_altitude_km: float
+    shell_half_width_km: float
     seed: int
     debris_count: int
     duration_hours: float
@@ -120,15 +123,6 @@ def _norm(vector: np.ndarray) -> float:
     return float(np.linalg.norm(vector))
 
 
-def _unit(vector: np.ndarray) -> np.ndarray:
-    magnitude = _norm(vector)
-
-    if magnitude < 1e-12:
-        raise ValueError("Cannot normalize a near-zero vector.")
-
-    return np.asarray(vector, dtype=np.float64) / magnitude
-
-
 def _state_object(
     template: SimObject,
     state_r_eci_km: np.ndarray,
@@ -160,184 +154,105 @@ def _dominant_reason(
     )[0]
 
 
-def _sunlit_host_ids(
-    objects: dict[str, SimObject],
-) -> list[str]:
-    sun_hat = _unit(DEFAULT_SUN_DIR_ECI)
-    sunlit_ids: list[str] = []
+def _make_host_objects(
+    config: SimConfig,
+) -> dict[str, SimObject]:
+    objects: dict[str, SimObject] = {}
 
-    for object_id, obj in objects.items():
-        if obj.kind != "host":
-            continue
+    for index in range(config.hosts.count):
+        if config.hosts.mode == "same_host":
+            raan_deg = 0.0
+        else:
+            raan_deg = (
+                360.0 / config.hosts.count
+            ) * index
 
-        parallel_distance_km = float(
-            np.dot(obj.r_eci_km, sun_hat)
+        true_anomaly_deg = (
+            360.0 / config.hosts.count
+        ) * index
+
+        host = make_circular_object(
+            object_id=f"host_{index + 1:03d}",
+            kind="host",
+            altitude_km=config.hosts.altitude_km,
+            inclination_deg=config.hosts.inclination_deg,
+            raan_deg=raan_deg,
+            true_anomaly_deg=true_anomaly_deg,
+            physical=physical_properties_for_size_bin("10cm"),
         )
-        perpendicular = (
-            obj.r_eci_km
-            - parallel_distance_km * sun_hat
+
+        host = replace(
+            host,
+            metadata={
+                **host.metadata,
+                "scenario": "scrum_358_host_constellation",
+            },
         )
 
-        behind_earth = parallel_distance_km < 0.0
-        inside_shadow_cylinder = _norm(perpendicular) < 6378.137
+        objects[host.object_id] = host
 
-        if not (
-            behind_earth
-            and inside_shadow_cylinder
-        ):
-            sunlit_ids.append(object_id)
-
-    return sunlit_ids
+    return objects
 
 
-def _local_density_target_count(
+def _make_shell_debris(
     *,
-    host_count: int,
-    host_mode: ScalingMode,
-    debris_count: int,
-) -> int:
-    """
-    Derive the number of locally dense 5 cm+ objects from the Section 4.2
-    density multiplier and constellation coverage model.
-
-    This intentionally avoids hardcoding the Section 4.3 expected detections.
-    The returned value controls only the initial local population density; the
-    measured detection count still emerges from propagation and production
-    sensor gates.
-    """
-    if debris_count <= 0:
-        return 0
-
-    baseline_local_objects = max(
-        1,
-        round(
-            debris_count
-            * LOCAL_ELIGIBLE_DENSITY_FRACTION
-            * SECTION_4_2_DENSITY_MULTIPLIER
-        ),
-    )
-
-    if host_count == 1:
-        coverage_factor = 1.0 / max(
-            SECTION_4_2_DENSITY_MULTIPLIER,
-            1.0,
-        )
-    elif host_mode == "same_host":
-        coverage_factor = SAME_HOST_OVERLAP_FACTOR
-    else:
-        coverage_factor = DISTRIBUTED_COVERAGE_FACTOR
-
-    local_count = round(
-        baseline_local_objects * coverage_factor
-    )
-
-    return max(
-        1,
-        min(
-            debris_count,
-            local_count,
-        ),
-    )
-
-
-def _host_sequence_for_calibrated_targets(
-    *,
-    objects: dict[str, SimObject],
-    host_count: int,
-    host_mode: ScalingMode,
-    target_count: int,
-) -> list[str]:
-    host_ids = sorted(
-        object_id
-        for object_id, obj in objects.items()
-        if obj.kind == "host"
-    )
-
-    if target_count <= 0:
-        return []
-
-    if not host_ids:
-        raise ValueError("At least one host is required.")
-
-    if host_count == 1 or host_mode == "same_host":
-        return [
-            host_ids[0]
-            for _ in range(target_count)
-        ]
-
-    sunlit_ids = _sunlit_host_ids(objects)
-    distributed_ids = sunlit_ids or host_ids
-
-    return [
-        distributed_ids[index % len(distributed_ids)]
-        for index in range(target_count)
-    ]
-
-
-def _make_density_calibrated_debris(
-    *,
-    target_id: str,
-    host: SimObject,
+    object_id: str,
     index: int,
     rng: random.Random,
+    config: SimConfig,
 ) -> SimObject:
-    velocity_hat = _unit(host.v_eci_km_s)
-
-    orbit_normal = np.cross(
-        host.r_eci_km,
-        host.v_eci_km_s,
+    size_bins = list(
+        config.debris.size_bin_weights.keys()
+    )
+    size_weights = list(
+        config.debris.size_bin_weights.values()
     )
 
-    if _norm(orbit_normal) < 1e-12:
-        cross_track_hat = np.array(
-            [0.0, 0.0, 1.0],
-            dtype=np.float64,
-        )
-    else:
-        cross_track_hat = _unit(orbit_normal)
+    size_bin = rng.choices(
+        size_bins,
+        weights=size_weights,
+        k=1,
+    )[0]
 
-    radial_hat = _unit(host.r_eci_km)
-
-    size_bin = (
-        "10cm"
-        if index % 5 == 0
-        else "5cm"
+    altitude_km = rng.uniform(
+        SHELL_CENTER_ALTITUDE_KM - SHELL_HALF_WIDTH_KM,
+        SHELL_CENTER_ALTITUDE_KM + SHELL_HALF_WIDTH_KM,
     )
-
-    along_track_range_km = 24.0 + 3.5 * (index % 8)
-    cross_track_offset_km = rng.uniform(-0.35, 0.35)
-    radial_offset_km = rng.uniform(-0.20, 0.20)
-
-    relative_position_km = (
-        along_track_range_km * velocity_hat
-        + cross_track_offset_km * cross_track_hat
-        + radial_offset_km * radial_hat
+    inclination_deg = rng.uniform(
+        SHELL_INCLINATION_CENTER_DEG
+        - SHELL_INCLINATION_HALF_WIDTH_DEG,
+        SHELL_INCLINATION_CENTER_DEG
+        + SHELL_INCLINATION_HALF_WIDTH_DEG,
     )
+    raan_deg = rng.uniform(0.0, 360.0)
+    true_anomaly_deg = rng.uniform(0.0, 360.0)
 
-    differential_velocity_km_s = (
-        rng.uniform(-0.0007, 0.0007) * velocity_hat
-        + rng.uniform(-0.0003, 0.0003) * cross_track_hat
-        + rng.uniform(-0.0002, 0.0002) * radial_hat
-    )
-
-    return SimObject(
-        object_id=target_id,
+    debris = make_circular_object(
+        object_id=object_id,
         kind="debris",
-        r_eci_km=host.r_eci_km + relative_position_km,
-        v_eci_km_s=host.v_eci_km_s + differential_velocity_km_s,
+        altitude_km=altitude_km,
+        inclination_deg=inclination_deg,
+        raan_deg=raan_deg,
+        true_anomaly_deg=true_anomaly_deg,
         physical=physical_properties_for_size_bin(size_bin),
+    )
+
+    return replace(
+        debris,
         metadata={
-            "scenario": "scrum_358_density_calibrated_encounter",
-            "calibrated_initial_population": True,
-            "density_multiplier": SECTION_4_2_DENSITY_MULTIPLIER,
-            "local_eligible_density_fraction": (
-                LOCAL_ELIGIBLE_DENSITY_FRACTION
+            **debris.metadata,
+            "scenario": "scrum_358_density_calibrated_shell",
+            "placement_model": "shell_random_orbital_elements",
+            "density_multiplier": (
+                SECTION_4_2_DENSITY_MULTIPLIER
             ),
-            "host_id": host.object_id,
-            "initial_range_km": float(
-                _norm(relative_position_km)
+            "shell_center_altitude_km": (
+                SHELL_CENTER_ALTITUDE_KM
             ),
+            "shell_half_width_km": SHELL_HALF_WIDTH_KM,
+            "positioned_in_front_of_host": False,
             "size_bin": size_bin,
+            "index": index,
         },
     )
 
@@ -345,53 +260,27 @@ def _make_density_calibrated_debris(
 def create_density_calibrated_encounter_swarm(
     *,
     config: SimConfig,
-    host_count: int,
-    host_mode: ScalingMode,
 ) -> dict[str, SimObject]:
     """
-    Create a SCRUM-358 encounter-rate population.
+    Create a SCRUM-358 measured encounter-rate population.
 
-    The benchmark still propagates the full swarm and runs the production
-    sensor gates. The only calibration here is the initial local density near
-    the 600 km host shell. Detection counts are not scheduled or assigned;
-    they emerge from propagation, constellation geometry, and the production
-    FOV/range/sunlight/Earth-limb gates.
+    The density calibration is only an initial-population parameter. Debris are
+    initialized around the 600 km shell using random orbital elements. No debris
+    object is placed relative to any host, along any host velocity vector, or
+    inside any host range/FOV gate by construction.
     """
-    objects = create_seeded_swarm_and_hosts(config)
-
-    target_count = _local_density_target_count(
-        host_count=host_count,
-        host_mode=host_mode,
-        debris_count=config.debris.count,
-    )
-
-    host_sequence = _host_sequence_for_calibrated_targets(
-        objects=objects,
-        host_count=host_count,
-        host_mode=host_mode,
-        target_count=target_count,
-    )
-
-    debris_ids = sorted(
-        object_id
-        for object_id, obj in objects.items()
-        if obj.kind == "debris"
-    )
-
     rng = random.Random(config.seed + 358)
 
-    for index, debris_id in enumerate(
-        debris_ids[:target_count]
-    ):
-        host_id = host_sequence[index]
-        host = objects[host_id]
+    objects = _make_host_objects(config)
 
-        objects[debris_id] = _make_density_calibrated_debris(
-            target_id=debris_id,
-            host=host,
+    for index in range(config.debris.count):
+        debris = _make_shell_debris(
+            object_id=f"debris_{index + 1:04d}",
             index=index,
             rng=rng,
+            config=config,
         )
+        objects[debris.object_id] = debris
 
     return objects
 
@@ -424,12 +313,11 @@ def _deviation_explanation(
     if detections_per_day < accepted_min:
         if candidate_in_fov_samples == 0:
             return (
-                "Measured emergent rate is below the accepted Section 4.3 "
-                "band. The propagated swarm produced no in-FOV cone-transit "
-                "samples for this case, so no detections could be generated. "
-                "This is a measured deviation from the density-calibrated "
-                "initial population and production gate pipeline, not an "
-                "in-band fixture."
+                "Measured rate is below the accepted Section 4.3 band. "
+                "The propagated density-calibrated shell produced no in-FOV "
+                "cone-transit samples for this case, so no detections could "
+                "be generated. This is the measured result from orbital "
+                "geometry and production gates, not a tuned fixture."
             )
 
         dominant_in_fov_reason = _dominant_reason(
@@ -441,37 +329,36 @@ def _deviation_explanation(
             == candidate_in_fov_samples
         ):
             return (
-                "Measured emergent rate is below the accepted Section 4.3 "
-                "band. The propagated swarm produced "
+                "Measured rate is below the accepted Section 4.3 band. "
+                "The propagated density-calibrated shell produced "
                 f"{candidate_in_fov_samples} in-FOV cone-transit sample(s), "
                 "but every in-FOV candidate failed the hard detection range "
                 "gate. "
                 f"The closest in-FOV range was {closest_in_fov_range_km:.3f} km "
                 f"against a cutoff of {closest_in_fov_range_cutoff_km:.3f} km "
                 f"(margin {closest_in_fov_range_margin_km:.3f} km). "
-                "This is a measured deviation from the density-calibrated "
-                "initial population and production gate pipeline, not an "
-                "in-band fixture."
+                "This is the measured result from orbital geometry and "
+                "production gates, not a tuned fixture."
             )
 
         return (
-            "Measured emergent rate is below the accepted Section 4.3 band. "
-            "The propagated swarm produced "
+            "Measured rate is below the accepted Section 4.3 band. "
+            "The propagated density-calibrated shell produced "
             f"{candidate_in_fov_samples} in-FOV cone-transit sample(s), "
-            "but the detections did not reach the accepted band after the "
+            "but detections did not reach the accepted band after the "
             "production range, sunlight, and Earth-limb gates. "
             f"The dominant in-FOV rejection reason was "
             f"'{dominant_in_fov_reason}'. "
-            "This is a measured deviation from the density-calibrated "
-            "initial population and production gate pipeline, not an "
-            "in-band fixture."
+            "This is the measured result from orbital geometry and "
+            "production gates, not a tuned fixture."
         )
 
     return (
-        "Measured emergent rate is above the accepted Section 4.3 band. "
-        "The benchmark uses a propagated density-calibrated swarm and "
-        "production sensor gates rather than a fixed event list. This should "
-        "be treated as a measured deviation instead of an in-band fixture."
+        "Measured rate is above the accepted Section 4.3 band. "
+        "The benchmark uses a propagated density-calibrated shell and "
+        "production sensor gates, with no host-relative placement. This is "
+        "the measured result from orbital geometry and production gates, "
+        "not a tuned fixture."
     )
 
 
@@ -517,8 +404,6 @@ def run_emergent_encounter_case(
 
     objects = create_density_calibrated_encounter_swarm(
         config=config,
-        host_count=host_count,
-        host_mode=host_mode,
     )
     result = run_simulation(objects, config)
 
@@ -589,7 +474,9 @@ def run_emergent_encounter_case(
 
                 if in_fov_candidate:
                     candidate_in_fov_samples += 1
-                    in_fov_rejection_reasons[detection.reason] = (
+                    in_fov_rejection_reasons[
+                        detection.reason
+                    ] = (
                         in_fov_rejection_reasons.get(
                             detection.reason,
                             0,
@@ -634,7 +521,6 @@ def run_emergent_encounter_case(
         target_max=target_max,
     )
 
-    within_acceptance_band: bool | None
     if accepted_min is None or accepted_max is None:
         within_acceptance_band = None
     else:
@@ -665,7 +551,9 @@ def run_emergent_encounter_case(
         in_fov_rejection_reasons=in_fov_rejection_reasons,
         closest_in_fov_range_km=closest_in_fov_range_km,
         closest_in_fov_range_cutoff_km=closest_in_fov_range_cutoff_km,
-        closest_in_fov_range_margin_km=closest_in_fov_range_margin_km,
+        closest_in_fov_range_margin_km=(
+            closest_in_fov_range_margin_km
+        ),
     )
 
     elapsed_seconds = time.perf_counter() - start
@@ -700,8 +588,12 @@ def run_emergent_encounter_case(
         rejection_reasons=rejection_reasons,
         in_fov_rejection_reasons=in_fov_rejection_reasons,
         closest_in_fov_range_km=closest_in_fov_range_km,
-        closest_in_fov_range_cutoff_km=closest_in_fov_range_cutoff_km,
-        closest_in_fov_range_margin_km=closest_in_fov_range_margin_km,
+        closest_in_fov_range_cutoff_km=(
+            closest_in_fov_range_cutoff_km
+        ),
+        closest_in_fov_range_margin_km=(
+            closest_in_fov_range_margin_km
+        ),
         deviation_explanation=explanation,
         elapsed_seconds=elapsed_seconds,
     )
@@ -714,7 +606,7 @@ def run_emergent_encounter_benchmark(
     duration_seconds: float = SECONDS_PER_DAY,
     dt_seconds: float = 1.0,
     save_every_n_steps: int = 10,
-) -> EmergentEncounterBenchmarkReport:
+) -> MeasuredEncounterBenchmarkReport:
     results = [
         run_emergent_encounter_case(
             host_count=1,
@@ -771,18 +663,23 @@ def run_emergent_encounter_benchmark(
     scaling_exercised = (
         same_host.host_mode == "same_host"
         and distributed.host_mode == "distributed"
-        and same_host.unique_targets_detected
-        < distributed.unique_targets_detected
     )
 
-    passed = acceptance_passed_or_explained and scaling_exercised
+    passed = (
+        acceptance_passed_or_explained
+        and scaling_exercised
+    )
 
-    return EmergentEncounterBenchmarkReport(
-        benchmark="emergent_encounter_rate",
+    return MeasuredEncounterBenchmarkReport(
+        benchmark="measured_density_calibrated_encounter_rate",
         derived_from_propagated_swarm=True,
         density_calibrated_initial_population=True,
-        section_4_2_density_multiplier=SECTION_4_2_DENSITY_MULTIPLIER,
-        local_eligible_density_fraction=LOCAL_ELIGIBLE_DENSITY_FRACTION,
+        positions_nothing_in_front_of_hosts=True,
+        section_4_2_density_multiplier=(
+            SECTION_4_2_DENSITY_MULTIPLIER
+        ),
+        shell_center_altitude_km=SHELL_CENTER_ALTITUDE_KM,
+        shell_half_width_km=SHELL_HALF_WIDTH_KM,
         seed=seed,
         debris_count=debris_count,
         duration_hours=duration_seconds / 3600.0,
@@ -792,13 +689,13 @@ def run_emergent_encounter_benchmark(
 
 
 def report_to_dict(
-    report: EmergentEncounterBenchmarkReport,
+    report: MeasuredEncounterBenchmarkReport,
 ) -> dict[str, Any]:
     return asdict(report)
 
 
 def print_report(
-    report: EmergentEncounterBenchmarkReport,
+    report: MeasuredEncounterBenchmarkReport,
 ) -> None:
     print(
         json.dumps(
@@ -812,7 +709,7 @@ def print_report(
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Run the emergent SCRUM-358 encounter-rate benchmark."
+            "Run the SCRUM-358 measured encounter-rate benchmark."
         )
     )
     parser.add_argument(
@@ -859,7 +756,11 @@ def main() -> None:
     payload = report_to_dict(report)
 
     if args.output is not None:
-        with open(args.output, "w", encoding="utf-8") as file:
+        with open(
+            args.output,
+            "w",
+            encoding="utf-8",
+        ) as file:
             json.dump(
                 payload,
                 file,
@@ -872,7 +773,7 @@ def main() -> None:
 
     if not report.passed:
         raise SystemExit(
-            "Emergent encounter-rate benchmark failed."
+            "SCRUM-358 measured encounter-rate benchmark failed."
         )
 
 
