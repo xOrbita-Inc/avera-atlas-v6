@@ -33,22 +33,37 @@ def test_tier1_coorbital_single_pass_scenario_passes() -> None:
     )
 
 
-def test_tier2_tasked_reobservation_scenario_is_scaffolded() -> None:
+def test_tier2_tasked_reobservation_scenario_is_validated() -> None:
     report = run_tier2_tasked_reobservation_scenario(seed=42)
 
     assert report.scenario_id == "B"
     assert report.passed
-    assert report.metrics["acceptance_validated"] is False
-    assert report.metrics["validation_level"] == "closure_scaffold_only"
-    assert report.metrics["tasking_interface_used"] is False
+    assert report.metrics["acceptance_validated"] is True
+    assert report.metrics["validation_level"] == "tasking_driven_reobservation"
+    assert report.metrics["partial_tracklet_source"] == "sensor_model_detection"
+    assert report.metrics["tasking_interface_used"] is True
+    assert (
+        report.metrics["tasking_target_source"]
+        == "predicted_position_from_partial_tracklet"
+    )
+    assert report.metrics["truth_used_for_tasking"] is False
+    assert report.metrics["reobservation_source"] == "execute_tasking_command"
+    assert report.metrics["tasking_command_type"] == "predicted_point"
+    assert report.metrics["tasking_result_status"] == "accepted"
+    assert report.metrics["tasking_result_reason"] == "executed"
 
     assert report.metrics["host_count"] == 3
     assert report.metrics["debris_count"] == 1
-    assert report.metrics["partial_observation_count"] < 3
+    assert report.metrics["simulation_snapshot_count"] > 1
+    assert report.metrics["partial_observation_count"] == 2
     assert report.metrics["partial_iod_solver_success"] is False
+    assert report.metrics["tasked_observation_count"] > 0
     assert report.metrics["combined_observation_count"] >= 3
     assert report.metrics["final_iod_solver_success"] is True
     assert report.metrics["closure_time_seconds"] <= 24.0 * 3600.0
+    assert report.metrics["solution_epoch_seconds"] is not None
+    assert report.metrics["final_along_track_error_km"] is not None
+    assert report.metrics["final_along_track_error_km"] < 10.0
 
     assert (
         report.metrics["along_track_error_source"]
