@@ -8,7 +8,12 @@ import numpy as np
 
 from .models import SimObject, SimulationResult
 from .observation_bundle import ObservationBundle, _state_to_sim_object
-from .observations import AngularObservation, make_noisy_ra_dec
+from .observations import (
+    AngularObservation,
+    DEFAULT_RANGE_SIGMA_KM,
+    make_noisy_ra_dec,
+    make_noisy_range_km,
+)
 from .sensor_model import (
     DEFAULT_SUN_DIR_ECI,
     DetectionResult,
@@ -143,6 +148,7 @@ def _observation_from_tasked_detection(
     sensor_cfg: SensorConfig,
     rng: random.Random,
     previous_observation: AngularObservation | None = None,
+
 ) -> AngularObservation:
     observer_eci_m = host.r_eci_km.astype(np.float64, copy=True) * 1000.0
     observer_eci_m_s = host.v_eci_km_s.astype(np.float64, copy=True) * 1000.0
@@ -189,6 +195,12 @@ def _observation_from_tasked_detection(
         rng=rng,
     )
 
+    noisy_range_km = make_noisy_range_km(
+        true_range_km=detection.range_km,
+        range_sigma_km=DEFAULT_RANGE_SIGMA_KM,
+        rng=rng,
+    )
+
     observation = AngularObservation(
         host_id=host.object_id,
         debris_id=debris.object_id,
@@ -201,7 +213,7 @@ def _observation_from_tasked_detection(
         dec_sigma_rad=dec_sigma_rad,
         ra_rate_rad_s=None,
         dec_rate_rad_s=None,
-        range_km=detection.range_km,
+        range_km=noisy_range_km,
         off_boresight_deg=detection.off_boresight_deg,
         sunlit=detection.sunlit,
         earth_limb_blocked=detection.earth_limb_blocked,

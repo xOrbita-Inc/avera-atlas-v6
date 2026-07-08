@@ -12,8 +12,24 @@ from .sensor_model import DetectionResult, SensorConfig, detect_object
 
 ARCSEC_TO_RAD = math.pi / (180.0 * 3600.0)
 DEFAULT_SUN_DIR_ECI = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+DEFAULT_RANGE_SIGMA_KM = 0.05
 
+def make_noisy_range_km(
+    *,
+    true_range_km: float,
+    range_sigma_km: float,
+    rng: random.Random,
+) -> float:
+    """Apply deterministic Gaussian range noise and keep range positive."""
+    if range_sigma_km < 0.0:
+        raise ValueError("range_sigma_km must be non-negative.")
 
+    noisy_range_km = true_range_km + rng.gauss(
+        0.0,
+        range_sigma_km,
+    )
+
+    return max(noisy_range_km, 0.0)
 @dataclass(frozen=True)
 class AngularObservation:
     """One simulated angular observation emitted by a host sensor."""
@@ -216,6 +232,12 @@ def generate_angular_observation(
         rng=rng,
     )
 
+    noisy_range_km = make_noisy_range_km(
+        true_range_km=detection.range_km,
+        range_sigma_km=DEFAULT_RANGE_SIGMA_KM,
+        rng=rng,
+    )
+
     observation = AngularObservation(
         host_id=host.object_id,
         debris_id=debris.object_id,
@@ -228,7 +250,7 @@ def generate_angular_observation(
         dec_sigma_rad=dec_sigma_rad,
         ra_rate_rad_s=None,
         dec_rate_rad_s=None,
-        range_km=detection.range_km,
+        range_km=noisy_range_km,
         off_boresight_deg=detection.off_boresight_deg,
         sunlit=detection.sunlit,
         earth_limb_blocked=detection.earth_limb_blocked,

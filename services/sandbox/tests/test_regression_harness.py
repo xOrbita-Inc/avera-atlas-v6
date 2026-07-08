@@ -46,7 +46,12 @@ def test_tier2_tasked_reobservation_scenario_is_validated() -> None:
         report.metrics["tasking_target_source"]
         == "predicted_position_from_partial_tracklet"
     )
-    assert report.metrics["truth_used_for_tasking"] is False
+    assert report.metrics["truth_used_for_tasking_target"] is False
+    assert report.metrics["truth_used_for_reobserver_placement"] is True
+    assert (
+        report.metrics["reobserver_placement_source"]
+        == "constructed_from_true_future_debris_position"
+    )
     assert report.metrics["reobservation_source"] == "execute_tasking_command"
     assert report.metrics["tasking_command_type"] == "predicted_point"
     assert report.metrics["tasking_result_status"] == "accepted"

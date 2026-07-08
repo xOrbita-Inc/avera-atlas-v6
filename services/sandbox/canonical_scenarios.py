@@ -701,7 +701,11 @@ def run_tier2_tasked_reobservation_scenario(
             "partial_tracklet_source": "sensor_model_detection",
             "tasking_interface_used": tasking_interface_used,
             "tasking_target_source": "predicted_position_from_partial_tracklet",
-            "truth_used_for_tasking": False,
+            "truth_used_for_tasking_target": False,
+            "truth_used_for_reobserver_placement": True,
+            "reobserver_placement_source": (
+                "constructed_from_true_future_debris_position"
+            ),
             "reobservation_source": "execute_tasking_command",
             "tasking_command_type": "predicted_point",
             "tasking_result_status": (

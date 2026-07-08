@@ -283,7 +283,10 @@ def test_generate_detected_observation_has_iod_fields():
     assert observation.ra_rate_rad_s is None
     assert observation.dec_rate_rad_s is None
 
-    assert observation.range_km == 20.0
+    assert observation.range_km is not None
+    assert observation.range_km != 20.0
+    assert abs(observation.range_km - 20.0) < 4.0 * 0.05
+    assert observation.range_km > 0.0
     assert observation.off_boresight_deg is not None
     assert observation.sunlit
     assert not observation.earth_limb_blocked
