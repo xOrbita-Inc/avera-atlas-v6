@@ -160,7 +160,8 @@ The harness can pass as an execution/reporting scaffold while the top-level `acc
 
 ## SCRUM-358: Emergent encounter-rate validation
 
-The sandbox includes an emergent encounter-rate benchmark for the SCRUM-291 AC2 follow-up. Unlike the original deterministic sensor benchmark, this benchmark does not schedule a fixed number of reference encounters. It builds a density-calibrated 500-object debris population, propagates the full swarm and host constellation through the sandbox simulation core, screens the resulting geometry through the production TT240-40 sensor gates, and measures detections per day from the propagated run.
+The sandbox includes a measured density-calibrated encounter-rate benchmark for the SCRUM-291 AC2 follow-up. Unlike the original deterministic sensor benchmark, this benchmark does not schedule a fixed number of reference encounters and does not place debris directly in front of any host to force detections. The benchmark builds a density-calibrated debris field around the 600 km orbital shell, propagates the debris population and host constellation through the sandbox simulation core, screens the resulting geometry through the production TT240-40 sensor gates, and reports whatever detection rate results from orbital geometry. The density calibration is used only as an initial-population setup parameter. It is not used to set the expected detection count.
+
 
 Run the benchmark:
 
@@ -188,18 +189,26 @@ Current 24-hour validation result:
 
 ```text
 1-sensor configuration:
-  detections_per_day: 4.0
+  detections_per_day: 0.0
   target_per_day: 3.0–6.0
-  within_acceptance_band: True
+  within_acceptance_band: False
+  finding: 5 in-FOV samples, all failed the range gate
+  closest_in_fov_range: 376.253 km
+  range_cutoff: 59.000 km
 
 6-sensor same-host configuration:
-  detections_per_day: 5.0
-  scaling behavior: sub-linear relative to distributed coverage
+  detections_per_day: 0.0
+  finding: 26 in-FOV samples, all failed the range gate
+  closest_in_fov_range: 79.212 km
+  range_cutoff: 59.000 km
 
 6-sensor distributed configuration:
-  detections_per_day: 18.0
+  detections_per_day: 0.0
   target_per_day: 12.0–25.0
-  within_acceptance_band: True
+  within_acceptance_band: False
+  finding: 14 in-FOV samples, all failed the range gate
+  closest_in_fov_range: 238.102 km
+  range_cutoff: 117.000 km
 ```
 
 The measured rates are emergent from propagation plus the production FOV, range, sunlight, and Earth-limb gates. The benchmark uses a density-calibrated initial population rather than a hardcoded encounter list, so detections-per-day values are no longer fixture constants.
@@ -453,17 +462,40 @@ Latest validation:
 ```text
 SCRUM-293 tasking tests: 10 passed
 SCRUM-294 regression harness tests: 6 passed
-SCRUM-358 emergent encounter benchmark tests: 6 passed
-services/sandbox/tests: 128 passed
-full repository: 576 passed, 10 warnings
+SCRUM-358 measured encounter benchmark tests: 7 passed
+services/sandbox/tests: 129 passed
+full repository: 577 passed, 10 warnings
 ```
 
 Current SCRUM-358 acceptance status:
 
 ```text
-Encounter-rate source: propagated density-calibrated swarm
-1-sensor measured rate: 4.0/day, target 3.0–6.0/day
-6-sensor same-host measured rate: 5.0/day, sub-linear relative to distributed
-6-sensor distributed measured rate: 18.0/day, target 12.0–25.0/day
+Encounter-rate source: propagated density-calibrated shell field
+Initial population: density-calibrated shell around 600 km
+Host-relative placement: none
+Objects positioned in front of hosts: false
+Benchmark label: measured_density_calibrated_encounter_rate
+
+1-sensor measured rate: 0.0/day, target 3.0–6.0/day
+  Result: below Section 4.3 band
+  Finding: 5 in-FOV samples, all failed range gate
+  Closest in-FOV range: 376.253 km vs 59.000 km cutoff
+
+6-sensor same-host measured rate: 0.0/day
+  Finding: 26 in-FOV samples, all failed range gate
+  Closest in-FOV range: 79.212 km vs 59.000 km cutoff
+
+6-sensor distributed measured rate: 0.0/day, target 12.0–25.0/day
+  Result: below Section 4.3 band
+  Finding: 14 in-FOV samples, all failed range gate
+  Closest in-FOV range: 238.102 km vs 117.000 km cutoff
+
 Top-level benchmark passed: true
+Reason: measured deviations are reported with gate diagnostics
+
+Current SCRUM-294 acceptance status:
+Scenario A acceptance validation: measured truth comparison complete
+Scenario B acceptance validation: deferred; closure scaffold only
+Scenario C acceptance validation: deferred to SCRUM-343
+Top-level acceptance_validated: false
 ```
