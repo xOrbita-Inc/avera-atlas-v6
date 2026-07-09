@@ -1,0 +1,372 @@
+openapi: 3.0.3
+info:
+  title: AVERA Tracker API
+  description: |
+    Published tracker contract for observation ingest and initial orbit
+    determination (IOD) triggering.
+
+    **Position in the xOrbita stack**
+    - Upstream: Sandbox / sensor-model services emit sensor-agnostic
+      observation records.
+    - Downstream: Tracker owns observation ingest, observation persistence,
+      and IOD job triggering.
+
+    **Contract source of truth**
+    This OpenAPI document is the managed source of truth for sandbox-to-tracker
+    observation exchange. It reconciles CONOPS 6.3, Tylen's common observation
+    schema, and the previous sandbox NPZ REQUIRED_FIELDS into one published
+    inter-service contract.
+
+    **Payload convention**
+    Observation records are small and should normally be sent inline as JSON.
+    Large payloads, when needed, are passed by path reference in the request
+    body per the AVERA Data Reader pattern. Do not base64 encode payloads.
+
+    **Sensor-knowledge isolation**
+    Observation records must not include truth state, future debris state,
+    scenario-only placement information, or other god-view fields. Optical
+    observations carry angles, optional range/range-rate fields when available,
+    observer state, and optional contextual metadata.
+  contact:
+    name: xOrbita APS Team
+  version: 0.1.0
+
+servers:
+- url: http://localhost:8070
+  description: Local / Jetson dev
+- url: http://tracker:8070
+  description: Docker Compose service name
+
+paths:
+  /health:
+    get:
+      summary: Liveness probe
+      operationId: trackerHealthCheck
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /v1/observations:
+    post:
+      summary: Ingest observation records
+      description: |
+        Ingests sensor-agnostic observation records into tracker. Inline JSON is
+        the default path because observation records are small. A file payload
+        reference may be supplied only for genuinely large payloads.
+      operationId: ingestObservations
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ObservationIngestRequest"
+      responses:
+        "202":
+          description: Observation ingest accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObservationIngestResponse"
+        "422":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/iod:
+    post:
+      summary: Trigger initial orbit determination
+      description: |
+        Triggers an IOD job from observation records already provided inline or
+        previously ingested into tracker. Tracker owns the IOD trigger boundary;
+        callers should not invoke private NPZ/library loader paths as the
+        inter-service contract.
+      operationId: triggerInitialOrbitDetermination
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IodTriggerRequest"
+      responses:
+        "202":
+          description: IOD job accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IodTriggerResponse"
+        "422":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  schemas:
+    ObservationIngestRequest:
+      type: object
+      description: |
+        Request body for tracker observation ingest. Send observation records
+        inline by default. Use payload_ref only for genuinely large payloads.
+      properties:
+        observations:
+          type: array
+          description: Inline observation records.
+          items:
+            $ref: "#/components/schemas/ObservationRecord"
+        payload_ref:
+          nullable: true
+          allOf:
+          - $ref: "#/components/schemas/FilePayloadReference"
+      anyOf:
+      - required:
+        - observations
+      - required:
+        - payload_ref
+
+    FilePayloadReference:
+      type: object
+      description: |
+        Path reference to a large payload managed outside the API body per the
+        AVERA Data Reader pattern. Do not use base64 payloads.
+      required:
+      - path
+      - format
+      properties:
+        path:
+          type: string
+          description: Runtime-readable path to the payload.
+          example: /data/sandbox/observations/scenario_b_observations.jsonl
+        format:
+          type: string
+          description: Referenced payload format.
+          enum:
+          - json
+          - jsonl
+        sha256:
+          type: string
+          nullable: true
+          description: Optional checksum for payload integrity.
+
+    ObservationRecord:
+      type: object
+      description: |
+        Sensor-agnostic observation record. Optical observations carry angles
+        plus observer state. Contextual fields are optional. Truth/god-view
+        fields are intentionally excluded.
+      required:
+      - observation_id
+      - sensor_id
+      - target_id
+      - t_seconds
+      - detected
+      properties:
+        observation_id:
+          type: string
+          description: Unique observation identifier.
+          example: obs-host_001-debris_001-000001
+        sensor_id:
+          type: string
+          description: Sensor or observing host identifier.
+          example: host_001
+        target_id:
+          type: string
+          description: Observed target/debris identifier.
+          example: debris_001
+        t_seconds:
+          type: number
+          format: double
+          description: Scenario-relative observation timestamp in seconds.
+          example: 10.0
+        timestamp_utc:
+          type: string
+          format: date-time
+          nullable: true
+          description: Optional UTC timestamp when available.
+          example: 2026-04-01T14:32:00Z
+        detected:
+          type: boolean
+          description: Whether the target passed sensor gating and produced a usable observation.
+        reason:
+          type: string
+          nullable: true
+          description: Detection or rejection reason.
+
+        ra_rad:
+          type: number
+          format: double
+          nullable: true
+          description: Right ascension angle in radians.
+        dec_rad:
+          type: number
+          format: double
+          nullable: true
+          description: Declination angle in radians.
+        ra_sigma_rad:
+          type: number
+          format: double
+          nullable: true
+          description: One-sigma RA uncertainty in radians.
+        dec_sigma_rad:
+          type: number
+          format: double
+          nullable: true
+          description: One-sigma declination uncertainty in radians.
+        ra_rate_rad_s:
+          type: number
+          format: double
+          nullable: true
+          description: Optional RA rate in radians per second.
+        dec_rate_rad_s:
+          type: number
+          format: double
+          nullable: true
+          description: Optional declination rate in radians per second.
+        range_km:
+          type: number
+          format: double
+          nullable: true
+          description: Optional sensor-to-target range in kilometers.
+        range_sigma_km:
+          type: number
+          format: double
+          nullable: true
+          description: Optional one-sigma range uncertainty in kilometers.
+        range_rate_km_s:
+          type: number
+          format: double
+          nullable: true
+          description: Optional sensor-to-target range rate in kilometers per second.
+
+        observer_eci_m:
+          type: array
+          nullable: true
+          description: Observer ECI position in meters.
+          minItems: 3
+          maxItems: 3
+          items:
+            type: number
+            format: double
+        observer_eci_m_s:
+          type: array
+          nullable: true
+          description: Observer ECI velocity in meters per second.
+          minItems: 3
+          maxItems: 3
+          items:
+            type: number
+            format: double
+
+        off_boresight_deg:
+          type: number
+          format: double
+          nullable: true
+          description: Optional off-boresight angle in degrees.
+        sunlit:
+          type: boolean
+          nullable: true
+          description: Whether the target was sunlit at observation time.
+        earth_limb_blocked:
+          type: boolean
+          nullable: true
+          description: Whether the line of sight was blocked by Earth limb geometry.
+        sensor_mode:
+          type: string
+          nullable: true
+          description: Optional sensor mode label.
+          example: neuromorphic_event
+        source:
+          type: string
+          nullable: true
+          description: Optional producer label for audit/debugging.
+          example: sandbox
+
+    ObservationIngestResponse:
+      type: object
+      required:
+      - accepted
+      - observation_count
+      - ingest_id
+      properties:
+        accepted:
+          type: boolean
+          example: true
+        observation_count:
+          type: integer
+          example: 12
+        ingest_id:
+          type: string
+          example: ingest-2026-0401-0001
+
+    IodTriggerRequest:
+      type: object
+      description: Trigger an IOD job using inline records or previously ingested observation identifiers.
+      properties:
+        observation_ids:
+          type: array
+          description: Observation IDs already ingested into tracker.
+          items:
+            type: string
+        observations:
+          type: array
+          description: Inline observations to ingest and use for this IOD job.
+          items:
+            $ref: "#/components/schemas/ObservationRecord"
+        solver:
+          type: string
+          description: Requested IOD solver family.
+          default: range+angles
+          enum:
+          - range+angles
+          - angles-only
+      anyOf:
+      - required:
+        - observation_ids
+      - required:
+        - observations
+
+    IodTriggerResponse:
+      type: object
+      required:
+      - accepted
+      - job_id
+      properties:
+        accepted:
+          type: boolean
+          example: true
+        job_id:
+          type: string
+          example: iod-2026-0401-0001
+        observation_count:
+          type: integer
+          example: 4
+        solver:
+          type: string
+          example: range+angles
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        version:
+          type: string
+          example: 0.1.0
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Human-readable error message.
+          example: observations must contain at least one record
+        detail:
+          type: object
+          description: Machine-readable validation detail.

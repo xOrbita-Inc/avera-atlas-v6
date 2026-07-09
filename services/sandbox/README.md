@@ -10,7 +10,7 @@ Provide an Earth-centered sandbox that can:
 * produce deterministic state snapshots;
 * apply realistic sensor visibility gates;
 * emit noisy angular observations for downstream IOD processing;
-* export sensor-visible observations using the tracker-compatible `observations_multi.npz` schema;
+* export sensor-visible observations using the published tracker OpenAPI contract at `openapi/tracker.yaml`;
 * enforce strict god-view / sensor-knowledge isolation;
 * execute sandbox-side re-observation tasking commands;
 * run the canonical three-tier IOD regression harness.
@@ -71,30 +71,31 @@ Detected observations include:
 
 The observation contract is validated against the existing tracker IOD interface.
 
-## SCRUM-292: Observation schema emission and sensor-knowledge isolation
+## SCRUM-292 / SCRUM-362: Observation contract emission and sensor-knowledge isolation
 
-The schema-emission layer converts detected sandbox observations into the tracker-compatible `observations_multi.npz` contract.
+The sensor-facing observation contract is now published as the tracker OpenAPI
+contract at `openapi/tracker.yaml`.
 
-The emitted artifact includes:
+The sandbox emits detected observations as tracker observation-ingest JSON records
+conforming to that published contract. Inline JSON is the default path because
+observation records are small. Large payloads, if needed, must be passed by path
+reference in the request body per the AVERA Data Reader pattern; base64 payloads
+and private file formats are not the inter-service contract.
 
-* UTC timestamps;
-* stable observer IDs and target IDs;
-* observer and target index arrays;
-* observation time index arrays;
-* observation type;
-* observer ECI position in metres;
-* observer ECI velocity in metres per second;
-* RA and Dec in radians;
-* angular uncertainty in arcseconds;
-* observation quality labels;
-* optional range and range-rate fields using `NaN` when unavailable;
-* metadata describing frame, units, schema version, sensor type, and god-view isolation.
+The legacy `observations_multi.npz` writer remains available only as a
+compatibility/replay artifact for existing tracker-loader tests. It is no longer
+the source of truth for the sandbox-to-tracker observation contract.
 
-The emitted `observations_multi.npz` artifact is loaded directly through the existing tracker observation loader and converted to tracker `IODObservation` records without sandbox-specific adapter code.
+The published tracker contract preserves the sensor-agnostic optional-field
+model: optical observations carry RA/Dec, optional range/range-rate fields when
+available, observer ECI state, and contextual metadata such as boresight/sunlit
+flags. The observation stream deliberately excludes truth state, future debris
+state, simulation objects, snapshots, and other god-view fields.
 
-The sensor-knowledge layer exposes only the observations actually emitted by each sensor. It deliberately blocks access to simulation objects, snapshots, and truth states from the sensor-facing interface. Attempts to access god-view state from sensor knowledge raise an error.
-
-Deterministic replay is also validated: the same simulation seed and sensor seed produce the same loaded observation stream.
+The sensor-knowledge layer exposes only the observations actually emitted by each
+sensor. It blocks access to simulation objects, snapshots, and truth states from
+the sensor-facing interface. Attempts to access god-view state from sensor
+knowledge raise an error.
 
 ## SCRUM-293: Re-observation tasking interface
 
@@ -106,7 +107,7 @@ Implemented tasking features:
 - `predicted_point` target support using an explicit commanded ECI boresight.
 - Survey-mode detection remains unchanged; fixed pointing still flows through `detect_object(...)`.
 - Tasked detection uses `detect_object_with_boresight(...)`, which applies the same FOV, range, sunlight, and Earth-limb gates as survey mode.
-- Tasked observations are returned as normal `AngularObservation` records and can be emitted through the Sandbox 3 `observations_multi.npz` schema path.
+- Tasked observations are returned as normal `AngularObservation` records and can be emitted through the published tracker observation-ingest JSON contract.
 - Explicit task rejection is returned for unknown sensors, non-host sensors, missing task-window snapshots, unsupported admissible-region execution, invalid time windows, and blackout-window constraint conflicts.
 
 The end-to-end APS tasking-service-to-IOD closure remains part of Sandbox 5. SCRUM-293 provides the sandbox execution boundary needed for that test.
@@ -244,7 +245,7 @@ The following remain outside SCRUM-290 through SCRUM-294:
 * `observations.py` — noisy RA/Dec observation and angular-rate generation
 * `observation_bundle.py` — observation generation across simulation snapshots
 * `sensor_benchmark.py` — deterministic SCRUM-291 sensor acceptance benchmark
-* `schema_emission.py` — tracker-compatible `observations_multi.npz` emission
+* `schema_emission.py` — tracker OpenAPI observation-ingest JSON emission, plus legacy NPZ compatibility writer
 * `sensor_knowledge.py` — sensor-visible observation streams with god-view access blocked
 *  `tasking.py` — re-observation tasking command execution, explicit-boresight detection, and task rejection handling
 * `canonical_scenarios.py` — canonical three-tier IOD scenario definitions and report models
@@ -284,47 +285,20 @@ This creates a deterministic in-FOV, in-range, sunlit target and emits a noisy a
 
 ## Observation schema emission
 
-The sandbox can emit tracker-compatible observation artifacts from detected sensor observations.
+The sandbox emits tracker-compatible observation records from detected sensor
+observations using the published contract in `openapi/tracker.yaml`.
 
-The primary artifact is:
+The default emitted payload is an inline JSON body matching the tracker
+`/v1/observations` observation-ingest request. This is the inter-service
+contract for sandbox-to-tracker observation exchange.
 
-```text
-observations_multi.npz
-```
+Large payloads, if needed, must be referenced by path in the request body per
+the AVERA Data Reader pattern. Payloads must not be base64 encoded.
 
-This file is generated at runtime and should not normally be committed.
-
-The emitted NPZ follows the existing tracker loader contract:
-
-```text
-times_utc
-observer_ids
-target_ids
-obs_observer_idx
-obs_target_idx
-obs_time_idx
-obs_type
-observer_eci_m
-observer_eci_m_s
-obs_ra_rad
-obs_dec_rad
-obs_sigma_ra_arcsec
-obs_sigma_dec_arcsec
-obs_quality
-obs_range_m
-obs_range_rate_m_s
-meta
-```
-
-For TT240-40 optical observations, `obs_type` is `angles`, and unavailable range/range-rate values are emitted as `NaN`.
-
-The emitted artifact is validated by loading it through:
-
-```text
-services/tracker/observation_loader.py
-```
-
-and converting it to tracker `IODObservation` records without a sandbox-specific adapter.
+The legacy `observations_multi.npz` writer remains available for compatibility
+with existing tracker loader and replay tests, but it is not the source of truth
+for the service boundary. New sandbox-to-tracker integration should use
+`openapi/tracker.yaml`.
 
 ## God-view / sensor-knowledge isolation
 
@@ -418,23 +392,24 @@ A committed propagator test initializes a host satellite at 600 km, propagates i
 
 ## IOD compatibility
 
-Committed compatibility tests verify that detected sandbox observations can be emitted to the tracker-compatible `observations_multi.npz` schema and then loaded into the tracker IOD path with:
+Committed contract tests verify that detected sandbox observations can be emitted
+as tracker observation-ingest JSON records matching the published tracker
+contract. The tests verify that:
 
-* timezone-aware timestamps;
-* RA and Dec in radians;
-* angular uncertainties;
-* observer ECI position in kilometres after loader conversion;
-* observer ECI velocity in kilometres per second after loader conversion.
+* emitted records use the tracker-facing `sensor_id`, `target_id`, and
+  `observation_id` fields;
+* optical angle, range, observer-state, and contextual fields are preserved;
+* inline JSON is the default payload shape;
+* god-view fields such as truth state, simulation objects, snapshots, and future
+  debris state are excluded.
 
-The schema-emission tests verify:
+Legacy compatibility tests continue to verify that `observations_multi.npz`
+artifacts load through the existing tracker observation loader and convert to
+tracker `IODObservation` records without sandbox-specific adapter code.
 
-* emitted artifacts load with the tracker observation loader;
-* emitted artifacts convert to tracker `IODObservation` records without sandbox-specific adapter code;
-* the converted observation stream reaches `IODSolver().solve(...)`;
-* same-seed replay produces the same loaded observation stream;
-* different seeds preserve schema identity while changing noisy angles.
-
-Single-observation angular rates are retained in sandbox observations for future partial-tracklet and admissible-region integration, but the current tracker `IODObservation` contract does not consume angular-rate fields directly.
+Single-observation angular rates are retained in sandbox observations for future
+partial-tracklet and admissible-region integration, but the current tracker
+`IODObservation` compatibility path does not consume angular-rate fields directly.
 
 ## Tests
 
