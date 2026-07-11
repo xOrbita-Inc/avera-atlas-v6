@@ -27,7 +27,9 @@ from common.udl_client import (
     _expand_cov_upper_triangle,
     _parse_conjunction,
     _rtn_to_eci_rotation,
+    check_credential_validity,
     get_conjunctions,
+    get_credential_validity,
     get_elsets,
     UDL_ENABLED,
 )
@@ -518,3 +520,164 @@ class TestGetElsets:
 
         lines = [l for l in result.splitlines() if l.strip()]
         assert len(lines) == 6  # 3 lines per record * 2 records
+
+
+# ---------------------------------------------------------------------------
+# SCRUM-363 AC1, AC4, AC5: raw credential probe (check_credential_validity)
+# ---------------------------------------------------------------------------
+
+class TestCheckCredentialValidity:
+    """SCRUM-363: check_credential_validity() makes one live call to
+    /udl/elset/queryhelp and sorts the result into valid/invalid/unreachable.
+    No throttling here -- that is tested separately below."""
+
+    def test_valid_on_200(self):
+        """AC1: 200 OK must report status='valid'."""
+        with patch.dict("os.environ", {"UDL_USER": "u", "UDL_PASS": "p"}):
+            with patch("common.udl_client.requests.get") as mock_get:
+                mock_resp = MagicMock()
+                mock_resp.status_code = 200
+                mock_get.return_value = mock_resp
+                result = check_credential_validity()
+        assert result["status"] == "valid"
+        assert result["http_status"] == 200
+
+    def test_invalid_on_401(self):
+        """AC4: 401 must report status='invalid', not crash or say valid."""
+        with patch.dict("os.environ", {"UDL_USER": "u", "UDL_PASS": "p"}):
+            with patch("common.udl_client.requests.get") as mock_get:
+                mock_resp = MagicMock()
+                mock_resp.status_code = 401
+                mock_get.return_value = mock_resp
+                result = check_credential_validity()
+        assert result["status"] == "invalid"
+        assert result["http_status"] == 401
+
+    def test_invalid_on_403(self):
+        """AC4: 403 must also report status='invalid'."""
+        with patch.dict("os.environ", {"UDL_USER": "u", "UDL_PASS": "p"}):
+            with patch("common.udl_client.requests.get") as mock_get:
+                mock_resp = MagicMock()
+                mock_resp.status_code = 403
+                mock_get.return_value = mock_resp
+                result = check_credential_validity()
+        assert result["status"] == "invalid"
+        assert result["http_status"] == 403
+
+    def test_unreachable_on_network_exception(self):
+        """AC5: a network failure must not raise -- must report 'unreachable'."""
+        with patch.dict("os.environ", {"UDL_USER": "u", "UDL_PASS": "p"}):
+            with patch("common.udl_client.requests.get") as mock_get:
+                mock_get.side_effect = ConnectionError("network down")
+                result = check_credential_validity()
+        assert result["status"] == "unreachable"
+        assert result["http_status"] is None
+
+    def test_unreachable_on_unexpected_status(self):
+        """AC5: an unexpected status (e.g. 500) must report 'unreachable',
+        not 'invalid' -- a server error is not a credentials problem."""
+        with patch.dict("os.environ", {"UDL_USER": "u", "UDL_PASS": "p"}):
+            with patch("common.udl_client.requests.get") as mock_get:
+                mock_resp = MagicMock()
+                mock_resp.status_code = 500
+                mock_get.return_value = mock_resp
+                result = check_credential_validity()
+        assert result["status"] == "unreachable"
+        assert result["http_status"] == 500
+
+    def test_invalid_when_credentials_missing(self):
+        """If UDL_USER/UDL_PASS are absent, no network call should even be
+        attempted -- report 'invalid' immediately."""
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("UDL_USER", "UDL_PASS")}
+        with patch.dict("os.environ", env, clear=True):
+            with patch("common.udl_client.requests.get") as mock_get:
+                result = check_credential_validity()
+        assert result["status"] == "invalid"
+        mock_get.assert_not_called()
+
+    def test_checked_at_utc_present_and_is_string(self):
+        """Every result, regardless of outcome, must include a timestamp."""
+        with patch.dict("os.environ", {"UDL_USER": "u", "UDL_PASS": "p"}):
+            with patch("common.udl_client.requests.get") as mock_get:
+                mock_resp = MagicMock()
+                mock_resp.status_code = 200
+                mock_get.return_value = mock_resp
+                result = check_credential_validity()
+        assert isinstance(result["checked_at_utc"], str)
+        assert result["checked_at_utc"].endswith("Z")
+
+
+# ---------------------------------------------------------------------------
+# SCRUM-363 AC2: throttled wrapper (get_credential_validity)
+# ---------------------------------------------------------------------------
+
+class TestGetCredentialValidity:
+    """SCRUM-363 AC2: get_credential_validity() must cache the result and
+    only call UDL again after _PROBE_INTERVAL_SECONDS has elapsed.
+
+    Each test resets the module-level cache state first (_last_probe_result,
+    _last_probe_monotonic) so tests do not leak state into each other --
+    matches how UDL_ENABLED is patched per-test elsewhere in this file.
+    """
+
+    def test_first_call_runs_live_probe(self):
+        """With no prior cached result, the first call must probe live."""
+        with patch("common.udl_client._last_probe_result", None):
+            with patch("common.udl_client._last_probe_monotonic", None):
+                with patch("common.udl_client.check_credential_validity") as mock_probe:
+                    mock_probe.return_value = {
+                        "status": "valid",
+                        "http_status": 200,
+                        "checked_at_utc": "2026-07-03T00:00:00Z",
+                    }
+                    result = get_credential_validity()
+        mock_probe.assert_called_once()
+        assert result["status"] == "valid"
+
+    def test_second_call_within_interval_uses_cache(self):
+        """AC2: a call before the throttle interval elapses must reuse the
+        cached result and NOT call UDL again."""
+        with patch("common.udl_client._last_probe_result", None):
+            with patch("common.udl_client._last_probe_monotonic", None):
+                with patch("common.udl_client._PROBE_INTERVAL_SECONDS", 100):
+                    with patch("common.udl_client.time.monotonic", side_effect=[0.0, 30.0]):
+                        with patch("common.udl_client.check_credential_validity") as mock_probe:
+                            mock_probe.return_value = {
+                                "status": "valid",
+                                "http_status": 200,
+                                "checked_at_utc": "2026-07-03T00:00:00Z",
+                            }
+                            first = get_credential_validity()
+                            second = get_credential_validity()
+        mock_probe.assert_called_once()  # only the first call hit UDL
+        assert first == second
+
+    def test_call_after_interval_runs_new_probe(self):
+        """AC2: a call after the throttle interval elapses must probe live
+        again, not reuse the old cached result."""
+        with patch("common.udl_client._last_probe_result", None):
+            with patch("common.udl_client._last_probe_monotonic", None):
+                with patch("common.udl_client._PROBE_INTERVAL_SECONDS", 100):
+                    with patch("common.udl_client.time.monotonic", side_effect=[0.0, 150.0]):
+                        with patch("common.udl_client.check_credential_validity") as mock_probe:
+                            mock_probe.side_effect = [
+                                {"status": "valid", "http_status": 200, "checked_at_utc": "T1"},
+                                {"status": "invalid", "http_status": 401, "checked_at_utc": "T2"},
+                            ]
+                            first = get_credential_validity()
+                            second = get_credential_validity()
+        assert mock_probe.call_count == 2  # both calls hit UDL, interval elapsed
+        assert first["checked_at_utc"] == "T1"
+        assert second["checked_at_utc"] == "T2"
+
+    def test_probe_failure_does_not_raise(self):
+        """AC5: even if check_credential_validity somehow raises, callers of
+        /udl-status must not see an unhandled exception. This test documents
+        that check_credential_validity itself is the safety boundary --
+        server.py additionally wraps its own call in try/except."""
+        with patch.dict("os.environ", {"UDL_USER": "u", "UDL_PASS": "p"}):
+            with patch("common.udl_client.requests.get") as mock_get:
+                mock_get.side_effect = TimeoutError("UDL did not respond")
+                result = check_credential_validity()
+        assert result["status"] == "unreachable"

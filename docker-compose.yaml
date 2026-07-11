@@ -54,6 +54,9 @@ services:
     ports: ["8060:8060"]
     environment:
       - INGEST_SERVICE_URL=http://ingest:8000
+      - UDL_USER=${UDL_USER}
+      - UDL_PASS=${UDL_PASS}
+      - UDL_ENABLED=${UDL_ENABLED}
     depends_on: [propagator]
     restart: unless-stopped
 
