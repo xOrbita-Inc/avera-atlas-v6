@@ -1,50 +1,59 @@
 openapi: 3.0.3
 info:
   title: AVERA Tracker API
+  version: 0.1.0
   description: |
     Published tracker contract for observation ingest and initial orbit
-    determination (IOD) triggering.
+    determination triggering.
 
-    **Position in the xOrbita stack**
-    - Upstream: Sandbox / sensor-model services emit sensor-agnostic
-      observation records.
+    This contract is the target schema for sandbox-to-tracker observation
+    exchange in SCRUM-362. The tracker does not yet serve these endpoints in
+    the live service; endpoint implementation, `/detections` reconciliation,
+    sandbox live-call migration, and the remaining CONOPS 6.3 collapse are
+    tracked separately in SCRUM-373.
+
+    **Service ownership**
+
+    - Upstream: Sandbox and sensor-model services emit sensor-facing
+      observations.
     - Downstream: Tracker owns observation ingest, observation persistence,
       and IOD job triggering.
 
     **Contract source of truth**
-    This OpenAPI document is the managed source of truth for sandbox-to-tracker
-    observation exchange. It reconciles CONOPS 6.3, Tylen's common observation
-    schema, and the previous sandbox NPZ REQUIRED_FIELDS into one published
-    inter-service contract.
+
+    This spec reconciles the CONOPS 6.3 observation description, Tylen's common
+    observation schema, and the previous sandbox NPZ REQUIRED_FIELDS into one
+    published inter-service target contract.
 
     **Payload convention**
+
     Observation records are small and should normally be sent inline as JSON.
-    Large payloads, when needed, are passed by path reference in the request
-    body per the AVERA Data Reader pattern. Do not base64 encode payloads.
+    Large artifacts, when genuinely needed, must be passed by path reference in
+    the request body per the AVERA Data Reader pattern. Do not base64 encode
+    payloads.
 
     **Sensor-knowledge isolation**
-    Observation records must not include truth state, future debris state,
+
+    Observation records are sensor-facing records only. They must not include
+    truth state, future debris state, simulation objects, snapshots,
     scenario-only placement information, or other god-view fields. Optical
-    observations carry angles, optional range/range-rate fields when available,
-    observer state, and optional contextual metadata.
-  contact:
-    name: xOrbita APS Team
-  version: 0.1.0
+    records carry measured angles, optional range information, observer state,
+    and optional contextual metadata.
 
 servers:
-- url: http://localhost:8070
-  description: Local / Jetson dev
-- url: http://tracker:8070
-  description: Docker Compose service name
+  - url: http://localhost:8070
+    description: Local tracker service
+  - url: http://tracker:8070
+    description: Docker-network tracker service
 
 paths:
   /health:
     get:
-      summary: Liveness probe
+      summary: Tracker health check
       operationId: trackerHealthCheck
       responses:
         "200":
-          description: Service is healthy
+          description: Tracker is healthy.
           content:
             application/json:
               schema:
@@ -52,11 +61,13 @@ paths:
 
   /v1/observations:
     post:
-      summary: Ingest observation records
+      summary: Ingest sensor-facing observations
       description: |
-        Ingests sensor-agnostic observation records into tracker. Inline JSON is
-        the default path because observation records are small. A file payload
-        reference may be supplied only for genuinely large payloads.
+        Ingest one or more sensor-facing observation records into tracker.
+
+        Observation records are normally sent inline as JSON. Large payloads may
+        be referenced by path using `payload_ref`. Callers should not use
+        private NPZ/library loader paths as the inter-service contract.
       operationId: ingestObservations
       requestBody:
         required: true
@@ -66,13 +77,13 @@ paths:
               $ref: "#/components/schemas/ObservationIngestRequest"
       responses:
         "202":
-          description: Observation ingest accepted
+          description: Observation records accepted for tracker ingest.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ObservationIngestResponse"
-        "422":
-          description: Validation error
+        "400":
+          description: Invalid observation ingest request.
           content:
             application/json:
               schema:
@@ -82,10 +93,12 @@ paths:
     post:
       summary: Trigger initial orbit determination
       description: |
-        Triggers an IOD job from observation records already provided inline or
-        previously ingested into tracker. Tracker owns the IOD trigger boundary;
-        callers should not invoke private NPZ/library loader paths as the
-        inter-service contract.
+        Trigger an initial orbit determination job using previously ingested
+        observation IDs or inline observations that conform to this contract.
+
+        The tracker validates required measurement-field presence by sensor
+        type before IOD. For optical angle observations, the tracker requires
+        angle fields plus observer state before IOD processing.
       operationId: triggerInitialOrbitDetermination
       requestBody:
         required: true
@@ -95,13 +108,13 @@ paths:
               $ref: "#/components/schemas/IodTriggerRequest"
       responses:
         "202":
-          description: IOD job accepted
+          description: IOD job accepted.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/IodTriggerResponse"
-        "422":
-          description: Validation error
+        "400":
+          description: Invalid IOD trigger request.
           content:
             application/json:
               schema:
@@ -112,8 +125,11 @@ components:
     ObservationIngestRequest:
       type: object
       description: |
-        Request body for tracker observation ingest. Send observation records
-        inline by default. Use payload_ref only for genuinely large payloads.
+        Observation ingest request.
+
+        Use `observations` for the normal inline JSON path. Use `payload_ref`
+        only for genuinely large artifacts passed by path reference. Do not use
+        base64 payloads or private file formats as the service contract.
       properties:
         observations:
           type: array
@@ -121,128 +137,137 @@ components:
           items:
             $ref: "#/components/schemas/ObservationRecord"
         payload_ref:
-          nullable: true
-          allOf:
-          - $ref: "#/components/schemas/FilePayloadReference"
+          $ref: "#/components/schemas/FilePayloadReference"
       anyOf:
-      - required:
-        - observations
-      - required:
-        - payload_ref
+        - required:
+            - observations
+        - required:
+            - payload_ref
+      additionalProperties: false
 
     FilePayloadReference:
       type: object
       description: |
-        Path reference to a large payload managed outside the API body per the
-        AVERA Data Reader pattern. Do not use base64 payloads.
+        Path reference for a large observation payload following the AVERA Data
+        Reader pattern. The receiving service retrieves the file from the
+        referenced path. Do not use base64 payloads.
       required:
-      - path
-      - format
+        - path
+        - format
       properties:
         path:
           type: string
-          description: Runtime-readable path to the payload.
-          example: /data/sandbox/observations/scenario_b_observations.jsonl
+          description: Path or URI to the payload artifact.
+          example: artifacts/sandbox/observations/run_001.jsonl
         format:
           type: string
-          description: Referenced payload format.
+          description: Published payload encoding.
           enum:
-          - json
-          - jsonl
+            - json
+            - jsonl
         sha256:
           type: string
           nullable: true
-          description: Optional checksum for payload integrity.
+          description: Optional SHA-256 digest for payload integrity checks.
+      additionalProperties: false
 
     ObservationRecord:
       type: object
       description: |
-        Sensor-agnostic observation record. Optical observations carry angles
-        plus observer state. Contextual fields are optional. Truth/god-view
-        fields are intentionally excluded.
+        Sensor-facing observation record used by tracker observation ingest and
+        IOD triggering. This record intentionally excludes truth state, future
+        debris state, simulation objects, snapshots, and other god-view fields.
+
+        Units are explicit in field names. Range fields use kilometers
+        (`range_km`, `range_rate_km_s`), while observer ECI state uses meters
+        (`observer_eci_m`, `observer_eci_m_s`) to match upstream spacecraft-state
+        conventions. Clients must not assume a single unit system across the
+        record.
+
+        Measurement fields are optional at the schema level so the same record
+        can support multiple sensor types. Tracker validates required
+        measurement-field presence by `sensor_mode` or registered sensor type
+        before IOD. For optical angle observations, tracker validation requires
+        RA/Dec angle fields plus observer state before IOD processing.
+
+        The canonical temporal field is `timestamp_utc`. `t_seconds` is optional
+        sandbox-relative convenience metadata and must not be treated as the
+        canonical time field for real sensor integrations.
       required:
-      - observation_id
-      - sensor_id
-      - target_id
-      - t_seconds
-      - detected
+        - observation_id
+        - sensor_id
+        - target_id
+        - timestamp_utc
+        - detected
       properties:
         observation_id:
           type: string
-          description: Unique observation identifier.
-          example: obs-host_001-debris_001-000001
+          description: Stable observation identifier assigned by the emitter.
+          example: obs-host_001-debris_001-000000000000-000000
         sensor_id:
           type: string
-          description: Sensor or observing host identifier.
+          description: Sensor or host identifier that produced the observation.
           example: host_001
         target_id:
           type: string
-          description: Observed target/debris identifier.
+          description: Observed target identifier when known by the sensor pipeline.
           example: debris_001
-        t_seconds:
-          type: number
-          format: double
-          description: Scenario-relative observation timestamp in seconds.
-          example: 10.0
         timestamp_utc:
           type: string
           format: date-time
+          description: Canonical observation timestamp in UTC. Real sensor integrations must provide this field.
+          example: "2026-01-01T00:00:00Z"
+        t_seconds:
+          type: number
           nullable: true
-          description: Optional UTC timestamp when available.
-          example: 2026-04-01T14:32:00Z
+          description: Optional sandbox-relative time in seconds. This is a sandbox convenience field and is not the canonical temporal field for real sensor integrations.
+          example: 0.0
         detected:
           type: boolean
-          description: Whether the target passed sensor gating and produced a usable observation.
+          description: Whether the sensor produced a valid detection.
         reason:
           type: string
           nullable: true
-          description: Detection or rejection reason.
+          description: Optional detection or rejection reason.
+          example: detected
 
         ra_rad:
           type: number
-          format: double
           nullable: true
-          description: Right ascension angle in radians.
+          description: Right ascension measurement in radians.
         dec_rad:
           type: number
-          format: double
           nullable: true
-          description: Declination angle in radians.
+          description: Declination measurement in radians.
         ra_sigma_rad:
           type: number
-          format: double
           nullable: true
-          description: One-sigma RA uncertainty in radians.
+          description: One-sigma right ascension uncertainty in radians.
         dec_sigma_rad:
           type: number
-          format: double
           nullable: true
           description: One-sigma declination uncertainty in radians.
         ra_rate_rad_s:
           type: number
-          format: double
           nullable: true
-          description: Optional RA rate in radians per second.
+          description: Optional right ascension angular rate in radians per second.
         dec_rate_rad_s:
           type: number
-          format: double
           nullable: true
-          description: Optional declination rate in radians per second.
+          description: Optional declination angular rate in radians per second.
+
         range_km:
           type: number
-          format: double
           nullable: true
-          description: Optional sensor-to-target range in kilometers.
+          description: Optional range measurement in kilometers.
         range_sigma_km:
           type: number
-          format: double
           nullable: true
           description: Optional one-sigma range uncertainty in kilometers.
         range_rate_km_s:
           type: number
-          format: double
           nullable: true
-          description: Optional sensor-to-target range rate in kilometers per second.
+          description: Optional range-rate measurement in kilometers per second.
 
         observer_eci_m:
           type: array
@@ -252,7 +277,6 @@ components:
           maxItems: 3
           items:
             type: number
-            format: double
         observer_eci_m_s:
           type: array
           nullable: true
@@ -261,52 +285,59 @@ components:
           maxItems: 3
           items:
             type: number
-            format: double
 
         off_boresight_deg:
           type: number
-          format: double
           nullable: true
           description: Optional off-boresight angle in degrees.
         sunlit:
           type: boolean
           nullable: true
-          description: Whether the target was sunlit at observation time.
+          description: Optional target illumination flag.
         earth_limb_blocked:
           type: boolean
           nullable: true
-          description: Whether the line of sight was blocked by Earth limb geometry.
+          description: Optional Earth-limb blockage flag.
         sensor_mode:
           type: string
           nullable: true
-          description: Optional sensor mode label.
-          example: neuromorphic_event
+          description: Optional sensor mode or registered sensor type used by tracker validation.
+          example: optical_angles
         source:
           type: string
           nullable: true
-          description: Optional producer label for audit/debugging.
+          description: Optional emitter source label.
           example: sandbox
+      additionalProperties: false
 
     ObservationIngestResponse:
       type: object
       required:
-      - accepted
-      - observation_count
-      - ingest_id
+        - accepted
+        - observation_count
+        - observation_ids
       properties:
         accepted:
           type: boolean
-          example: true
+          description: Whether tracker accepted the ingest request.
         observation_count:
           type: integer
-          example: 12
-        ingest_id:
-          type: string
-          example: ingest-2026-0401-0001
+          minimum: 0
+          description: Number of observations accepted.
+        observation_ids:
+          type: array
+          description: Accepted observation identifiers.
+          items:
+            type: string
+      additionalProperties: false
 
     IodTriggerRequest:
       type: object
-      description: Trigger an IOD job using inline records or previously ingested observation identifiers.
+      description: |
+        Request to trigger initial orbit determination.
+
+        Callers may reference observations already ingested by tracker, or pass
+        inline observations conforming to `ObservationRecord`.
       properties:
         observation_ids:
           type: array
@@ -320,53 +351,53 @@ components:
             $ref: "#/components/schemas/ObservationRecord"
         solver:
           type: string
-          description: Requested IOD solver family.
-          default: range+angles
+          nullable: true
+          description: Optional solver hint.
           enum:
-          - range+angles
-          - angles-only
+            - range+angles
+            - angles-only
       anyOf:
-      - required:
-        - observation_ids
-      - required:
-        - observations
+        - required:
+            - observation_ids
+        - required:
+            - observations
+      additionalProperties: false
 
     IodTriggerResponse:
       type: object
       required:
-      - accepted
-      - job_id
+        - accepted
+        - iod_job_id
       properties:
         accepted:
           type: boolean
-          example: true
-        job_id:
+          description: Whether the IOD job was accepted.
+        iod_job_id:
           type: string
-          example: iod-2026-0401-0001
-        observation_count:
-          type: integer
-          example: 4
-        solver:
+          description: Tracker-assigned IOD job identifier.
+        status:
           type: string
-          example: range+angles
+          nullable: true
+          description: Optional job status.
+          example: queued
+      additionalProperties: false
 
     HealthResponse:
       type: object
+      required:
+        - status
       properties:
         status:
           type: string
           example: ok
-        version:
-          type: string
-          example: 0.1.0
+      additionalProperties: false
 
     ErrorResponse:
       type: object
+      required:
+        - error
       properties:
         error:
           type: string
           description: Human-readable error message.
-          example: observations must contain at least one record
-        detail:
-          type: object
-          description: Machine-readable validation detail.
+      additionalProperties: false

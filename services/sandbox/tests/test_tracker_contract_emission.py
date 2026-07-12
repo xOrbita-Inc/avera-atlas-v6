@@ -64,6 +64,10 @@ def test_tracker_contract_emits_inline_json_observation_records() -> None:
     assert record["detected"] is True
     assert record["source"] == "sandbox"
 
+    assert record["timestamp_utc"] is not None
+    assert record["timestamp_utc"].endswith("Z")
+    assert record["t_seconds"] == 0.0
+
     assert record["ra_rad"] is not None
     assert record["dec_rad"] is not None
     assert record["ra_sigma_rad"] is not None
@@ -103,6 +107,7 @@ def test_tracker_contract_writer_outputs_json_body(tmp_path) -> None:
     assert "observations" in payload
     assert "payload_ref" not in payload
     assert payload["observations"][0]["sensor_id"] == "host_001"
+    assert payload["observations"][0]["timestamp_utc"].endswith("Z")
 
 
 def test_tracker_contract_rejects_empty_detection_stream() -> None:
