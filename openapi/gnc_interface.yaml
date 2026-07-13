@@ -1,0 +1,872 @@
+openapi: 3.0.3
+info:
+  title: AVERA-ATLAS APS → GNC Interface Contract
+  description: |
+    Interface contract between the APS Planner and the GNC execution layer
+    for autonomous collision avoidance.
+
+    **Position in the xOrbita stack**
+    - Upstream: APS Planner (planner.yaml v2.5.2) issues GNCCommand after
+      maneuver scoring and validity gate passage.
+    - Downstream: GNC execution layer performs the avoidance burn and returns
+      GNCReport to APS for post-burn covariance re-evaluation.
+    - Operator interface: ARBITER dashboard issues GNCApprovalCommand (L1)
+      or GNCVetoCommand (L2) during the authority window.
+
+    **Authority levels in scope**
+    - L0: Advisory only. No GNC command issued.
+    - L1: GNC stages burn and waits for GNCApprovalCommand before executing.
+    - L2: GNC stages burn and auto-executes at veto_window_close_utc unless
+      GNCVetoCommand is received.
+    - L3: Defined in MAF but gated to a later phase. Not in scope here.
+
+    **Unit conventions (consistent with planner.yaml and ingest.yaml)**
+    - Positions: km (ECI)
+    - Velocities: km/s (ECI)
+    - Delta-v magnitudes: m/s
+    - Burn vectors: m/s (RTN frame unless noted)
+    - Covariance: km², 3x3 symmetric row-major flat 9-element array (ECI)
+    - Angles: degrees
+    - Times: UTC, ISO-8601
+    - Durations: seconds
+
+    **Frame conventions**
+    - RTN (Radial, Transverse, Normal) for burn vectors and validity directions.
+      R = r/|r|, N = (r x v)/|r x v|, T = N x R.
+    - ECI for state vectors and covariance matrices.
+    - RTN-to-ECI rotation is GNC's responsibility using r_sat_km / v_sat_km_s
+      at burn time, consistent with planner.yaml convention.
+
+    **Timing constraint**
+    Burn must execute no later than min_hours_before_tca = 4.0 hrs from TCA,
+    per operator_policy_leo.yaml. latest_burn_utc in TimingBudget enforces this.
+
+    **Veto window formula**
+    t_veto = max(t_review, t_slew + t_settle + t_margin)
+    Placeholders: t_review = 300s, t_slew + t_settle = 120s (OPEN ASSUMPTION —
+    representative small-sat ADCS; real value is a per-deployment bus input),
+    t_margin = 30s.
+
+    **Execution error**
+    APS 2.5 does not model execution error (execution_error_modelled: false
+    in PostManeuverProjection). GNCReport.execution_error and
+    PostBurnState.p_post_km2 are the inputs that close APS 3.0 gaps 6.3
+    (covariance propagation), 6.4 (execution error modeling), and 6.5
+    (Mahalanobis calibration).
+
+    **Scope**
+    This contract governs collision avoidance maneuvers only. The GNC layer
+    commands nothing other than the avoidance burn. Station-keeping and all
+    other subsystems remain with the operator's own flight software.
+
+    **MAF reference**
+    Model Authority Framework v1.0, SCRUM-360. This contract implements §9.
+    SCRUM-333 deliverable.
+
+  contact:
+    name: xOrbita APS Team
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:8070
+    description: Local / Jetson dev
+  - url: http://gnc:8070
+    description: Docker Compose service name
+
+paths:
+
+  /health:
+    get:
+      summary: Liveness probe
+      operationId: healthCheck
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /v1/gnc/command:
+    post:
+      summary: Issue an avoidance burn command to the GNC layer
+      description: |
+        Called by the APS Planner after maneuver scoring and validity gate
+        passage. Delivers the full GNCCommand including authority level,
+        envelope version, validity verdict, risk inputs, maneuver spec,
+        safe action reference, and timing budget.
+
+        GNC must respond immediately with GNCCommandAck confirming receipt
+        and current flight mode. The burn is not triggered by this call —
+        it is triggered by GNCApprovalCommand (L1) or by veto window expiry
+        (L2).
+
+        If the command cannot be accepted (slew infeasible, envelope mismatch,
+        validity NOT_EARNED), GNC rejects and transitions to M4.
+      operationId: issueGNCCommand
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GNCCommand"
+      responses:
+        "200":
+          description: Command received and acknowledged
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GNCCommandAck"
+        "422":
+          description: Validation error — malformed command
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Command rejected — GNC in incompatible flight mode
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/gnc/approve:
+    post:
+      summary: Operator approval for a staged burn (L1 only)
+      description: |
+        Called by ARBITER when the operator issues "Take authority" for a
+        staged L1 command. GNC must respond with GNCApprovalAck confirming
+        whether the approval can be honoured.
+
+        approval_accepted is false if the TCA window has closed or slew
+        is no longer feasible — GNC transitions to M4 in that case.
+      operationId: approveGNCCommand
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GNCApprovalCommand"
+      responses:
+        "200":
+          description: Approval acknowledgement
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GNCApprovalAck"
+        "422":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/gnc/veto:
+    post:
+      summary: Operator veto of a committed L2 burn
+      description: |
+        Called by ARBITER when the operator vetoes an L2 burn during the
+        veto window. GNC must respond with GNCVetoAck immediately.
+
+        If the veto arrives after veto_window_close_utc, veto_accepted is
+        false and the burn proceeds. GNC notifies APS via late_veto_note
+        in the ack.
+      operationId: vetoGNCCommand
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GNCVetoCommand"
+      responses:
+        "200":
+          description: Veto acknowledgement
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GNCVetoAck"
+        "422":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/gnc/report:
+    post:
+      summary: Post-burn execution report from GNC to APS
+      description: |
+        Called by GNC after burn execution (NOMINAL, PARTIAL, or ABORTED).
+        APS uses this report to:
+        1. Update post-burn covariance via P_post = P_pre + P_burn (APS 3.0 gap 6.3).
+        2. Recompute Mahalanobis distance and Pc from post_burn_state (gap 6.5).
+        3. Determine whether a replan is required.
+        4. Write the evidence package audit record (MAF §10).
+
+        Must be sent within execution_timeout_s of burn_time_utc regardless
+        of execution_status.
+      operationId: receiveGNCReport
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GNCReport"
+      responses:
+        "201":
+          description: Report received and recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GNCReportAck"
+        "422":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  schemas:
+
+    # -------------------------------------------------------------------------
+    # TOP-LEVEL COMMAND
+    # -------------------------------------------------------------------------
+
+    GNCCommand:
+      type: object
+      required:
+        - command_id
+        - conjunction_id
+        - authority_level
+        - envelope_version
+        - approving_identity
+        - validity
+        - risk
+        - maneuver
+        - safe_action
+        - timing
+      properties:
+        command_id:
+          type: string
+          description: Unique identifier for this GNC command instance
+          example: "gnc-cmd-2026-0401-001"
+        conjunction_id:
+          type: string
+          description: References the conjunction event from the planner
+          example: "conj-2026-0302-001"
+        authority_level:
+          type: string
+          enum: [L0, L1, L2]
+          description: Authority level under which this command is issued
+        envelope_version:
+          type: string
+          description: Cryptographic version identifier of the active authorization envelope
+          example: "env-v1.2-sha256-abc123"
+        approving_identity:
+          type: string
+          description: Identity that approved or signed the envelope
+          example: "operator:xorb-ops-001"
+        validity:
+          $ref: "#/components/schemas/ValidityVerdict"
+        risk:
+          $ref: "#/components/schemas/RiskInputs"
+        maneuver:
+          $ref: "#/components/schemas/ManeuverSpec"
+        safe_action:
+          $ref: "#/components/schemas/SafeActionRef"
+        timing:
+          $ref: "#/components/schemas/TimingBudget"
+
+    GNCCommandAck:
+      type: object
+      required:
+        - command_id
+        - conjunction_id
+        - accepted
+        - flight_mode_after
+        - ack_time_utc
+      properties:
+        command_id:
+          type: string
+          example: "gnc-cmd-2026-0401-001"
+        conjunction_id:
+          type: string
+          example: "conj-2026-0302-001"
+        accepted:
+          type: boolean
+          description: >
+            True if GNC accepted the command and transitioned to M2.
+            False if rejected — GNC transitions to M4.
+        flight_mode_after:
+          type: string
+          enum: [M2, M4]
+        ack_time_utc:
+          type: string
+          format: date-time
+        rejection_note:
+          type: string
+          nullable: true
+          description: Present only when accepted is false. Reason for rejection.
+
+    # -------------------------------------------------------------------------
+    # COMMAND SUB-SCHEMAS
+    # -------------------------------------------------------------------------
+
+    ValidityVerdict:
+      type: object
+      required:
+        - status
+        - epsilon
+        - epsilon_threshold
+      properties:
+        status:
+          type: string
+          enum: [EARNED, NOT_EARNED]
+          description: Whether the Pc was earned by observation geometry
+        epsilon:
+          type: number
+          description: >
+            Condition number of the observability Gramian projected onto the
+            conjunction plane. epsilon = lambda_min(W_CP) / lambda_max(W_CP).
+          example: 0.73
+        epsilon_threshold:
+          type: number
+          description: Per-regime minimum epsilon for EARNED status
+          example: 0.30
+        weak_directions:
+          type: array
+          items:
+            type: string
+            enum: [radial, transverse, normal]
+          description: RTN directions where observability was poor
+          example: ["normal"]
+        phenomenologies_used:
+          type: array
+          items:
+            type: string
+            enum: [optical, RF, LIDAR, TLE]
+          description: Sensor phenomenologies that contributed to the validity assessment
+
+    RiskInputs:
+      type: object
+      required:
+        - pc_computed
+        - m2_pre
+        - covariance_source
+        - data_age_s
+      properties:
+        pc_computed:
+          type: number
+          description: Collision probability as computed by APS
+          example: 0.000312
+        m2_pre:
+          type: number
+          description: Pre-maneuver Mahalanobis distance squared
+          example: 3.42
+        covariance_source:
+          type: string
+          enum: [real_cdm, surrogate_identity]
+          description: >
+            Provenance of the covariance. Matches CovarianceSourceEnum in
+            ingest.yaml. GNC must not act on surrogate_identity covariance
+            at L2 without operator awareness.
+        data_age_s:
+          type: number
+          description: Age of the CDM data at command issue time in seconds
+          example: 3600.0
+        pc_space_track:
+          type: number
+          nullable: true
+          description: >
+            Space-Track published Pc if available in the source CDM.
+            Null if not provided. Not the APS-computed Pc.
+          example: 0.000280
+
+    ManeuverSpec:
+      type: object
+      required:
+        - direction
+        - dv_rtn_m_s
+        - dv_magnitude_m_s
+        - burn_time_utc
+        - burn_duration_s
+      properties:
+        direction:
+          type: string
+          enum: [prograde, retrograde, radial, anti_radial, cross_track, anti_cross_track]
+          description: Named burn direction from APS scoring
+        dv_rtn_m_s:
+          maxItems: 3
+          minItems: 3
+          type: array
+          items:
+            type: number
+          description: "Burn vector in RTN frame [dv_R, dv_T, dv_N] (m/s)"
+          example: [0.0, 0.15, 0.0]
+        dv_magnitude_m_s:
+          type: number
+          description: Commanded delta-v magnitude (m/s)
+          example: 0.15
+        burn_time_utc:
+          type: string
+          format: date-time
+          description: Scheduled burn execution time (UTC, ISO-8601)
+          example: "2026-04-01T14:00:00Z"
+        burn_duration_s:
+          type: number
+          description: >
+            Expected burn duration in seconds, derived from power-constrained
+            thrust model: t_burn = dv * m / F = dv * m * Isp * g0 / (2 * eta * P).
+          example: 12.4
+        dv_return_m_s:
+          type: number
+          description: Return burn cost if applicable (m/s). 0.0 if not required.
+          example: 0.0
+
+    SafeActionRef:
+      type: object
+      required:
+        - safe_action_id
+        - safe_action_type
+      properties:
+        safe_action_id:
+          type: string
+          description: >
+            Identifier of the pre-verified safe action stored onboard.
+            Computed and validated on the ground in advance. GNC falls back
+            to this when the monitor cannot certify a fresh solution.
+          example: "safe-act-leo-001"
+        safe_action_type:
+          type: string
+          enum: [canned_nudge, passive_hold]
+          description: >
+            canned_nudge — a pre-computed avoidance burn validated on the ground.
+            passive_hold — staying put is provably safe for this event class.
+        safe_action_dv_m_s:
+          type: number
+          nullable: true
+          description: Delta-v of the canned nudge (m/s). Null for passive_hold.
+          example: 0.05
+
+    TimingBudget:
+      type: object
+      required:
+        - command_issued_utc
+        - veto_window_open_utc
+        - veto_window_close_utc
+        - latest_burn_utc
+        - t_ca_utc
+      properties:
+        command_issued_utc:
+          type: string
+          format: date-time
+          description: Time this command was issued by APS (UTC, ISO-8601)
+        veto_window_open_utc:
+          type: string
+          format: date-time
+          description: Time the veto window opens (L2 only)
+        veto_window_close_utc:
+          type: string
+          format: date-time
+          description: >
+            Time the veto window closes and auto-execute triggers (L2 only).
+            Derived as: latest_burn_utc - max(t_review, t_slew + t_settle + t_margin).
+            Placeholders: t_review = 300s, t_slew + t_settle = 120s
+            (OPEN ASSUMPTION — representative small-sat ADCS; real value is a
+            per-deployment bus input from operator profile), t_margin = 30s.
+        latest_burn_utc:
+          type: string
+          format: date-time
+          description: >
+            Latest acceptable burn ignition time. Enforces
+            min_hours_before_tca = 4.0 hrs from operator_policy_leo.yaml.
+        t_ca_utc:
+          type: string
+          format: date-time
+          description: Time of closest approach (UTC, ISO-8601)
+        t_slew_s:
+          type: number
+          description: >
+            Attitude slew and settle time budget in seconds.
+            OPEN ASSUMPTION — 120s placeholder until bus spec confirmed
+            (Blackwing or operator-supplied per-deployment input).
+          example: 120.0
+        t_margin_s:
+          type: number
+          description: Safety margin buffer in seconds
+          example: 30.0
+        execution_timeout_s:
+          type: number
+          description: >
+            Watchdog duration. GNC must send GNCReport within this window
+            of burn_time_utc regardless of execution_status.
+          example: 60.0
+
+    # -------------------------------------------------------------------------
+    # APPROVAL HANDSHAKE (L1)
+    # -------------------------------------------------------------------------
+
+    GNCApprovalCommand:
+      type: object
+      required:
+        - command_id
+        - conjunction_id
+        - issued_by
+        - issued_at_utc
+      properties:
+        command_id:
+          type: string
+          description: References the GNCCommand being approved
+          example: "gnc-cmd-2026-0401-001"
+        conjunction_id:
+          type: string
+          example: "conj-2026-0302-001"
+        issued_by:
+          type: string
+          description: Operator identity issuing approval via ARBITER "Take authority"
+          example: "operator:xorb-ops-001"
+        issued_at_utc:
+          type: string
+          format: date-time
+          description: Time approval was issued (UTC, ISO-8601)
+
+    GNCApprovalAck:
+      type: object
+      required:
+        - command_id
+        - conjunction_id
+        - approval_accepted
+        - flight_mode_after
+        - ack_time_utc
+      properties:
+        command_id:
+          type: string
+          example: "gnc-cmd-2026-0401-001"
+        conjunction_id:
+          type: string
+          example: "conj-2026-0302-001"
+        approval_accepted:
+          type: boolean
+          description: >
+            True if approval arrived while event is still valid and timing
+            budget is feasible. GNC transitions to M3.
+            False if TCA window has closed or slew is no longer feasible.
+            GNC transitions to M4.
+        flight_mode_after:
+          type: string
+          enum: [M3, M4]
+        ack_time_utc:
+          type: string
+          format: date-time
+        rejection_note:
+          type: string
+          nullable: true
+          description: Present only when approval_accepted is false.
+
+    # -------------------------------------------------------------------------
+    # VETO HANDSHAKE (L2)
+    # -------------------------------------------------------------------------
+
+    GNCVetoCommand:
+      type: object
+      required:
+        - command_id
+        - conjunction_id
+        - issued_by
+        - issued_at_utc
+      properties:
+        command_id:
+          type: string
+          description: References the GNCCommand being vetoed
+          example: "gnc-cmd-2026-0401-001"
+        conjunction_id:
+          type: string
+          example: "conj-2026-0302-001"
+        issued_by:
+          type: string
+          description: Operator identity issuing the veto via ARBITER
+          example: "operator:xorb-ops-001"
+        issued_at_utc:
+          type: string
+          format: date-time
+          description: Time veto was issued (UTC, ISO-8601)
+        reason:
+          type: string
+          nullable: true
+          description: Optional operator-supplied reason
+          example: "Operator override — updated CDM received"
+
+    GNCVetoAck:
+      type: object
+      required:
+        - command_id
+        - conjunction_id
+        - veto_accepted
+        - flight_mode_after
+        - ack_time_utc
+      properties:
+        command_id:
+          type: string
+          example: "gnc-cmd-2026-0401-001"
+        conjunction_id:
+          type: string
+          example: "conj-2026-0302-001"
+        veto_accepted:
+          type: boolean
+          description: >
+            True if veto arrived inside the veto window and was actioned.
+            GNC cancels the burn and transitions to M2 or M4.
+            False if veto arrived after veto_window_close_utc — burn already
+            committed, veto cannot be honoured.
+        flight_mode_after:
+          type: string
+          enum: [M2, M4]
+          description: >
+            M2 if veto accepted and burn cancelled but event still active.
+            M4 if veto triggered safehold.
+        ack_time_utc:
+          type: string
+          format: date-time
+        late_veto_note:
+          type: string
+          nullable: true
+          description: >
+            Present only when veto_accepted is false. States that the veto
+            window had already closed at ack_time_utc and the burn proceeded.
+
+    # -------------------------------------------------------------------------
+    # POST-BURN REPORT
+    # -------------------------------------------------------------------------
+
+    GNCReport:
+      type: object
+      required:
+        - command_id
+        - conjunction_id
+        - execution_status
+        - actual_dv_m_s
+        - actual_dv_rtn_m_s
+        - attitude_error_at_burn_deg
+        - post_burn_state
+        - reported_at_utc
+      properties:
+        command_id:
+          type: string
+          description: References the GNCCommand that triggered this burn
+          example: "gnc-cmd-2026-0401-001"
+        conjunction_id:
+          type: string
+          example: "conj-2026-0302-001"
+        execution_status:
+          type: string
+          enum: [NOMINAL, PARTIAL, ABORTED]
+          description: >
+            NOMINAL — burn completed within tolerance.
+            PARTIAL — burn terminated early or magnitude off by more than sigma.
+            ABORTED — burn did not fire.
+        actual_dv_m_s:
+          type: number
+          description: Actual delta-v magnitude achieved (m/s), from IMU integration
+          example: 0.147
+        actual_dv_rtn_m_s:
+          maxItems: 3
+          minItems: 3
+          type: array
+          items:
+            type: number
+          description: "Actual burn vector in RTN frame [dv_R, dv_T, dv_N] (m/s)"
+          example: [0.001, 0.147, 0.002]
+        attitude_error_at_burn_deg:
+          type: number
+          description: Attitude error at burn ignition in degrees
+          example: 0.8
+        execution_error:
+          $ref: "#/components/schemas/ExecutionError"
+        post_burn_state:
+          $ref: "#/components/schemas/PostBurnState"
+        abort_detail:
+          $ref: "#/components/schemas/AbortDetail"
+          nullable: true
+          description: Present only when execution_status is ABORTED or PARTIAL
+        reported_at_utc:
+          type: string
+          format: date-time
+          description: Time this report was generated (UTC, ISO-8601)
+          example: "2026-04-01T14:00:15Z"
+
+    GNCReportAck:
+      type: object
+      required:
+        - command_id
+        - conjunction_id
+        - received_at_utc
+        - replan_required
+      properties:
+        command_id:
+          type: string
+          example: "gnc-cmd-2026-0401-001"
+        conjunction_id:
+          type: string
+          example: "conj-2026-0302-001"
+        received_at_utc:
+          type: string
+          format: date-time
+        replan_required:
+          type: boolean
+          description: >
+            True if APS has determined a replan is required based on
+            post-burn Pc re-evaluation. GNC remains in M1 Watch pending
+            new GNCCommand.
+        replan_note:
+          type: string
+          nullable: true
+          description: Human-readable reason if replan_required is true.
+
+    ExecutionError:
+      type: object
+      description: >
+        Execution error terms that close APS 3.0 gaps 6.3, 6.4, and 6.5.
+        Fed into P_post = P_pre + P_burn for covariance propagation and
+        Mahalanobis recalibration.
+      properties:
+        dv_magnitude_error_m_s:
+          type: number
+          description: Difference between commanded and actual delta-v magnitude (m/s)
+          example: -0.003
+        dv_magnitude_sigma_m_s:
+          type: number
+          description: >
+            1-sigma magnitude uncertainty used in P_burn computation (m/s).
+            Derived as sigma_mag * dv_commanded. Typical: 1-5% of commanded dv.
+          example: 0.008
+        pointing_error_deg:
+          type: number
+          description: >
+            Angular error between commanded and actual burn vector in degrees.
+            Feeds sigma_align in P_burn. Typical: 0.5-1.0 deg (bus-dependent).
+          example: 0.6
+        p_burn_rtn_km2:
+          maxItems: 9
+          minItems: 9
+          type: array
+          items:
+            type: number
+          description: >
+            Burn error covariance matrix P_burn in RTN frame (km²),
+            row-major flat 9-element array.
+            P_burn = sigma_mag^2 * (dv_hat * dv_hat^T) +
+                     sigma_align^2 * (dv^2 * I_perp)
+            where dv_hat is the unit burn vector and I_perp projects onto
+            the plane perpendicular to the burn direction.
+            APS computes P_post = P_pre + P_burn (ECI frame) for
+            post-maneuver covariance propagation.
+          example: [0.000001, 0, 0, 0, 0.000001, 0, 0, 0, 0.000001]
+
+    PostBurnState:
+      type: object
+      required:
+        - r_sat_km
+        - v_sat_km_s
+        - p_post_km2
+        - epoch_utc
+      properties:
+        r_sat_km:
+          maxItems: 3
+          minItems: 3
+          type: array
+          items:
+            type: number
+          description: "Post-burn ECI position [x, y, z] (km)"
+          example: [6878.1, 0.2, 0.0]
+        v_sat_km_s:
+          maxItems: 3
+          minItems: 3
+          type: array
+          items:
+            type: number
+          description: "Post-burn ECI velocity [vx, vy, vz] (km/s)"
+          example: [0.0, 7.669, 0.0]
+        p_post_km2:
+          maxItems: 9
+          minItems: 9
+          type: array
+          items:
+            type: number
+          description: >
+            Post-burn covariance P_post = P_pre + P_burn in ECI frame (km²),
+            row-major flat 9-element array. Fed into APS for miss distance
+            re-evaluation and Mahalanobis recalculation. Closes APS 3.0 gap 6.3.
+          example: [0.000026, 0, 0, 0, 0.000026, 0, 0, 0, 0.000026]
+        epoch_utc:
+          type: string
+          format: date-time
+          description: Epoch of the post-burn state vector (UTC, ISO-8601)
+          example: "2026-04-01T14:00:12Z"
+        m2_post_estimated:
+          type: number
+          nullable: true
+          description: >
+            GNC-estimated post-burn Mahalanobis distance squared, computed
+            onboard from post-burn state and propagated covariance.
+            APS recomputes authoritatively from this state. Treat as indicative only.
+          example: 18.7
+
+    AbortDetail:
+      type: object
+      required:
+        - abort_reason
+        - abort_time_utc
+        - flight_mode_at_abort
+      properties:
+        abort_reason:
+          type: string
+          enum:
+            - ATTITUDE_ERROR_EXCEEDED
+            - WATCHDOG_EXPIRED
+            - VETO_RECEIVED
+            - VALIDITY_FAILED_MID_STAGING
+            - ENVELOPE_VIOLATED
+            - SLEW_INFEASIBLE
+            - PARTIAL_BURN_CUTOFF
+          description: Machine-readable reason for abort or partial execution
+        abort_time_utc:
+          type: string
+          format: date-time
+          description: Time the abort was triggered (UTC, ISO-8601)
+        flight_mode_at_abort:
+          type: string
+          enum: [M2, M3]
+          description: Flight mode the satellite was in when abort triggered
+        dv_achieved_before_abort_m_s:
+          type: number
+          nullable: true
+          description: >
+            Delta-v accumulated before cutoff (m/s).
+            Present for PARTIAL_BURN_CUTOFF only.
+          example: 0.09
+
+    # -------------------------------------------------------------------------
+    # SHARED
+    # -------------------------------------------------------------------------
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        version:
+          type: string
+          example: 1.0.0
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Human-readable error message
+          example: "command_id is required"
+        detail:
+          type: object
+          description: Machine-readable validation detail
