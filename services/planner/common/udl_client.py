@@ -643,9 +643,6 @@ def check_credential_validity() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Throttled probe wrapper (SCRUM-363 AC2)
 # ---------------------------------------------------------------------------
-#
-# TESTING VALUE: 60 seconds. Change to 1800 (30 min) once confirmed working,
-# per team decision. Final production value still to be confirmed with team.
 _PROBE_INTERVAL_SECONDS = 1800  # 30 minutes
 
 # Stopwatch reference point (time.monotonic()) for the last real probe.
@@ -672,11 +669,14 @@ def get_credential_validity() -> Dict[str, Any]:
         elapsed = now - _last_probe_monotonic
         if elapsed < _PROBE_INTERVAL_SECONDS:
             remaining = _PROBE_INTERVAL_SECONDS - elapsed
-            print(
-                f"[udl_probe] cached result reused | "
-                f"last_checked_at_utc={_last_probe_result['checked_at_utc']} | "
-                f"status={_last_probe_result['status']} | "
-                f"next_live_probe_in={remaining:.1f}s"
+            log.info(
+                "UDL credential probe: cached result reused",
+                extra={
+                    "event": "udl_probe_cache_hit",
+                    "last_checked_at_utc": _last_probe_result["checked_at_utc"],
+                    "status": _last_probe_result["status"],
+                    "next_live_probe_in_seconds": round(remaining, 1),
+                },
             )
             return _last_probe_result
 
@@ -686,10 +686,13 @@ def get_credential_validity() -> Dict[str, Any]:
     _last_probe_result = result
     _last_probe_monotonic = now
 
-    print(
-        f"[udl_probe] live probe ran | "
-        f"checked_at_utc={result['checked_at_utc']} | "
-        f"status={result['status']} | "
-        f"next_live_probe_in={_PROBE_INTERVAL_SECONDS:.1f}s"
+    log.info(
+        "UDL credential probe: live probe ran",
+        extra={
+            "event": "udl_probe_cache_miss",
+            "checked_at_utc": result["checked_at_utc"],
+            "status": result["status"],
+            "next_live_probe_in_seconds": _PROBE_INTERVAL_SECONDS,
+        },
     )
     return result
