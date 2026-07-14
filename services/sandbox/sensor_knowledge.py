@@ -7,8 +7,8 @@ from typing import Iterator
 from services.sandbox.observation_bundle import ObservationBundle
 from services.sandbox.observations import AngularObservation
 from services.sandbox.schema_emission import (
-    EmittedObservationArtifact,
-    write_observations_multi_npz,
+    TrackerObservationContractArtifact,
+    write_tracker_observations_json,
 )
 
 
@@ -88,8 +88,8 @@ class SensorKnowledgeStore:
         self,
         bundle: ObservationBundle,
         output_path: str | Path,
-    ) -> EmittedObservationArtifact:
-        return write_observations_multi_npz(bundle, output_path)
+    ) -> TrackerObservationContractArtifact:
+        return write_tracker_observations_json(bundle, output_path)
 
     @property
     def truth_states(self):

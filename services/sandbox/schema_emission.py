@@ -10,11 +10,11 @@ import numpy as np
 from services.sandbox.observation_bundle import ObservationBundle
 from services.sandbox.observations import AngularObservation
 
-
 SCHEMA_NAME = "observations_multi"
 SCHEMA_VERSION = 1
 OBS_TYPE_ANGLES = "angles"
 OBS_QUALITY_NOMINAL = "nominal"
+TRACKER_RANGE_SIGMA_M = 50.0
 
 
 @dataclass(frozen=True)
@@ -26,6 +26,16 @@ class EmittedObservationArtifact:
     schema_name: str = SCHEMA_NAME
     schema_version: int = SCHEMA_VERSION
 
+TRACKER_CONTRACT_NAME = "tracker_observation_ingest"
+TRACKER_CONTRACT_VERSION = "0.1.0"
+
+
+@dataclass(frozen=True)
+class TrackerObservationContractArtifact:
+    path: Path
+    observation_count: int
+    schema_name: str = TRACKER_CONTRACT_NAME
+    schema_version: str = TRACKER_CONTRACT_VERSION
 
 def _datetime64_from_seconds(t_seconds: float) -> np.datetime64:
     # Sandbox time is relative seconds from simulation start. For deterministic
@@ -182,4 +192,120 @@ def write_observations_multi_npz(
         observation_count=len(observations),
         observer_count=len(observer_ids),
         target_count=len(target_ids),
+    )
+
+def _observation_id(obs: AngularObservation, sequence: int) -> str:
+    return (
+        f"obs-{obs.host_id}-{obs.debris_id}-"
+        f"{int(round(float(obs.t_seconds) * 1_000_000)):012d}-{sequence:06d}"
+    )
+
+
+def _optional_float(value: float | None) -> float | None:
+    if value is None:
+        return None
+    return float(value)
+
+
+def _optional_bool(value: bool | None) -> bool | None:
+    if value is None:
+        return None
+    return bool(value)
+
+
+def _optional_vector(value: Any) -> list[float] | None:
+    if value is None:
+        return None
+    array = np.asarray(value, dtype=np.float64)
+    if array.shape != (3,):
+        raise ValueError("Observer ECI vectors must contain exactly three values.")
+    return [float(component) for component in array]
+
+
+def observation_to_tracker_record(
+    obs: AngularObservation,
+    *,
+    sequence: int,
+    source: str = "sandbox",
+) -> dict[str, Any]:
+    """Convert one sandbox observation to the published tracker contract.
+
+    This intentionally emits sensor-facing observation data only. It does not
+    include truth state, future debris state, scenario placement data, or any
+    other god-view fields.
+    """
+    return {
+        "observation_id": _observation_id(obs, sequence),
+        "sensor_id": obs.host_id,
+        "target_id": obs.debris_id,
+        "t_seconds": float(obs.t_seconds),
+        "timestamp_utc": str(_datetime64_from_seconds(obs.t_seconds)).replace(
+            ".000000000",
+            "Z",
+        ),
+        "detected": bool(obs.detected),
+        "reason": obs.reason,
+        "ra_rad": _optional_float(obs.ra_rad),
+        "dec_rad": _optional_float(obs.dec_rad),
+        "ra_sigma_rad": _optional_float(obs.ra_sigma_rad),
+        "dec_sigma_rad": _optional_float(obs.dec_sigma_rad),
+        "ra_rate_rad_s": _optional_float(obs.ra_rate_rad_s),
+        "dec_rate_rad_s": _optional_float(obs.dec_rate_rad_s),
+        "range_m": (
+            float(obs.range_km) * 1000.0 if obs.range_km is not None else None
+        ),
+        "range_sigma_m": (
+            TRACKER_RANGE_SIGMA_M if obs.range_km is not None else None
+        ),
+        "range_rate_m_s": None,
+        "observer_eci_m": _optional_vector(obs.observer_eci_m),
+        "observer_eci_m_s": _optional_vector(obs.observer_eci_m_s),
+        "off_boresight_deg": _optional_float(obs.off_boresight_deg),
+        "sunlit": _optional_bool(obs.sunlit),
+        "earth_limb_blocked": _optional_bool(obs.earth_limb_blocked),
+        "sensor_mode": None,
+        "source": source,
+    }
+
+
+def bundle_to_tracker_ingest_request(
+    bundle: ObservationBundle,
+    *,
+    source: str = "sandbox",
+) -> dict[str, Any]:
+    observations = detected_observations_for_schema(bundle)
+
+    if not observations:
+        raise ValueError("Cannot emit tracker observation contract with zero detections")
+
+    return {
+        "observations": [
+            observation_to_tracker_record(
+                obs,
+                sequence=index,
+                source=source,
+            )
+            for index, obs in enumerate(observations)
+        ]
+    }
+
+
+def write_tracker_observations_json(
+    bundle: ObservationBundle,
+    output_path: str | Path,
+    *,
+    source: str = "sandbox",
+) -> TrackerObservationContractArtifact:
+    request_body = bundle_to_tracker_ingest_request(bundle, source=source)
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(request_body, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    return TrackerObservationContractArtifact(
+        path=output_path,
+        observation_count=len(request_body["observations"]),
     )
