@@ -178,11 +178,12 @@ components:
         IOD triggering. This record intentionally excludes truth state, future
         debris state, simulation objects, snapshots, and other god-view fields.
 
-        Units are explicit in field names. Range fields use kilometers
-        (`range_km`, `range_rate_km_s`), while observer ECI state uses meters
-        (`observer_eci_m`, `observer_eci_m_s`) to match upstream spacecraft-state
-        conventions. Clients must not assume a single unit system across the
-        record.
+        Units are SI throughout the published service contract. Range fields use
+        meters (`range_m`, `range_sigma_m`, `range_rate_m_s`), observer ECI
+        state uses meters and meters per second (`observer_eci_m`,
+        `observer_eci_m_s`), and angular fields use radians. Internal sandbox
+        and tracker code may continue using kilometers, but conversion happens
+        at the service emission boundary.
 
         Measurement fields are optional at the schema level so the same record
         can support multiple sensor types. Tracker validates required
@@ -256,18 +257,18 @@ components:
           nullable: true
           description: Optional declination angular rate in radians per second.
 
-        range_km:
+        range_m:
           type: number
           nullable: true
-          description: Optional range measurement in kilometers.
-        range_sigma_km:
+          description: Optional range measurement in meters.
+        range_sigma_m:
           type: number
           nullable: true
-          description: Optional one-sigma range uncertainty in kilometers.
-        range_rate_km_s:
+          description: Optional one-sigma range uncertainty in meters.
+        range_rate_m_s:
           type: number
           nullable: true
-          description: Optional range-rate measurement in kilometers per second.
+          description: Optional range-rate measurement in meters per second.
 
         observer_eci_m:
           type: array

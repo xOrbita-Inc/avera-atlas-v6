@@ -14,7 +14,7 @@ SCHEMA_NAME = "observations_multi"
 SCHEMA_VERSION = 1
 OBS_TYPE_ANGLES = "angles"
 OBS_QUALITY_NOMINAL = "nominal"
-TRACKER_RANGE_SIGMA_KM = 0.05
+TRACKER_RANGE_SIGMA_M = 50.0
 
 
 @dataclass(frozen=True)
@@ -251,11 +251,13 @@ def observation_to_tracker_record(
         "dec_sigma_rad": _optional_float(obs.dec_sigma_rad),
         "ra_rate_rad_s": _optional_float(obs.ra_rate_rad_s),
         "dec_rate_rad_s": _optional_float(obs.dec_rate_rad_s),
-        "range_km": _optional_float(obs.range_km),
-        "range_sigma_km": (
-            TRACKER_RANGE_SIGMA_KM if obs.range_km is not None else None
+        "range_m": (
+            float(obs.range_km) * 1000.0 if obs.range_km is not None else None
         ),
-        "range_rate_km_s": None,
+        "range_sigma_m": (
+            TRACKER_RANGE_SIGMA_M if obs.range_km is not None else None
+        ),
+        "range_rate_m_s": None,
         "observer_eci_m": _optional_vector(obs.observer_eci_m),
         "observer_eci_m_s": _optional_vector(obs.observer_eci_m_s),
         "off_boresight_deg": _optional_float(obs.off_boresight_deg),

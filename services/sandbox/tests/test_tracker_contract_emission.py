@@ -72,8 +72,12 @@ def test_tracker_contract_emits_inline_json_observation_records() -> None:
     assert record["dec_rad"] is not None
     assert record["ra_sigma_rad"] is not None
     assert record["dec_sigma_rad"] is not None
-    assert record["range_km"] is not None
-    assert record["range_sigma_km"] == 0.05
+    assert record["range_m"] is not None
+    assert record["range_m"] == 20000.0
+    assert record["range_sigma_m"] == 50.0
+    assert "range_km" not in record
+    assert "range_sigma_km" not in record
+    assert "range_rate_km_s" not in record
 
     assert isinstance(record["observer_eci_m"], list)
     assert len(record["observer_eci_m"]) == 3
