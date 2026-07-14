@@ -58,7 +58,7 @@ Full audit logging on every transition per MAF §10.
 All of the following hold:
 - Orbit regime matches the active envelope
 - Authority level matches the operator grant
-- Pc is within the permitted band for the authority level
+- Pc >= operator-configured `pc_maneuver_threshold` and <= max_dv cap for the authority level (L1: 2.0 m/s, L2: 0.5 m/s)
 - `data_age_s` is within the freshness bound (recommended: 86400s / 24 hrs for Space-Track CDM; Minh sets floor)
 - `covariance_source` is `real_cdm` (surrogate_identity triggers a warning and requires explicit operator acknowledgement before L2 auto-execute)
 - `v_remaining_m_s` > `dv_magnitude_m_s` + `v_reserved_m_s`

@@ -329,11 +329,15 @@ components:
           description: >
             Condition number of the observability Gramian projected onto the
             conjunction plane. epsilon = lambda_min(W_CP) / lambda_max(W_CP).
-          example: 0.73
+          example: 0.20
         epsilon_threshold:
           type: number
-          description: Per-regime minimum epsilon for EARNED status
-          example: 0.30
+          description: >
+            Per-regime minimum epsilon for EARNED status. Recommended floor
+            for LEO on Space-Track data: 0.20. Calibration against historical
+            CDM outcomes is required before L3 is unblocked; placeholder is
+            acceptable for first flight (L0 to L2 with human in the loop).
+          example: 0.20
         weak_directions:
           type: array
           items:
@@ -648,6 +652,7 @@ components:
         - actual_dv_m_s
         - actual_dv_rtn_m_s
         - attitude_error_at_burn_deg
+        - execution_error
         - post_burn_state
         - reported_at_utc
       properties:
