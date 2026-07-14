@@ -311,12 +311,30 @@ def get_conjunctions(
     # Build TCA window: now to now + days_lookahead
     now = datetime.now(timezone.utc)
     tca_from = now.strftime("%Y-%m-%dT%H:%M:%S.000000Z")
-    tca_to = (now + timedelta(days=days_lookahead)).strftime("%Y-%m-%dT%H:%M:%S.000000Z")
+    tca_to_dt = now + timedelta(days=days_lookahead)
+    tca_to = tca_to_dt.strftime("%Y-%m-%dT%H:%M:%S.000000Z")
 
     params = {
         "satNo1":        sat_no,
+        # NOTE (SCRUM-364): tca_to was calculated but never applied here --
+        # only the lower bound (tca_from) was sent to UDL, so days_lookahead
+        # was silently ignored and every query searched an unbounded future
+        # window. Found during live testing. UDL's query syntax for a
+        # combined upper+lower bound on one field was not verified against
+        # the live service, so rather than guess at new syntax, the upper
+        # bound is enforced in Python below after the response comes back.
         "tca":           f">{tca_from}",
-        "collisionProb": f">={pc_threshold}",
+        # NOTE (SCRUM-364): UDL's query parser rejects the >= operator entirely
+        # (confirmed via live testing -- returns 400 "Query parameter exceeds
+        # maximum allowed value"). Only > is supported. Using > instead of >=
+        # means a record with collisionProb exactly equal to pc_threshold is
+        # excluded -- an accepted, minor tradeoff, not a functional gap, since
+        # pc_threshold is a conservative screening floor, not an exact cutoff.
+        #
+        # Also force plain decimal formatting (not Python's default float
+        # repr) since small thresholds like 1e-05 would otherwise render in
+        # scientific notation, which UDL also rejects.
+        "collisionProb": f">{pc_threshold:.10f}",
     }
 
     try:
@@ -381,6 +399,39 @@ def get_conjunctions(
         result = _parse_conjunction(record)
         if result is not None:
             parsed.append(result)
+
+    # NOTE (SCRUM-364): enforce the days_lookahead upper bound here, in
+    # Python, since it is not sent to UDL as part of the query (see note
+    # above params["tca"]). Parsed as real datetimes, not compared as raw
+    # strings, since UDL's returned tca precision (decimal places) isn't
+    # guaranteed to match tca_to's fixed 6-digit format.
+    before_filter = len(parsed)
+    def _tca_within_window(record: Dict[str, Any]) -> bool:
+        try:
+            tca_dt = datetime.fromisoformat(record["t_ca_utc"].replace("Z", "+00:00"))
+            return tca_dt <= tca_to_dt
+        except Exception as exc:
+            # Don't silently drop the record, but DO log -- a silent except
+            # here previously masked a real bug (wrong dict key) that let
+            # every record through unfiltered. Found via unit testing.
+            log.warning(
+                "UDL conjunction: could not evaluate tca lookahead window "
+                "for a record, letting it through unfiltered: %s",
+                exc,
+                extra={"event": "udl_tca_window_check_failed", "reason": str(exc)},
+            )
+            return True
+    parsed = [r for r in parsed if _tca_within_window(r)]
+    if len(parsed) < before_filter:
+        log.info(
+            "UDL conjunction fetch: %d record(s) beyond %d-day lookahead window excluded",
+            before_filter - len(parsed), days_lookahead,
+            extra={
+                "event": "udl_tca_lookahead_filtered",
+                "excluded": before_filter - len(parsed),
+                "days_lookahead": days_lookahead,
+            },
+        )
 
     log.info(
         "UDL conjunction fetch complete: %d/%d records parsed for satNo1=%s",

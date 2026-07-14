@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
@@ -681,3 +681,89 @@ class TestGetCredentialValidity:
                 mock_get.side_effect = TimeoutError("UDL did not respond")
                 result = check_credential_validity()
         assert result["status"] == "unreachable"
+
+
+# ---------------------------------------------------------------------------
+# SCRUM-364: get_conjunctions query construction fixes
+# ---------------------------------------------------------------------------
+
+class TestGetConjunctionsQueryFixes:
+    """SCRUM-364: two real bugs found via live UDL testing.
+
+    1. UDL rejects the >= operator entirely (confirmed live, returns 400).
+       Only > is supported, so collisionProb must be sent as > not >=.
+    2. tca_to was calculated but never sent to UDL or used to filter
+       results, so days_lookahead was silently ignored. Now enforced as
+       a client-side filter after the response comes back.
+    """
+
+    def test_collision_prob_uses_greater_than_not_greater_equal(self):
+        """AC3: the query sent to UDL must use > , never >=, since UDL
+        returns 400 for >= (confirmed via live testing, not assumed)."""
+        with patch("common.udl_client.UDL_ENABLED", True):
+            with patch.dict("os.environ", {"UDL_USER": "u", "UDL_PASS": "p"}):
+                with patch("common.udl_client.requests.get") as mock_get:
+                    mock_resp = MagicMock()
+                    mock_resp.ok = True
+                    mock_resp.status_code = 200
+                    mock_resp.json.return_value = []
+                    mock_get.return_value = mock_resp
+                    get_conjunctions(sat_no=12345, pc_threshold=1e-5)
+
+        sent_params = mock_get.call_args.kwargs["params"]
+        assert sent_params["collisionProb"].startswith(">")
+        assert not sent_params["collisionProb"].startswith(">=")
+
+    def test_collision_prob_never_uses_scientific_notation(self):
+        """A small threshold like 1e-05 must render as a plain decimal,
+        not Python's default float repr, since UDL also rejects
+        scientific notation in query values."""
+        with patch("common.udl_client.UDL_ENABLED", True):
+            with patch.dict("os.environ", {"UDL_USER": "u", "UDL_PASS": "p"}):
+                with patch("common.udl_client.requests.get") as mock_get:
+                    mock_resp = MagicMock()
+                    mock_resp.ok = True
+                    mock_resp.status_code = 200
+                    mock_resp.json.return_value = []
+                    mock_get.return_value = mock_resp
+                    get_conjunctions(sat_no=12345, pc_threshold=1e-5)
+
+        sent_params = mock_get.call_args.kwargs["params"]
+        assert "e-" not in sent_params["collisionProb"].lower()
+
+    def test_records_beyond_lookahead_window_are_excluded(self):
+        """AC3: a record with a tca beyond days_lookahead must be filtered
+        out client-side, since the upper bound is not sent to UDL."""
+        now = datetime.now(timezone.utc)
+        tca_within = (now + timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%S.000000Z")
+        tca_beyond = (now + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S.000000Z")
+
+        raw_record_template = {
+            "satNo2": 99999, "collisionProb": 0.5,
+            "stateVector1": {
+                "xpos": 1000.0, "ypos": 0.0, "zpos": 0.0,
+                "xvel": 0.0, "yvel": 7.5, "zvel": 0.0,
+                "cov": [1]*21,
+            },
+            "stateVector2": {"cov": [1]*21},
+            "relPosR": 100.0, "relPosT": 0.0, "relPosN": 0.0,
+        }
+
+        record_within = {**raw_record_template, "tca": tca_within}
+        record_beyond = {**raw_record_template, "tca": tca_beyond}
+
+        with patch("common.udl_client.UDL_ENABLED", True):
+            with patch.dict("os.environ", {"UDL_USER": "u", "UDL_PASS": "p"}):
+                with patch("common.udl_client.requests.get") as mock_get:
+                    mock_resp = MagicMock()
+                    mock_resp.ok = True
+                    mock_resp.status_code = 200
+                    mock_resp.json.return_value = [record_within, record_beyond]
+                    mock_get.return_value = mock_resp
+                    results = get_conjunctions(sat_no=12345, days_lookahead=7)
+
+        assert len(results) == 1
+        # the surviving record's tca should match the "within window" one,
+        # not the "beyond window" one (compare on the date/time prefix,
+        # since Z-suffix handling can vary slightly)
+        assert results[0]["t_ca_utc"][:19] == tca_within[:19]
