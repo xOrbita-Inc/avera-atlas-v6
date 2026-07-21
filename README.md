@@ -240,6 +240,26 @@ After placing the files, rebuild the stack:
 
     docker compose down && docker compose up --build -d
 
+## Data-source badge states
+
+The dashboard shows a data-source badge indicating what drove the planner's
+conjunction assessment. It is derived from live connection state, not from
+configuration flags. The badge never claims "UDL LIVE" while UDL conjunctions
+are not actually consumed by the planner (SCRUM-348).
+
+| Badge | Trigger | Meaning |
+| --- | --- | --- |
+| `UDL CONNECTED (CATALOG ONLY)` | `UDL_ENABLED=true`, credentials present, live probe valid | UDL is reachable and authenticated and contributes catalog elsets to secondary screening, but is not driving planner conjunctions. |
+| `UDL CREDENTIALS INVALID` | `UDL_ENABLED=true`, credentials present, last probe returned invalid | Credentials are set but did not authenticate. They may have been rotated or revoked. |
+| `UDL UNCONFIRMED` | `UDL_ENABLED=true`, credentials present, probe unreachable | Could not reach UDL to confirm credential validity; last check was inconclusive. |
+| `UDL MISCONFIGURED` | `UDL_ENABLED=true`, `UDL_USER` or `UDL_PASS` missing | UDL is enabled but credentials are absent. |
+| `REFERENCE CDM (TIROS 4)` / Space-Track label | `UDL_ENABLED=false` (falls through to the ingest CDM source mode) | Conjunctions come from the injected reference CDM, or from live Space-Track polling when enabled. |
+
+`UDL LIVE`, a genuine state reflecting an actual per-evaluate UDL conjunction
+driving the decision, is intentionally not shown yet. It lands with the
+per-evaluate source field once UDL conjunction consumption is live end to end
+(SCRUM-364 / SCRUM-348 AC3).
+
 ## Deployment
 
 ### Development (Docker Compose)
