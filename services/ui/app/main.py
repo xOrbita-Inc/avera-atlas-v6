@@ -218,6 +218,37 @@ async def ingest_inject(request: Request):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+@app.get("/api/ingest/decision_log/{log_id}")
+async def ingest_decision_log(log_id: str):
+    """Proxy to the ingest DecisionLog retrieval endpoint (SCRUM-351).
+
+    Passes a 404 through unchanged so the dashboard can show a clear
+    not-found message rather than a generic error. Any other upstream
+    failure becomes a 502 so the client can handle it cleanly.
+    """
+    try:
+        resp = requests.get(
+            f"{INGEST_SERVICE_URL}/store/decision_log/{log_id}", timeout=5
+        )
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"error": str(e)})
+    if resp.status_code == 404:
+        try:
+            return JSONResponse(status_code=404, content=resp.json())
+        except ValueError:
+            return JSONResponse(status_code=404, content={"error": "not found"})
+    if not resp.ok:
+        return JSONResponse(status_code=502, content={
+            "error": f"ingest decision_log returned {resp.status_code}"
+        })
+    try:
+        return JSONResponse(status_code=200, content=resp.json())
+    except ValueError:
+        return JSONResponse(status_code=502, content={
+            "error": "ingest decision_log returned invalid JSON"
+        })
+
+
 @app.get("/api/ingest/store")
 async def ingest_store():
     """Fetch all CDM records and planner outputs from the ingest SQLite store.

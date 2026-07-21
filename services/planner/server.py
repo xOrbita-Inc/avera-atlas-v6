@@ -42,7 +42,7 @@ from avoid.decision_model import (
     evaluate_batch,
 )
 from common.maneuver_scorer import evaluate_conjunction_v25, _policy_from_dict
-from common.atlas_artifact import build_atlas_artifact
+from common.atlas_artifact import build_atlas_artifact, DecisionLog
 from common.satellite_capability import SatelliteCapability
 from common.logging_setup import build_logger, _POLICY_CONFIG_PATH, SERVICE_NAME, SERVICE_VERSION
 from common.spacetrack_tle import fetch_catalog_objects
@@ -182,6 +182,28 @@ def _post_planner_output(
 
     except Exception as exc:
         log.warning("audit write failed", extra={"event": "audit_write_failed", "cdm_record_id": cdm_record_id, "exc": str(exc)})
+
+
+def _post_decision_log(decision_log) -> None:
+    """Persist the full DecisionLog audit record to the ingest store (SCRUM-351).
+
+    Fire-and-forget, keyed by log_id so an operator can retrieve any past
+    decision by its decision ID. Any failure is logged and swallowed.
+    """
+    try:
+        payload = {
+            "log_id":         decision_log.log_id,
+            "conjunction_id": decision_log.conjunction_id,
+            "sat_id":         decision_log.sat_id,
+            "decision":       decision_log.decision,
+            "decision_log":   vars(decision_log),
+        }
+        url = f"{_ingest_url()}/decision_log"
+        resp = http_requests.post(url, json=payload, timeout=5.0)
+        if resp.status_code != 201:
+            log.warning("decision log write unexpected status", extra={"event": "decision_log_write_unexpected_status", "status": resp.status_code, "log_id": decision_log.log_id})
+    except Exception as exc:
+        log.warning("decision log write failed", extra={"event": "decision_log_write_failed", "log_id": getattr(decision_log, "log_id", "?"), "exc": str(exc)})
 
 
 # ---------------------------------------------------------------------------
@@ -585,6 +607,19 @@ async def post_evaluate(request: Request):
                 r_post_km=r_sat_km_req if r_sat_km_req else None,
             )
             result["atlas_artifact"] = artifact.to_dict()
+            # --- DecisionLog (SCRUM-351): full audit record, retrievable by log_id ---
+            try:
+                _pol = body.get("policy", {})
+                decision_log = DecisionLog.from_artifact(
+                    artifact,
+                    operator_id=str(_pol.get("operator_id", "")),
+                    policy_version=str(_pol.get("policy_version", "")),
+                )
+                result["decision_log_id"] = decision_log.log_id
+                result["decision_log"] = vars(decision_log)
+                _post_decision_log(decision_log)
+            except Exception as exc:
+                log.warning("decision log build failed", extra={"event": "decision_log_build_failed", "exc": str(exc)})
             log.info("atlas artifact built", extra={"event": "artifact_built", "conjunction_id": scoring.conjunction_id, "summary": artifact.operator_summary()})
         except Exception as exc:
             log.warning("atlas artifact build failed", extra={"event": "artifact_build_failed", "conjunction_id": body.get("conjunction_id", "?"), "exc": str(exc)})

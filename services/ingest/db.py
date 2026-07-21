@@ -14,6 +14,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Generator
 
+import os
+
 from sqlalchemy import create_engine, Column, Integer, Float, String, text
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from sqlalchemy.pool import StaticPool
@@ -22,7 +24,9 @@ logger = logging.getLogger(__name__)
 
 # StaticPool is required for SQLite with a single connection shared across
 # threads (FastAPI background tasks run on a thread pool).
-_DB_URL = "sqlite:////data/cdm_store/avera_atlas.db"
+# Default is the production volume path. Overridable via AVERA_DB_URL so the
+# store can be exercised in tests and local runs (SCRUM-351).
+_DB_URL = os.environ.get("AVERA_DB_URL", "sqlite:////data/cdm_store/avera_atlas.db")
 engine = create_engine(
     _DB_URL,
     connect_args={"check_same_thread": False},
@@ -89,6 +93,24 @@ class PlannerOutput(Base):
     lambda_l         = Column(Float,   nullable=False)
     covariance_source = Column(String, nullable=False)   # 'real_cdm' | 'surrogate_identity'
     created_at       = Column(String,  nullable=False)   # ISO 8601 UTC text
+
+
+class DecisionLogRecord(Base):
+    """Full DecisionLog audit record keyed by log_id (SCRUM-351).
+
+    Persists the complete JSON audit record produced by the planner so an
+    operator can retrieve any past decision by its decision ID (log_id) from
+    the ATLAS UI. Created automatically by init_db()'s create_all; existing
+    tables are never altered.
+    """
+    __tablename__ = "decision_logs"
+
+    log_id            = Column(String, primary_key=True)   # decision ID
+    conjunction_id    = Column(String, nullable=True)
+    sat_id            = Column(String, nullable=True)
+    decision          = Column(String, nullable=True)
+    decision_log_json = Column(String, nullable=False)     # full DecisionLog.to_json()
+    created_at        = Column(String, nullable=False)     # ISO 8601 UTC text
 
 
 def init_db() -> None:

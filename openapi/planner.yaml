@@ -29,6 +29,12 @@ info:
     converts to km² (divides by 1e6) before returning. The planner receives and
     passes km² throughout. Do not apply further unit conversion.
 
+    **Changes in 2.5.3 (relative to 2.5.2)**
+    - EvaluateResponse: added optional decision_log_id and decision_log fields
+      (SCRUM-351). Additive; no fields renamed or removed. The full DecisionLog
+      audit record is also persisted to the ingest store and retrievable by
+      decision_log_id via GET /store/decision_log/{log_id}.
+
     **Changes in 2.5.0 (relative to 2.4.3)**
     - /v1/evaluate now calls evaluate_conjunction_v25() (maneuver_scorer.py)
       which returns a ManeuverScoringResult — a strict superset of the v2.4
@@ -43,7 +49,7 @@ info:
     - No fields renamed or removed (SCRUM-281 constraint satisfied).
   contact:
     name: xOrbita APS Team
-  version: 2.5.2
+  version: 2.5.3
 servers:
 - url: http://localhost:8060
   description: Local / Jetson dev
@@ -367,6 +373,22 @@ components:
           nullable: true
           allOf:
             - $ref: "#/components/schemas/ATLASManeuverArtifact"
+        decision_log_id:
+          type: string
+          nullable: true
+          description: |
+            SCRUM-351: unique DecisionLog audit-record ID (log_id) for this
+            evaluate. Present on successful /v1/evaluate calls when the artifact
+            builds. Use it to retrieve the full audit record by decision ID via
+            the ingest store.
+          example: conj-2026-0302-001_25544_2026-07-20T10:00:00Z
+        decision_log:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: |
+            SCRUM-351: full JSON DecisionLog audit record for this decision.
+            Also persisted to the ingest store, retrievable by decision_log_id.
     ManeuverRecommendation:
       required:
       - direction
