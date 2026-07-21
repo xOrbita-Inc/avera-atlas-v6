@@ -225,7 +225,7 @@ avera-atlas-v6/
 ## Model files
 
 The ONNX model files are not committed to the repository because of their size.
-Download them from [shared model location] and place them locally before running
+Download them from the [shared model folder on SharePoint](https://xorbita-my.sharepoint.com/:f:/p/javera/IgBC_siydJ2UQL2ppZQltDwEAb-2gDPgQOJ8xhUwW4MLiGA?e=OxyyuR) and place them locally before running
 the stack:
 
 - spark_detector.onnx into services/detector/
