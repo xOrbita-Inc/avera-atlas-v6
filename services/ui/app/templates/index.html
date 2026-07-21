@@ -737,14 +737,31 @@ async function loadSourceMode(){
       if(udlResp.ok){
         const udl=await udlResp.json();
         if(udl.mode==='live'){
+          // SCRUM-348 AC3 (lands with SCRUM-364): genuine UDL-driven conjunctions
           dot.style.background='var(--green)';dot.style.boxShadow='0 0 6px var(--green)';
           label.style.color='var(--green)';
-          label.textContent='UDL LIVE';
+          label.textContent=udl.label;
+          return;
+        } else if(udl.mode==='connected'){
+          // SCRUM-348: UDL authenticated but catalog-only, not driving conjunctions
+          dot.style.background='var(--amber)';dot.style.boxShadow='0 0 6px var(--amber)';
+          label.style.color='var(--amber)';
+          label.textContent=udl.label;
+          return;
+        } else if(udl.mode==='invalid'){
+          dot.style.background='var(--red,#ff4444)';dot.style.boxShadow='0 0 6px var(--red,#ff4444)';
+          label.style.color='var(--red,#ff4444)';
+          label.textContent=udl.label;
+          return;
+        } else if(udl.mode==='unconfirmed'){
+          dot.style.background='var(--amber)';dot.style.boxShadow='0 0 6px var(--amber)';
+          label.style.color='var(--amber)';
+          label.textContent=udl.label;
           return;
         } else if(udl.mode==='misconfigured'){
           dot.style.background='var(--red,#ff4444)';dot.style.boxShadow='0 0 6px var(--red,#ff4444)';
           label.style.color='var(--red,#ff4444)';
-          label.textContent='UDL MISCONFIGURED';
+          label.textContent=udl.label;
           return;
         }
       }

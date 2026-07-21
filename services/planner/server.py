@@ -285,7 +285,9 @@ async def udl_status() -> Dict[str, Any]:
                                              (may be older than now if the cached
                                              result was reused -- see udl_client
                                              throttle interval)
-      mode             : str    -- 'live' | 'invalid' | 'unconfirmed' | 'misconfigured' | 'disabled'
+      mode             : str    -- 'connected' | 'invalid' | 'unconfirmed' | 'misconfigured' | 'disabled'
+                                  (SCRUM-348: 'connected' replaces the old 'live'; a genuine
+                                   UDL-driven 'live' returns with the per-evaluate source field)
       label            : str    -- human-readable label for the UI badge
       note             : str    -- additional context for the operator
       last_fetch_utc   : str or None -- last successful conjunction data fetch
@@ -321,9 +323,20 @@ async def udl_status() -> Dict[str, Any]:
     # ------------------------------------------------------------------
 
     if UDL_ENABLED and credentials_set and credential_valid:
-        mode = "live"
-        label = "UDL LIVE"
-        note = "UDL enabled, credentials present and confirmed valid by live probe."
+        # SCRUM-348: UDL being enabled and authenticated does NOT mean the
+        # planner consumed a UDL conjunction. UDL currently contributes catalog
+        # elsets to secondary screening only, not conjunctions to the planner,
+        # so the badge must not claim "UDL LIVE". A genuine live state, tied to
+        # an actual per-evaluate UDL conjunction, lands with the consumption
+        # path (SCRUM-364 / AC3).
+        mode = "connected"
+        label = "UDL CONNECTED (CATALOG ONLY)"
+        note = (
+            "UDL enabled and credentials confirmed valid. UDL is contributing "
+            "catalog elsets to secondary screening, but is not driving planner "
+            "conjunctions. Conjunctions come from the reference or Space-Track "
+            "source."
+        )
     elif UDL_ENABLED and credentials_set and credential_check_status == "invalid":
         mode = "invalid"
         label = "UDL CREDENTIALS INVALID"
