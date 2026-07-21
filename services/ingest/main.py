@@ -11,7 +11,8 @@ from sqlalchemy.exc import OperationalError
 from spacetrack_client import SpaceTrackClient
 from cdm_parser import parse_cdm_kvn
 from cdm_to_conjunction import cdm_to_conjunction_state
-from db import init_db, save_cdm_record, CdmRecord, PlannerOutput, get_session
+from fastapi.responses import JSONResponse
+from db import init_db, save_cdm_record, CdmRecord, PlannerOutput, DecisionLogRecord, get_session
 
 # === CONFIGURATION ===
 BUFFER_WINDOW_SIZE = 5
@@ -520,6 +521,56 @@ async def save_planner_output(request: Request) -> dict:
     except Exception as e:
         logging.error("[INGEST] save_planner_output error: %s", e)
         return {"status": "error", "error": str(e)}
+
+
+@app.post("/decision_log", status_code=201)
+async def save_decision_log(request: Request) -> dict:
+    """Persist a full DecisionLog audit record keyed by log_id (SCRUM-351)."""
+    body = await request.json()
+    log_id = body.get("log_id")
+    if not log_id:
+        return JSONResponse(status_code=400, content={"status": "error", "error": "log_id required"})
+    decision_log = body.get("decision_log")
+    payload_json = json.dumps(decision_log) if decision_log is not None else "{}"
+    try:
+        with get_session() as session:
+            existing = session.query(DecisionLogRecord).filter_by(log_id=log_id).first()
+            if existing is not None:
+                existing.decision_log_json = payload_json
+                existing.conjunction_id = body.get("conjunction_id")
+                existing.sat_id = body.get("sat_id")
+                existing.decision = body.get("decision")
+            else:
+                session.add(DecisionLogRecord(
+                    log_id=log_id,
+                    conjunction_id=body.get("conjunction_id"),
+                    sat_id=body.get("sat_id"),
+                    decision=body.get("decision"),
+                    decision_log_json=payload_json,
+                    created_at=datetime.utcnow().isoformat() + "Z",
+                ))
+            logging.info("[INGEST] Decision log saved: %s", log_id)
+            return {"status": "saved", "log_id": log_id}
+    except Exception as e:
+        logging.error("[INGEST] save_decision_log error: %s", e)
+        return {"status": "error", "error": str(e)}
+
+
+@app.get("/store/decision_log/{log_id}")
+async def store_decision_log(log_id: str):
+    """Return the full DecisionLog JSON for a decision ID, or 404 (SCRUM-351)."""
+    try:
+        with get_session() as session:
+            row = session.query(DecisionLogRecord).filter_by(log_id=log_id).first()
+            if row is None:
+                return JSONResponse(
+                    status_code=404,
+                    content={"error": f"No decision log found for id '{log_id}'"},
+                )
+            return json.loads(row.decision_log_json)
+    except Exception as e:
+        logging.error("[INGEST] store_decision_log error: %s", e)
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @app.delete("/store/cdm_records/duplicates", status_code=200)

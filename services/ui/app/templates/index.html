@@ -370,6 +370,16 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
         <div style="font-size:9px;color:var(--text-dim)" id="pollLastResult">No poll run yet</div>
         <button class="poll-btn" onclick="openStoreModal()" style="width:100%;margin-top:8px">VIEW CDM STORE</button>
         <button class="poll-btn" onclick="runTiros4SmokeTest()" style="width:100%;margin-top:6px;border-color:var(--accent-dim);color:var(--accent-dim)">RUN TIROS 4 E2E TEST</button>
+        <div style="border-top:1px solid var(--border);margin-top:10px;padding-top:8px">
+          <div style="font-size:8px;color:var(--text-dim);letter-spacing:0.5px;margin-bottom:4px">Decision Log Lookup (by decision ID)</div>
+          <div class="poll-row">
+            <input type="text" id="decisionLogIdInput" placeholder="paste decision ID" maxlength="140">
+            <button class="poll-btn" onclick="retrieveDecisionLog()">RETRIEVE</button>
+          </div>
+          <div class="poll-status" id="decisionLogStatus"></div>
+          <div style="font-size:8px;color:var(--text-dim);letter-spacing:0.5px;margin-top:6px">Last decision ID (click to copy)</div>
+          <div style="font-size:9px;color:var(--text-dim);word-break:break-all;cursor:pointer" id="lastDecisionLogId" title="Click to copy" onclick="copyLastDecisionLogId()">No decision evaluated yet</div>
+        </div>
       </div>
     </div>
     <div class="panel" id="portlet-tracking" data-portlet data-portlet-title="Tracking Summary">
@@ -582,10 +592,74 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
   </div>
 </div>
 
+<div class="payload-modal-backdrop" id="decisionLogBackdrop" onclick="if(event.target===this)closeDecisionLogModal()">
+  <div class="payload-modal">
+    <div class="payload-modal-hdr">
+      <span id="decisionLogModalTitle">DECISION LOG</span>
+      <div class="payload-modal-hdr-actions">
+        <button class="payload-modal-copy" onclick="downloadDecisionLog()">DOWNLOAD</button>
+        <button class="payload-modal-close" onclick="closeDecisionLogModal()">&times;</button>
+      </div>
+    </div>
+    <div class="payload-modal-body">
+      <pre id="decisionLogModalContent" style="white-space:pre-wrap;word-break:break-word;margin:0;font-size:11px;color:var(--text)"></pre>
+    </div>
+  </div>
+</div>
+
 <script>
 
 let assetNoradId = '';
 let secondaryNoradId = '';
+
+// SCRUM-351: DecisionLog retrieval by decision ID
+let lastEvaluatedDecisionLogId = '';
+let lastRetrievedDecisionLog = null;
+
+function copyLastDecisionLogId(){
+  if(!lastEvaluatedDecisionLogId) return;
+  if(navigator.clipboard) navigator.clipboard.writeText(lastEvaluatedDecisionLogId);
+  const s=document.getElementById('decisionLogStatus');
+  if(s){s.className='poll-status';s.textContent='Decision ID copied.';}
+}
+
+async function retrieveDecisionLog(){
+  const input=document.getElementById('decisionLogIdInput');
+  const status=document.getElementById('decisionLogStatus');
+  const id=(input.value||'').trim();
+  if(!id){status.className='poll-status';status.textContent='Enter a decision ID to retrieve.';return;}
+  status.className='poll-status busy';status.textContent='Retrieving decision log...';
+  try{
+    const resp=await fetch('/api/ingest/decision_log/'+encodeURIComponent(id));
+    if(resp.status===404){status.className='poll-status';status.textContent='No decision log found for that ID.';return;}
+    if(!resp.ok){status.className='poll-status';status.textContent='Lookup failed ('+resp.status+').';return;}
+    const data=await resp.json();
+    lastRetrievedDecisionLog={id:id,json:data};
+    status.className='poll-status';status.textContent='Decision log retrieved.';
+    showDecisionLogModal(id,data);
+  }catch(e){status.className='poll-status';status.textContent='Lookup failed.';}
+}
+
+function showDecisionLogModal(id,data){
+  document.getElementById('decisionLogModalTitle').textContent='DECISION LOG - '+id;
+  document.getElementById('decisionLogModalContent').textContent=JSON.stringify(data,null,2);
+  document.getElementById('decisionLogBackdrop').classList.add('open');
+}
+
+function closeDecisionLogModal(){
+  document.getElementById('decisionLogBackdrop').classList.remove('open');
+}
+
+function downloadDecisionLog(){
+  if(!lastRetrievedDecisionLog) return;
+  const blob=new Blob([JSON.stringify(lastRetrievedDecisionLog.json,null,2)],{type:'application/json'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url;
+  a.download='decision_log_'+lastRetrievedDecisionLog.id.replace(/[^A-Za-z0-9_.-]/g,'_')+'.json';
+  document.body.appendChild(a);a.click();document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
 
 function onNoradChange() {
   const val = document.getElementById('assetNoradInput').value.trim();
@@ -868,6 +942,7 @@ async function evaluateConjunction(conj,idx){
     const resp=await fetch('/api/planner/evaluate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)});
     const result=await resp.json();if(result.error)return;
     currentPlannerResult=result;currentConj=conj;
+    if(result.decision_log_id){lastEvaluatedDecisionLogId=result.decision_log_id;const _e=document.getElementById('lastDecisionLogId');if(_e)_e.textContent=result.decision_log_id;}
     if(currentView==='3d')updateConjunctionArc(conj);
     renderCovSourceBadge(result.covariance_source || null);
     updateDecisionCard(result,conj);
