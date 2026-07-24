@@ -260,3 +260,107 @@ class TestKilometerMissScreening:
         md = self._mahalanobis_distance(cov, self.MISS_VECTOR_RTN_KM)
         policy = OperatorPolicy(operator_id="TEST", policy_version="2.5.0")
         assert policy.passes_pre_screen(mahalanobis_distance=md) is True
+
+
+# ---------------------------------------------------------------------------
+# Review follow-ups (John, PR #48): degenerate state vector guard, and
+# correct source labeling on a successful fetch with no source field.
+# ---------------------------------------------------------------------------
+
+class TestDegenerateStateVectorGuard:
+    """The outermost exception handler in post_evaluate falls back to a
+    [0.0, 0.0, 0.0] state vector when satellite data is missing entirely.
+    _rtn_to_eci_rotation must not divide by zero in that case -- it should
+    degrade to the identity rotation and log a warning, not crash."""
+
+    ZERO_VEC = [0.0, 0.0, 0.0]
+
+    def test_zero_position_vector_does_not_raise(self):
+        # Must not raise at all -- this is the exact bug scenario.
+        rot = server._rtn_to_eci_rotation(
+            np.array(self.ZERO_VEC), np.array(self.ZERO_VEC)
+        )
+        assert rot is not None
+
+    def test_zero_position_vector_returns_identity(self):
+        rot = server._rtn_to_eci_rotation(
+            np.array(self.ZERO_VEC), np.array(self.ZERO_VEC)
+        )
+        assert np.allclose(rot, np.eye(3))
+
+    def test_parallel_r_and_v_does_not_raise(self):
+        """A separate degenerate case: r and v parallel gives zero angular
+        momentum (h = r x v = 0), which would also divide by zero."""
+        r = np.array([7000.0, 0.0, 0.0])
+        v = np.array([1.0, 0.0, 0.0])  # parallel to r
+        rot = server._rtn_to_eci_rotation(r, v)
+        assert np.allclose(rot, np.eye(3))
+
+    def test_surrogate_covariance_does_not_crash_with_zero_state_vector(self):
+        """End-to-end: _surrogate_covariance itself must survive a zero
+        state vector (the actual call site in the exception handler),
+        not just the rotation function in isolation."""
+        cov, source, cdm_id = server._surrogate_covariance(self.ZERO_VEC, self.ZERO_VEC)
+        assert cov is not None
+        assert source == "surrogate_elliptical"
+
+    def test_valid_orbit_still_produces_correct_rotation(self):
+        """Regression guard: the new guard clauses must not falsely trigger
+        on legitimate, real orbit data.
+
+        Uses a tilted, non-axis-aligned orbit rather than the file's
+        shared R_SAT_KM/V_SAT_KM_S test fixture, since that fixture's
+        r-along-x, v-along-y choice coincidentally produces the identity
+        matrix as its own genuine, correct rotation (r_hat, t_hat, n_hat
+        happen to align exactly with the ECI axes for that specific
+        orbit orientation) -- a real, non-degenerate result, just one
+        that would make an identity-based assertion meaningless here.
+        """
+        r_tilted = np.array([4000.0, 3000.0, 4500.0])
+        r_tilted = r_tilted / np.linalg.norm(r_tilted) * _A_KM
+        v_dir = np.array([-0.6, 0.7, 0.2])
+        r_unit = r_tilted / np.linalg.norm(r_tilted)
+        v_dir = v_dir - np.dot(v_dir, r_unit) * r_unit  # orthogonalize
+        v_dir = v_dir / np.linalg.norm(v_dir)
+        v_tilted = v_dir * _V_CIRC
+
+        rot = server._rtn_to_eci_rotation(r_tilted, v_tilted)
+        assert not np.allclose(rot, np.eye(3))  # genuinely non-degenerate, non-aligned
+        assert np.allclose(rot @ rot.T, np.eye(3))  # still a valid rotation
+
+
+class TestRealCovarianceSourceLabeling:
+    """A successful real CDM fetch with no covariance_source field in the
+    response must be labeled 'real', not mislabeled as 'surrogate_elliptical'
+    -- the UI badge (SCRUM-348) reads this field to decide what to show,
+    and mislabeling real data as surrogate would make it lie in the
+    wrong direction."""
+
+    def test_successful_fetch_without_source_field_labeled_real(self):
+        fake_cov_rtn = [[0.05, 0, 0], [0, 0.3, 0], [0, 0, 0.02]]
+        resp = _make_response(200, json_data={
+            "covariance_combined_rtn": fake_cov_rtn,
+            # deliberately no "covariance_source" key
+            "id": 7,
+        })
+        with patch.object(server.http_requests, "get", return_value=resp):
+            _, source, cdm_id = server._fetch_cdm_covariance(
+                "226", "35929", R_SAT_KM, V_SAT_KM_S
+            )
+        assert source == "real"
+        assert cdm_id == 7
+
+    def test_successful_fetch_with_explicit_source_field_preserved(self):
+        """If the ingest response does supply its own source label, that
+        label must be preserved, not overridden."""
+        fake_cov_rtn = [[0.05, 0, 0], [0, 0.3, 0], [0, 0, 0.02]]
+        resp = _make_response(200, json_data={
+            "covariance_combined_rtn": fake_cov_rtn,
+            "covariance_source": "cdm_store_v2",
+            "id": 8,
+        })
+        with patch.object(server.http_requests, "get", return_value=resp):
+            _, source, _ = server._fetch_cdm_covariance(
+                "226", "35929", R_SAT_KM, V_SAT_KM_S
+            )
+        assert source == "cdm_store_v2"

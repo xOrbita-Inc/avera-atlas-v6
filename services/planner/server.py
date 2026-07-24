@@ -83,10 +83,31 @@ def _rtn_to_eci_rotation(r_km: np.ndarray, v_km_s: np.ndarray) -> np.ndarray:
 
     Identical math to cdm_to_conjunction._rtn_to_eci_rotation in the ingest
     service. Duplicated here because the planner cannot import from ingest.
+
+    SCRUM-369 follow-up: guards against a zero or degenerate state vector
+    (e.g. the [0,0,0] fallback used when satellite data is missing in the
+    outermost exception handler), which would otherwise divide by zero.
+    Falls back to the identity matrix (no rotation -- the surrogate ellipse
+    stays aligned with ECI axes rather than correctly oriented to the real
+    orbit) and logs a warning, rather than crashing the request.
     """
-    r_hat = r_km / np.linalg.norm(r_km)
+    r_norm = np.linalg.norm(r_km)
+    if r_norm < 1e-9:
+        log.warning(
+            "degenerate satellite state vector (zero position), using identity rotation",
+            extra={"event": "rtn_rotation_degenerate", "reason": "zero_r_km"},
+        )
+        return np.eye(3)
+    r_hat = r_km / r_norm
     h = np.cross(r_km, v_km_s)
-    n_hat = h / np.linalg.norm(h)
+    h_norm = np.linalg.norm(h)
+    if h_norm < 1e-9:
+        log.warning(
+            "degenerate satellite state vector (r and v parallel or v zero), using identity rotation",
+            extra={"event": "rtn_rotation_degenerate", "reason": "zero_angular_momentum"},
+        )
+        return np.eye(3)
+    n_hat = h / h_norm
     t_hat = np.cross(n_hat, r_hat)
     return np.column_stack([r_hat, t_hat, n_hat])
 
@@ -169,7 +190,7 @@ def _fetch_cdm_covariance(
     try:
         data = resp.json()
         cov_rtn = np.array(data["covariance_combined_rtn"], dtype=float)
-        covariance_source = data.get("covariance_source", "surrogate_elliptical")
+        covariance_source = data.get("covariance_source", "real")
         cdm_record_id = data.get("id")
 
         r = np.array(r_sat_km, dtype=float)
