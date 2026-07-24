@@ -924,9 +924,13 @@ async function evaluateConjunction(conj,idx){
   document.getElementById('candidatesBody').innerHTML='<tr><td colspan="4" class="empty-state"><span class="spinner"></span>Planning...</td></tr>';
   document.getElementById('fuelRiskChart').innerHTML='';
   const asset_r=conj.r_asset_km||[6878.0,0.0,0.0];
+  // SCRUM-370 Step 2: prefer the real asset velocity at TCA so the planner
+  // orients the surrogate covariance in the asset's true orbital frame; fall
+  // back to the legacy constant only when absent (non-demo conjunctions).
+  const asset_v=conj.v_asset_km_s||[0.0,7.668,0.0];
   const request={
     conjunction_id:'eval-'+conj.object_id,
-    satellite:{sat_id:'XORB-001',r_sat_km:asset_r,v_sat_km_s:[0.0,7.668,0.0],
+    satellite:{sat_id:'XORB-001',r_sat_km:asset_r,v_sat_km_s:asset_v,
       t_burn_utc:new Date(Date.now()-3600000).toISOString(),v_remaining_m_s:25.0},
     conjunction:{obj_id:conj.object_id,
       ...(assetNoradId ? {primary_norad: assetNoradId} : {}),
@@ -1795,9 +1799,12 @@ function getPayloadContent(){
   if(!conjunctionData||!conjunctionData.conjunctions||conjunctionData.conjunctions.length===0)return null;
   const conjs=conjunctionData.conjunctions;
   const asset_r=conjs[0].r_asset_km||[6878.0,0.0,0.0];
+  // SCRUM-370 Step 2: displayed payload uses the same real asset velocity the
+  // evaluated payload sends, so the two match.
+  const asset_v=conjs[0].v_asset_km_s||[0.0,7.668,0.0];
   return{
     scenario:selectedScenario,
-    satellite:{sat_id:'XORB-001',r_sat_km:asset_r,v_sat_km_s:[0.0,7.668,0.0],
+    satellite:{sat_id:'XORB-001',r_sat_km:asset_r,v_sat_km_s:asset_v,
       t_burn_utc:new Date(Date.now()-3600000).toISOString(),v_remaining_m_s:25.0},
     conjunctions:conjs.map(function(c){
       var ar=c.r_asset_km||asset_r;

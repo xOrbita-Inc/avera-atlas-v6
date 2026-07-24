@@ -429,6 +429,11 @@ async def get_conjunctions():
             if r_objects is not None and r_asset is not None:
                 conj["r_obj_km"] = r_objects[i, tca_idx].tolist()
                 conj["r_asset_km"] = r_asset[tca_idx].tolist()
+                # SCRUM-370 Step 2: pass the real asset velocity at TCA so the
+                # planner orients the surrogate covariance in the asset's true
+                # orbital frame instead of against a hardcoded velocity.
+                if v_asset is not None:
+                    conj["v_asset_km_s"] = v_asset[tca_idx].tolist()
 
             conjunctions.append(conj)
 
