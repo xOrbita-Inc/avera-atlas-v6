@@ -45,6 +45,7 @@ from common.maneuver_scorer import evaluate_conjunction_v25, _policy_from_dict
 from common.atlas_artifact import build_atlas_artifact, DecisionLog
 from common.satellite_capability import SatelliteCapability
 from common.logging_setup import build_logger, _POLICY_CONFIG_PATH, SERVICE_NAME, SERVICE_VERSION
+from common.operator_policy import OperatorPolicy, CovarianceSurrogate
 from common.spacetrack_tle import fetch_catalog_objects
 from common.udl_client import UDL_ENABLED, get_conjunctions, get_credential_validity
 
@@ -57,6 +58,13 @@ log = build_logger()
 # Last successful UDL fetch timestamp (UTC ISO-8601). Updated by /v1/evaluate
 # when UDL_ENABLED=true and get_conjunctions() returns at least one record.
 _udl_last_fetch_utc: str | None = None
+
+# SCRUM-369: loaded once at startup (see lifespan()). Used by
+# _fetch_cdm_covariance for the documented surrogate covariance when no
+# real CDM/UDL covariance is available. Falls back to CovarianceSurrogate()
+# defaults if the policy file fails to load, so a policy load failure
+# degrades gracefully rather than crashing evaluate requests.
+_operator_policy: OperatorPolicy | None = None
 
 # ---------------------------------------------------------------------------
 # Ingest service URL
@@ -83,6 +91,36 @@ def _rtn_to_eci_rotation(r_km: np.ndarray, v_km_s: np.ndarray) -> np.ndarray:
     return np.column_stack([r_hat, t_hat, n_hat])
 
 
+def _surrogate_covariance(
+    r_sat_km: list,
+    v_sat_km_s: list,
+) -> tuple[list, str, None]:
+    """SCRUM-369: documented elliptical surrogate covariance, used when no
+    real CDM/UDL covariance is available. Reads sigma values from the
+    loaded operator policy (falls back to CovarianceSurrogate defaults
+    if the policy failed to load at startup -- see lifespan()).
+
+    Rotated from RTN into ECI using the same rotation as the real
+    covariance path, so the ellipse is correctly oriented relative to
+    the satellite's actual orbit, not just a flat matrix in ECI.
+    """
+    cs = (
+        _operator_policy.covariance_surrogate
+        if _operator_policy is not None
+        else CovarianceSurrogate()
+    )
+    cov_rtn = np.diag([
+        cs.radial_sigma_km ** 2,
+        cs.along_track_sigma_km ** 2,
+        cs.cross_track_sigma_km ** 2,
+    ])
+    r = np.array(r_sat_km, dtype=float)
+    v = np.array(v_sat_km_s, dtype=float)
+    rot = _rtn_to_eci_rotation(r, v)
+    cov_eci = rot @ cov_rtn @ rot.T
+    return cov_eci.flatten().tolist(), "surrogate_elliptical", None
+
+
 def _fetch_cdm_covariance(
     primary_norad: str,
     secondary_norad: str,
@@ -92,39 +130,46 @@ def _fetch_cdm_covariance(
     """Fetch RTN covariance from the ingest service and rotate to ECI.
 
     Returns (p_rel_km2, covariance_source, cdm_record_id).
-    Falls back to surrogate identity matrix on any failure.
+
+    SCRUM-369: always returns a real, usable covariance. Falls back to
+    the documented elliptical surrogate (_surrogate_covariance) on any
+    failure, including missing NORAD IDs -- previously, missing NORAD
+    IDs meant this function was never called at all, silently leaving
+    whatever covariance the caller had already supplied (the old
+    hardcoded 100 m UI value). The caller no longer supplies a
+    covariance, so this function is now the single source of truth,
+    called unconditionally.
     """
-    _SURROGATE = (
-        [0.01, 0.0, 0.0,
-         0.0, 0.01, 0.0,
-         0.0, 0.0, 0.01],
-        "surrogate_identity",
-        None,
-    )
+    if not primary_norad or not secondary_norad:
+        log.info(
+            "using surrogate covariance",
+            extra={"event": "surrogate_covariance", "reason": "primary_or_secondary_norad_missing"},
+        )
+        return _surrogate_covariance(r_sat_km, v_sat_km_s)
 
     try:
         url = f"{_ingest_url()}/cdm/{primary_norad}/{secondary_norad}"
         resp = http_requests.get(url, timeout=5.0)
     except Exception as exc:
         log.warning("covariance fetch failed", extra={"event": "covariance_fetch_fail", "reason": "unreachable", "pair": f"{primary_norad}/{secondary_norad}", "exc": str(exc)})
-        return _SURROGATE
+        return _surrogate_covariance(r_sat_km, v_sat_km_s)
 
     if resp.status_code == 404:
         log.warning("covariance fetch failed", extra={"event": "covariance_fetch_fail", "reason": "not_found", "pair": f"{primary_norad}/{secondary_norad}"})
-        return _SURROGATE
+        return _surrogate_covariance(r_sat_km, v_sat_km_s)
 
     if resp.status_code == 503:
         log.warning("covariance fetch failed", extra={"event": "covariance_fetch_fail", "reason": "store_unavailable", "pair": f"{primary_norad}/{secondary_norad}"})
-        return _SURROGATE
+        return _surrogate_covariance(r_sat_km, v_sat_km_s)
 
     if not resp.ok:
         log.warning("covariance fetch failed", extra={"event": "covariance_fetch_fail", "reason": f"http_{resp.status_code}", "pair": f"{primary_norad}/{secondary_norad}"})
-        return _SURROGATE
+        return _surrogate_covariance(r_sat_km, v_sat_km_s)
 
     try:
         data = resp.json()
         cov_rtn = np.array(data["covariance_combined_rtn"], dtype=float)
-        covariance_source = data.get("covariance_source", "surrogate_identity")
+        covariance_source = data.get("covariance_source", "surrogate_elliptical")
         cdm_record_id = data.get("id")
 
         r = np.array(r_sat_km, dtype=float)
@@ -138,7 +183,7 @@ def _fetch_cdm_covariance(
 
     except Exception as exc:
         log.warning("covariance parse failed", extra={"event": "covariance_parse_fail", "pair": f"{primary_norad}/{secondary_norad}", "exc": str(exc)})
-        return _SURROGATE
+        return _surrogate_covariance(r_sat_km, v_sat_km_s)
 
 
 def _post_planner_output(
@@ -216,6 +261,15 @@ _start_time = time.time()
 @asynccontextmanager
 async def lifespan(a):
     log.info("service starting", extra={"event": "startup", "version": SERVICE_VERSION, "policy_config": str(_POLICY_CONFIG_PATH)})
+    global _operator_policy
+    try:
+        _operator_policy = OperatorPolicy.from_yaml(str(_POLICY_CONFIG_PATH))
+    except Exception as exc:
+        log.warning(
+            "operator policy load failed at startup, using CovarianceSurrogate defaults",
+            extra={"event": "operator_policy_load_fail", "exc": str(exc)},
+        )
+        _operator_policy = None
     yield
     log.info("service shutting down", extra={"event": "shutdown", "version": SERVICE_VERSION})
 
@@ -274,7 +328,6 @@ async def ready() -> Dict[str, Any]:
                 f"Operator policy config not found: {_POLICY_CONFIG_PATH}"
             )
         # Attempt a parse to catch malformed YAML early.
-        from common.operator_policy import OperatorPolicy
         OperatorPolicy.from_yaml(str(_POLICY_CONFIG_PATH))
         return {
             "status":        "ready",
@@ -485,29 +538,32 @@ async def post_evaluate(request: Request):
         covariance_source = "UDL"
         cdm_record_id = None
     else:
-        covariance_source = "surrogate_identity"
-        cdm_record_id = None
         try:
             conj = body.get("conjunction", {})
             sat = body.get("satellite", {})
             primary_norad = conj.get("primary_norad")
             secondary_norad = str(conj.get("secondary_norad") or conj.get("obj_id", ""))
+            r_sat_km = sat.get("r_sat_km", [])
+            v_sat_km_s = sat.get("v_sat_km_s", [])
 
-            if primary_norad and secondary_norad:
-                r_sat_km = sat.get("r_sat_km", [])
-                v_sat_km_s = sat.get("v_sat_km_s", [])
-                p_rel_km2, covariance_source, cdm_record_id = _fetch_cdm_covariance(
-                    str(primary_norad),
-                    secondary_norad,
-                    r_sat_km,
-                    v_sat_km_s,
-                )
-                body["conjunction"]["p_rel_km2"] = p_rel_km2
-                body["conjunction"]["covariance_source"] = covariance_source
-            else:
-                log.info("using surrogate covariance", extra={"event": "surrogate_covariance", "reason": "primary_norad_not_provided"})
+            p_rel_km2, covariance_source, cdm_record_id = _fetch_cdm_covariance(
+                str(primary_norad) if primary_norad else "",
+                secondary_norad,
+                r_sat_km,
+                v_sat_km_s,
+            )
+            body["conjunction"]["p_rel_km2"] = p_rel_km2
+            body["conjunction"]["covariance_source"] = covariance_source
         except Exception as exc:
             log.warning("covariance adapter error", extra={"event": "covariance_adapter_error", "exc": str(exc)})
+            covariance_source = "surrogate_elliptical"
+            cdm_record_id = None
+            fallback_p_rel_km2, _, _ = _surrogate_covariance(
+                body.get("satellite", {}).get("r_sat_km", [0.0, 0.0, 0.0]),
+                body.get("satellite", {}).get("v_sat_km_s", [0.0, 0.0, 0.0]),
+            )
+            body["conjunction"]["p_rel_km2"] = fallback_p_rel_km2
+            body["conjunction"]["covariance_source"] = covariance_source
     # ----------------------------------------------------------------------
 
     try:

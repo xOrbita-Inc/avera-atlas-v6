@@ -114,6 +114,44 @@ class ScoringWeights:
         }
 
 
+@dataclass
+class CovarianceSurrogate:
+    """
+    SCRUM-369: documented fallback covariance, used when no real CDM/UDL
+    covariance is available (synthetic/demo events, or any lookup
+    failure). Replaces the old flat 100 m identity value, which made
+    real km-scale conjunctions look impossibly safe and get screened out
+    as trivial.
+
+    Values are RTN 1-sigma, in km. Elliptical rather than spherical,
+    since real orbit-determination uncertainty grows fastest along-track.
+    Defaults combine to ~2.57 km overall (sqrt(0.3^2 + 2.5^2 + 0.5^2)),
+    matching the ~2.7 km typical propagator combined asset+debris
+    uncertainty cited in the SCRUM-369 bug report.
+
+    Verified (SCRUM-369 item 6): delta_C_v25 tracks real Pc (compute_pc)
+    direction correctly against this shape across 6 real burn
+    directions, with the expected sensitivity pattern (strongest along
+    the tight radial axis, weakest along the loose along-track axis).
+
+    Change with care -- this affects both the Mahalanobis feasibility
+    screen and the delta_C scoring signal for every event without real
+    covariance.
+    """
+    radial_sigma_km:      float = 0.3
+    along_track_sigma_km: float = 2.5
+    cross_track_sigma_km: float = 0.5
+
+    def __post_init__(self) -> None:
+        for name, val in [
+            ("radial_sigma_km",      self.radial_sigma_km),
+            ("along_track_sigma_km", self.along_track_sigma_km),
+            ("cross_track_sigma_km", self.cross_track_sigma_km),
+        ]:
+            if val <= 0:
+                raise ValueError(f"{name} must be > 0")
+
+
 # ---------------------------------------------------------------------------
 # OperatorPolicy
 # ---------------------------------------------------------------------------
@@ -163,6 +201,9 @@ class OperatorPolicy:
 
     # -- Tier 1: scoring weights (configurable) ---------------------------
     scoring_weights: ScoringWeights     = field(default_factory=ScoringWeights)
+
+    # -- Tier 1: covariance surrogate (configurable, SCRUM-369) -----------
+    covariance_surrogate: CovarianceSurrogate = field(default_factory=CovarianceSurrogate)
 
     # -- Tier 1: operational philosophy (configurable) --------------------
     operational_philosophy: str         = "balanced"
@@ -240,11 +281,18 @@ class OperatorPolicy:
         mc = data.get("maneuver_constraints", {})
         sw = data.get("scoring_weights", {})
         fp = data.get("fleet_priority", {})
+        cs = data.get("covariance_surrogate_rtn_sigma_km", {})
 
         weights = ScoringWeights(
             lambda_dv            = float(sw.get("lambda_dv",            1.0)),
             lambda_lifetime      = float(sw.get("lambda_lifetime",      0.8)),
             lambda_slot_deviation = float(sw.get("lambda_slot_deviation", 1.2)),
+        )
+
+        covariance_surrogate = CovarianceSurrogate(
+            radial_sigma_km      = float(cs.get("radial",      0.3)),
+            along_track_sigma_km = float(cs.get("along_track", 2.5)),
+            cross_track_sigma_km = float(cs.get("cross_track", 0.5)),
         )
 
         windows = []
@@ -271,6 +319,7 @@ class OperatorPolicy:
             max_hours_before_tca       = float(mc.get("max_hours_before_tca",  72.0)),
             blackout_windows           = windows,
             scoring_weights            = weights,
+            covariance_surrogate       = covariance_surrogate,
             operational_philosophy     = str(data.get("operational_philosophy", "balanced")),
             fleet_priority_method      = str(fp.get("method", "highest_pc_first")),
             mission_lifetime_days_total = (

@@ -23,6 +23,27 @@ risk_thresholds:
   min_miss_distance_km: 1.0           # Hard floor on acceptable miss distance
   mahalanobis_screen_threshold: 4.0   # Skip events with MD above this
 
+# SCRUM-369: surrogate covariance used when no real CDM/UDL covariance is
+# available (synthetic/demo events, or any lookup failure). Replaces the
+# old flat 100 m identity value, which made real km-scale conjunctions
+# look impossibly safe and get screened out as trivial (SCRUM-369 root
+# cause). Values are RTN 1-sigma, in km, elliptical rather than
+# spherical, since real orbit-determination uncertainty grows fastest
+# along-track. Combines to ~2.7 km overall (matches typical propagator
+# combined asset+debris uncertainty), consistent with the ~2.7 km figure
+# in the SCRUM-369 bug report:
+#   sqrt(0.3^2 + 2.5^2 + 0.5^2) = ~2.57 km
+# Verified (SCRUM-369 item 6): delta_C_v25 tracks real Pc (compute_pc)
+# direction correctly against this shape across 6 real burn directions,
+# with the expected sensitivity pattern (strongest along the tight radial
+# axis, weakest along the loose along-track axis). Change with care --
+# this affects both the Mahalanobis feasibility screen and the delta_C
+# scoring signal for every event without real covariance.
+covariance_surrogate_rtn_sigma_km:
+  radial: 0.3
+  along_track: 2.5
+  cross_track: 0.5
+
 maneuver_constraints:
   max_dv_per_event_ms: 2.0            # Maximum burn per conjunction event [m/s]
   max_maneuvers_per_week: 3           # Fleet-level frequency limit

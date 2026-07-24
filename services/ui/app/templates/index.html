@@ -933,7 +933,6 @@ async function evaluateConjunction(conj,idx){
       ...(secondaryNoradId ? {secondary_norad: secondaryNoradId} : {}),
       t_ca_utc:new Date(Date.now()+conj.time_to_tca_s*1000).toISOString(),
       r_rel_km:conj.r_obj_km?[conj.r_obj_km[0]-asset_r[0],conj.r_obj_km[1]-asset_r[1],conj.r_obj_km[2]-asset_r[2]]:[conj.miss_distance_km,0.0,0.0],
-      p_rel_km2:[0.01,0,0,0,0.01,0,0,0,0.01],
       pc_precomputed:conj.pc>0?conj.pc:null},
     policy:getPolicy()
   };
@@ -1807,7 +1806,6 @@ function getPayloadContent(){
         obj_id:c.object_id,
         t_ca_utc:new Date(Date.now()+c.time_to_tca_s*1000).toISOString(),
         r_rel_km:c.r_obj_km?[c.r_obj_km[0]-ar[0],c.r_obj_km[1]-ar[1],c.r_obj_km[2]-ar[2]]:[c.miss_distance_km,0.0,0.0],
-        p_rel_km2:[0.01,0,0,0,0.01,0,0,0,0.01],
         pc_precomputed:c.pc>0?c.pc:null,
         miss_distance_km:c.miss_distance_km,
         risk_level:c.risk_level,
