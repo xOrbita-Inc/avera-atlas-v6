@@ -269,6 +269,25 @@ def evaluate_decision(pc: float, time_to_tca_min: float) -> Dict[str, Any]:
 # Main Processing Loop
 # =============================================================================
 
+def _validate_demo_asset_state(r0: np.ndarray, v0: np.ndarray) -> None:
+    """Sanity-check a demo asset state before Keplerian propagation.
+
+    SCRUM-370 places the demo asset on its real Keplerian orbit, so the provided
+    (r0, v0) must describe a sane, bound orbit. Warn loudly if it does not, so a
+    bad preset surfaces instead of silently producing a garbage asset track.
+    """
+    r_mag = float(np.linalg.norm(r0))
+    v_mag = float(np.linalg.norm(v0))
+    # Radius must be above the surface and within a generous Earth-orbit bound.
+    if not (R_EARTH < r_mag < 100000.0):
+        print(f"[WARN] demo asset |r0|={r_mag:.1f} km is not a sane orbital radius")
+    # Bound (elliptical) orbit: specific orbital energy must be negative.
+    energy = v_mag**2 / 2.0 - MU_EARTH / max(r_mag, 1e-6)
+    if energy >= 0.0:
+        print(f"[WARN] demo asset state is not bound (specific energy={energy:.3f} >= 0); "
+              f"Keplerian propagation will fall back to linear")
+
+
 def propagate_and_screen():
     """Main propagation and conjunction screening."""
     input_path = os.path.join(DATA_DIR, INPUT_FILE)
@@ -298,8 +317,9 @@ def propagate_and_screen():
     is_demo = "asset_state" in metadata
     if is_demo:
         # Use provided asset state
-        asset_r0 = np.array(metadata["asset_state"]["r_eci_km"])
-        asset_v0 = np.array(metadata["asset_state"]["v_eci_km_s"])
+        asset_r0 = np.array(metadata["asset_state"]["r_eci_km"], dtype=float)
+        asset_v0 = np.array(metadata["asset_state"]["v_eci_km_s"], dtype=float)
+        _validate_demo_asset_state(asset_r0, asset_v0)
         print(f"[PROP] Using demo scenario asset state")
         use_sgp4 = False
     else:
@@ -319,24 +339,39 @@ def propagate_and_screen():
         r_asset = np.array(r_asset) if isinstance(r_asset, tuple) else r_asset
         v_asset = np.array(v_asset) if isinstance(v_asset, tuple) else v_asset
     else:
-        # For demo scenarios, use linear propagation to preserve relative motion geometry
-        # This matches the debris propagation model
-        r_asset, v_asset = propagate_trajectory(asset_r0, asset_v0, times_sec, use_linear=is_demo)
-    
+        # SCRUM-370: the demo asset rides its real Keplerian orbit. It was
+        # previously propagated linearly (r = r0 + v0*t), which flew the asset
+        # thousands of km off-orbit over the conjunction window and corrupted the
+        # absolute state later fed to the planner. Debris is carried relative to
+        # this Keplerian track below, so relative geometry is unchanged.
+        r_asset, v_asset = propagate_trajectory(asset_r0, asset_v0, times_sec, use_linear=False)
+
     # Propagate Debris
-    # For demo scenarios, use linear propagation to preserve relative motion geometry
-    # For real data, use Keplerian propagation
+    # For real data, use Keplerian propagation. For demo scenarios (SCRUM-370),
+    # carry each debris as the asset's Keplerian trajectory plus the constant
+    # initial relative offset and relative velocity, so that
+    #     r_debris_i(t) - r_asset(t) == rel0_i + vrel_i * t   (exactly)
+    # identical to the previous linear-everything scheme. Because miss distance,
+    # TCA index, and the 2D Pc depend only on relative position/velocity (plus the
+    # fixed diagonal covariances), no preset's miss/TCA/risk/badge moves. Only the
+    # absolute asset and debris tracks change from straight lines to on-orbit arcs.
     n_objs = len(obj_ids)
     r_debris = np.zeros((n_objs, n_steps, 3))
     v_debris = np.zeros((n_objs, n_steps, 3))
-    
-    prop_method = "LINEAR (relative motion)" if is_demo else "Keplerian"
+
+    prop_method = "Keplerian asset + linear relative offset" if is_demo else "Keplerian"
     print(f"[PROP] Propagating {n_objs} objects with {prop_method} dynamics...")
-    
+
     for i in range(n_objs):
-        r_debris[i], v_debris[i] = propagate_trajectory(
-            r_eci_init[i], v_eci_init[i], times_sec, use_linear=is_demo
-        )
+        if is_demo:
+            rel0 = np.asarray(r_eci_init[i], dtype=float) - asset_r0
+            vrel = np.asarray(v_eci_init[i], dtype=float) - asset_v0
+            r_debris[i] = r_asset + rel0 + np.outer(times_sec, vrel)
+            v_debris[i] = v_asset + vrel
+        else:
+            r_debris[i], v_debris[i] = propagate_trajectory(
+                r_eci_init[i], v_eci_init[i], times_sec, use_linear=False
+            )
     
     # Conjunction Screening
     print(f"[PROP] Running conjunction assessment...")

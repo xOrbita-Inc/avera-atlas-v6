@@ -429,6 +429,11 @@ async def get_conjunctions():
             if r_objects is not None and r_asset is not None:
                 conj["r_obj_km"] = r_objects[i, tca_idx].tolist()
                 conj["r_asset_km"] = r_asset[tca_idx].tolist()
+                # SCRUM-370 Step 2: pass the real asset velocity at TCA so the
+                # planner orients the surrogate covariance in the asset's true
+                # orbital frame instead of against a hardcoded velocity.
+                if v_asset is not None:
+                    conj["v_asset_km_s"] = v_asset[tca_idx].tolist()
 
             conjunctions.append(conj)
 
@@ -690,6 +695,50 @@ async def run_scenario(request: Request):
         })
 
 
+# SCRUM-370 Step 3: curated three-object Demo preset. Each object is specified by
+# a target miss in the asset's RTN frame at closest approach, a TCA time on the
+# 60 s sample grid, and an approach speed. Because the asset rides a circular
+# equatorial orbit (Steps 1-2), the debris initial state is constructed in closed
+# form so the propagator's asset_kepler(t) + linear-relative-offset model
+# reproduces exactly this miss geometry, with closest approach forced onto t_star
+# (relative velocity is perpendicular to the target since along_track = 0).
+_DEMO_OBJECTS = [
+    # (name, miss_rtn_km [radial, along, cross], t_star_s, v_app_km_s, confidence)
+    ("OBJ-DEMO-ALWAYS", [0.30, 0.0, 0.10], 7200.0, 0.5, 0.9),
+    ("OBJ-DEMO-FLIP",   [0.10, 0.0, 0.40], 3600.0, 0.5, 0.9),
+    ("OBJ-DEMO-NEVER",  [0.20, 0.0, 3.00], 3600.0, 0.5, 0.9),
+]
+
+
+def _build_demo_preset(asset_r, asset_v, mu, r0_mag):
+    """Construct the curated Demo preset debris states analytically.
+
+    Returns (obj_ids, r_list, v_list, confidences). Fully deterministic: fixed
+    confidences, no np.random.
+    """
+    asset_r0 = np.asarray(asset_r, dtype=float)
+    asset_v0 = np.asarray(asset_v, dtype=float)
+    n = np.sqrt(mu / r0_mag**3)  # mean motion of the circular asset orbit
+
+    obj_ids, r_list, v_list, confidences = [], [], [], []
+    for name, miss_rtn, t_star, v_app, conf in _DEMO_OBJECTS:
+        theta = n * t_star
+        r_hat = np.array([np.cos(theta), np.sin(theta), 0.0])
+        t_hat = np.array([-np.sin(theta), np.cos(theta), 0.0])
+        n_hat = np.array([0.0, 0.0, 1.0])
+        R = np.column_stack([r_hat, t_hat, n_hat])
+        target_eci = R @ np.asarray(miss_rtn, dtype=float)
+        vrel_eci = v_app * t_hat  # perpendicular to target (along_track = 0)
+        rel0 = target_eci - vrel_eci * t_star
+        r_deb0 = asset_r0 + rel0
+        v_deb0 = asset_v0 + vrel_eci
+        obj_ids.append(name)
+        r_list.append(r_deb0.tolist())
+        v_list.append(v_deb0.tolist())
+        confidences.append(conf)
+    return obj_ids, r_list, v_list, confidences
+
+
 def _generate_synthetic_scenario(scenario):
     """Generate synthetic conjunction data with converging trajectories.
 
@@ -735,13 +784,18 @@ def _generate_synthetic_scenario(scenario):
         ],
     }
 
-    objects = defs.get(scenario, defs["mixed"])
-    obj_ids, r_list, v_list = [], [], []
-
-    for i, (sd, my, mz, va, lbl) in enumerate(objects):
-        obj_ids.append(f"OBJ-{lbl}-{i:03d}")
-        r_list.append([asset_r[0] + sd, asset_r[1] + my, asset_r[2] + mz])
-        v_list.append([asset_v[0] - va, asset_v[1], asset_v[2]])
+    if scenario == "demo":
+        obj_ids, r_list, v_list, confidences = _build_demo_preset(
+            asset_r, asset_v, MU, r_mag
+        )
+    else:
+        objects = defs.get(scenario, defs["mixed"])
+        obj_ids, r_list, v_list = [], [], []
+        for i, (sd, my, mz, va, lbl) in enumerate(objects):
+            obj_ids.append(f"OBJ-{lbl}-{i:03d}")
+            r_list.append([asset_r[0] + sd, asset_r[1] + my, asset_r[2] + mz])
+            v_list.append([asset_v[0] - va, asset_v[1], asset_v[2]])
+        confidences = np.random.uniform(0.75, 0.98, len(objects))
 
     os.makedirs(DATA_DIR, exist_ok=True)
     out = os.path.join(DATA_DIR, "states_multi.npz")
@@ -751,7 +805,7 @@ def _generate_synthetic_scenario(scenario):
         object_ids=np.array(obj_ids),
         r_eci_km=np.array(r_list),
         v_eci_km_s=np.array(v_list),
-        confidences=np.random.uniform(0.75, 0.98, len(objects)),
+        confidences=np.array(confidences),
         t_window=np.array([60.0, 1440]),
         metadata=json.dumps({
             "source": "demo_scenario",
