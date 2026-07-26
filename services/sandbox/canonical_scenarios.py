@@ -266,16 +266,14 @@ def run_tier1_coorbital_single_pass_scenario(
     This scenario validates the tracker IOD closure and measures along-track
     error against scenario truth at the solver-selected epoch.
     """
-    _ = seed
-
     host_r0, host_v = _circular_leo_state(radius_km=6978.137)
 
     relative_position_km = np.array(
-        [0.0, 18.0, 1.0],
+        [0.0, 20.0, 0.0],
         dtype=np.float64,
     )
     relative_velocity_km_s = np.array(
-        [0.0, 0.30, -0.08],
+        [0.0, 0.05, 0.0],
         dtype=np.float64,
     )
 
@@ -290,23 +288,59 @@ def run_tier1_coorbital_single_pass_scenario(
         40.0,
     ]
 
+    objects = {
+        "host_001": _make_canonical_sim_object(
+            object_id="host_001",
+            kind="host",
+            r_eci_km=host_r0,
+            v_eci_km_s=host_v,
+            size_bin="10cm",
+        ),
+        "debris_001": _make_canonical_sim_object(
+            object_id="debris_001",
+            kind="debris",
+            r_eci_km=debris_r0,
+            v_eci_km_s=debris_v,
+            size_bin="5cm",
+        ),
+    }
+
+    config = SimConfig(
+        seed=seed,
+        debris=DebrisConfig(count=1),
+        hosts=HostConfig(count=1),
+        integrator=IntegratorConfig(
+            dt_seconds=10.0,
+            duration_seconds=max(sample_times),
+            save_every_n_steps=1,
+        ),
+    )
+
+    sim_result = run_simulation(
+        objects,
+        config,
+    )
+
+    sensor_cfg = SensorConfig(
+        pointing_mode="velocity_aligned",
+    )
+
+    bundle = generate_observation_bundle(
+        sim_result=sim_result,
+        sensor_cfg=sensor_cfg,
+        seed=seed,
+    )
+
+    detected_observations = [
+        observation
+        for observation in bundle.detected_observations
+        if observation.host_id == "host_001"
+        and observation.debris_id == "debris_001"
+    ]
+
     observations = [
-        _make_iod_observation(
-            t_seconds=t_seconds,
-            observer_position_km=_propagate_linear(
-                host_r0,
-                host_v,
-                t_seconds,
-            ),
-            observer_velocity_km_s=host_v,
-            target_position_km=_propagate_linear(
-                debris_r0,
-                debris_v,
-                t_seconds,
-            ),
-            include_range=True,
-        )
-        for t_seconds in sample_times
+        _iod_observation_from_angular_observation(observation)
+        for observation in detected_observations
     ]
 
     solution = _run_tracker_iod(observations)
@@ -322,6 +356,7 @@ def run_tier1_coorbital_single_pass_scenario(
     passed = (
         bool(solution.success)
         and along_track_error_km is not None
+        and along_track_error_km > 0.0
         and len(observations) >= 3
         and 4.0 <= transit_time_seconds <= 40.0
         and along_track_error_km < 10.0
@@ -337,7 +372,11 @@ def run_tier1_coorbital_single_pass_scenario(
         ),
         metrics={
             "acceptance_validated": passed,
-            "validation_level": "measured_truth_comparison",
+            "validation_level": (
+                "noised_sensor_path_truth_comparison"
+                if passed
+                else "noised_sensor_path_truth_comparison_failed"
+            ),
             "host_count": 1,
             "debris_count": 1,
             "relative_speed_km_s": float(
@@ -345,6 +384,15 @@ def run_tier1_coorbital_single_pass_scenario(
             ),
             "transit_time_seconds": transit_time_seconds,
             "observation_count": len(observations),
+            "observation_source": "sensor_model_detection",
+            "angular_sigma_arcsec": 2.9,
+            "range_sigma_m": 50.0,
+            "range_noise_applied": True,
+            "angle_noise_applied": True,
+            "sensor_path_used": True,
+            "exact_truth_observation_path_used": False,
+            "sensor_observation_count": len(bundle.observations),
+            "detected_observation_count": len(detected_observations),
             "iod_solver_success": bool(solution.success),
             "iod_solver_observations_used": solution.observations_used,
             "iod_solver_method": solution.method_used,
