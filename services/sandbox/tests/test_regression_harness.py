@@ -18,14 +18,23 @@ def test_tier1_coorbital_single_pass_scenario_passes() -> None:
     assert report.scenario_id == "A"
     assert report.passed
     assert report.metrics["acceptance_validated"] is True
-    assert report.metrics["validation_level"] == "measured_truth_comparison"
+    assert report.metrics["validation_level"] == "noised_sensor_path_truth_comparison"
     assert report.metrics["host_count"] == 1
     assert report.metrics["debris_count"] == 1
     assert report.metrics["observation_count"] >= 3
+    assert report.metrics["observation_source"] == "sensor_model_detection"
+    assert report.metrics["sensor_path_used"] is True
+    assert report.metrics["exact_truth_observation_path_used"] is False
+    assert report.metrics["angle_noise_applied"] is True
+    assert report.metrics["range_noise_applied"] is True
+    assert report.metrics["angular_sigma_arcsec"] == 2.9
+    assert report.metrics["range_sigma_m"] == 50.0
+    assert report.metrics["detected_observation_count"] >= 3
     assert 4.0 <= report.metrics["transit_time_seconds"] <= 40.0
     assert report.metrics["iod_solver_success"] is True
     assert report.metrics["solution_epoch_seconds"] is not None
     assert report.metrics["along_track_error_km"] is not None
+    assert report.metrics["along_track_error_km"] > 0.0
     assert report.metrics["along_track_error_km"] < 10.0
     assert (
         report.metrics["along_track_error_source"]
