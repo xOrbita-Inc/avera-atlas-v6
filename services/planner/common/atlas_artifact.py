@@ -384,11 +384,15 @@ class PostManeuverProjection:
     recovery_plan : SlotRecoveryPlan or None
         Full slot recovery plan from 9.3/9.4. None for non-constellated.
     execution_error_modelled : bool
-        Always False in APS 2.5. Thrust misalignment and magnitude uncertainty
-        are not included in the post-maneuver covariance. m2_post, mahalanobis_post,
-        and risk_surrogate_post are therefore optimistic. APS 3.0 scope.
+        SCRUM-365: True when the satellite's PropulsionProfile carries
+        thrust_misalignment_deg and/or dv_magnitude_sigma, in which case
+        m2_post includes the resulting execution-error covariance
+        (Q_exec). False when the profile does not specify either
+        parameter (m2_post is then the pre-SCRUM-365, perfect-burn
+        estimate -- optimistic, as before).
     operator_note : str
-        Human-readable explanation of the execution error limitation.
+        Human-readable explanation of whether execution error is
+        reflected in this estimate, and why not if it isn't.
     """
     m2_post: float
     mahalanobis_post: float
@@ -564,11 +568,19 @@ def _build_verification_result(
             + " | ".join(failures)
         )
 
-    note += (
-        " Pass/fail based on nominal burn assumption. Execution error covariance "
-        "(thrust misalignment, magnitude uncertainty) not yet modelled. "
-        "Verification result may be optimistic. APS 3.0 scope."
-    )
+    if scoring.execution_error_modelled:
+        note += (
+            " Pass/fail includes execution error covariance (thrust "
+            "misalignment, magnitude uncertainty modelled from the "
+            "satellite's propulsion profile)."
+        )
+    else:
+        note += (
+            " Pass/fail based on nominal burn assumption. Execution error "
+            "covariance (thrust misalignment, magnitude uncertainty) not "
+            "modelled for this satellite (profile does not specify them). "
+            "Verification result may be optimistic."
+        )
 
     return VerificationResult(
         passed=passed,
@@ -987,11 +999,15 @@ def build_atlas_artifact(
             ),
             secondary_conflict=secondary,
             recovery_plan=scoring.recovery_plan,
-            execution_error_modelled=False,
+            execution_error_modelled=scoring.execution_error_modelled,
             operator_note=(
+                "m2_post includes execution error covariance (thrust misalignment "
+                "and magnitude uncertainty modelled from the satellite's propulsion "
+                "profile)."
+                if scoring.execution_error_modelled else
                 "m2_post excludes execution error covariance. Thrust misalignment and "
-                "magnitude uncertainty are not modelled. Post-maneuver separation may be "
-                "optimistic. APS 3.0 scope."
+                "magnitude uncertainty are not modelled for this satellite (profile "
+                "does not specify them). Post-maneuver separation may be optimistic."
             ),
         )
 
@@ -1023,7 +1039,14 @@ def build_atlas_artifact(
     )
     if scoring.covariance_quality == "dilution_region":
         constraints_applied.append("covariance_dilution_region_flagged")
-    constraints_applied.append("execution_error_not_modelled")
+    # SCRUM-365: this flag must reflect what actually happened for this
+    # candidate, not a hardcoded claim that execution error is always
+    # excluded (which stopped being true once Q_exec was modelled).
+    constraints_applied.append(
+        "execution_error_modelled"
+        if scoring.execution_error_modelled else
+        "execution_error_not_modelled"
+    )
 
     # Determine candidate rank of recommended direction
     best_dir = scoring.direction

@@ -68,6 +68,22 @@ class PropulsionProfile:
     max_dv_per_burn_m_s : float
         Maximum single-burn delta-v [m/s].
         Hard constraint; planner must not exceed this.
+    thrust_misalignment_deg : float or None
+        SCRUM-365: 1-sigma angular pointing error between commanded and
+        actual burn vector, in degrees. Matches pointing_error_deg in
+        gnc_interface.yaml's ExecutionError block (typical 0.5-1.0 deg,
+        bus-dependent). None means execution error is not modelled for
+        this satellite (nominal/perfect-burn behavior preserved).
+    dv_magnitude_sigma : float or None
+        SCRUM-365: 1-sigma fractional (dimensionless) magnitude
+        uncertainty on the commanded delta-v, e.g. 0.02 = 2%. Matches
+        sigma_mag in gnc_interface.yaml's ExecutionError block, where
+        dv_magnitude_sigma_m_s = sigma_mag * dv_commanded (typical
+        1-5% of commanded dv). This is a fixed hardware characteristic
+        (like isp_s), not a per-burn value -- the absolute m/s
+        uncertainty for a specific burn is computed from this fraction
+        at scoring time. None means execution error is not modelled for
+        this satellite (nominal/perfect-burn behavior preserved).
     """
     propulsion_type: str = PropulsionType.CHEMICAL
     isp_s: float = 220.0
@@ -77,6 +93,8 @@ class PropulsionProfile:
     power_available_w: Optional[float] = None
     thruster_efficiency: Optional[float] = None
     burn_window_s: Optional[float] = None
+    thrust_misalignment_deg: Optional[float] = None
+    dv_magnitude_sigma: Optional[float] = None
 
     def __post_init__(self) -> None:
         if self.isp_s <= 0:
@@ -95,6 +113,10 @@ class PropulsionProfile:
             raise ValueError("power_available_w must be > 0")
         if self.burn_window_s is not None and self.burn_window_s <= 0:
             raise ValueError("burn_window_s must be > 0")
+        if self.thrust_misalignment_deg is not None and self.thrust_misalignment_deg < 0:
+            raise ValueError("thrust_misalignment_deg must be >= 0")
+        if self.dv_magnitude_sigma is not None and not (0.0 <= self.dv_magnitude_sigma < 1.0):
+            raise ValueError("dv_magnitude_sigma must be in [0, 1)")
 
 
 @dataclass(frozen=True)

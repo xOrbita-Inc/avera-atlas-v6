@@ -107,6 +107,7 @@ from common.constellation_geometry import (
 from avoid.decision_model import (
     cw_phi_rv,
     mahalanobis_sq,
+    compute_q_exec_km2,
     _as_vec3,
     _as_cov9,
     _parse_iso_utc,
@@ -529,6 +530,7 @@ class ManeuverScoringResult:
     drag_correction_applied: bool
     candidates_v25: List[CandidateScore]
     evaluated_at: str
+    execution_error_modelled: bool = False
 
     def is_maneuver_recommended(self) -> bool:
         return self.direction != "no-burn"
@@ -708,8 +710,20 @@ def score_maneuver_candidates(
         delta_r_km = phi_rv @ dv_vec_km_s
         r_post_km = r_rel_km - delta_r_km
 
+        # SCRUM-365: execution-error covariance (thrust misalignment +
+        # magnitude uncertainty). Zero matrix (no change) when the
+        # profile does not carry these parameters -- AC1.
+        q_exec_km2 = compute_q_exec_km2(
+            direction_hat=d_hat,
+            dv_mag_km_s=dv_mag_m_s / 1000.0,
+            thrust_misalignment_deg=cap.propulsion.thrust_misalignment_deg,
+            dv_magnitude_sigma=cap.propulsion.dv_magnitude_sigma,
+            phi_rv=phi_rv,
+        )
+        s_covariance_km2 = p_rel_km2 + q_exec_km2
+
         # Mahalanobis gain (research doc sign: post - pre, positive = safer)
-        m2_post = mahalanobis_sq(r_post_km, p_rel_km2)
+        m2_post = mahalanobis_sq(r_post_km, s_covariance_km2)
         delta_C_v25 = m2_post - m2_pre      # research doc convention
         delta_C_v24 = m2_pre - m2_post      # v2.4 output convention
 
@@ -840,6 +854,15 @@ def score_maneuver_candidates(
         best_candidate.dv_avoid_m_s / max(1e-6, cap.lifetime.v_remaining_m_s)
     )
 
+    # SCRUM-365: reflects whether m2_post actually includes execution
+    # error, not a hardcoded False -- true whenever the profile carries
+    # either parameter (matches compute_q_exec_km2's own "both None ->
+    # zero contribution" check).
+    execution_error_modelled = (
+        cap.propulsion.thrust_misalignment_deg is not None
+        or cap.propulsion.dv_magnitude_sigma is not None
+    )
+
     return ManeuverScoringResult(
         conjunction_id=conjunction_id,
         # v2.4 preserved
@@ -868,6 +891,7 @@ def score_maneuver_candidates(
         drag_correction_applied=best_candidate.drag_correction_applied,
         candidates_v25=all_candidates_v25,
         evaluated_at=now_iso,
+        execution_error_modelled=execution_error_modelled,
     )
 
 
