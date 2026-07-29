@@ -48,11 +48,15 @@ info:
     t_margin = 30s.
 
     **Execution error**
-    APS 2.5 does not model execution error (execution_error_modelled: false
-    in PostManeuverProjection). GNCReport.execution_error and
-    PostBurnState.p_post_km2 are the inputs that close APS 3.0 gaps 6.3
-    (covariance propagation), 6.4 (execution error modeling), and 6.5
-    (Mahalanobis calibration).
+    SCRUM-365: modelled when the satellite's propulsion profile carries
+    thrust_misalignment_deg and/or dv_magnitude_sigma
+    (execution_error_modelled: true in PostManeuverProjection, Q_exec
+    added to the covariance before m2_post). False, and m2_post
+    optimistic, only when the profile does not specify either
+    parameter. GNCReport.execution_error and PostBurnState.p_post_km2
+    are the inputs that close APS 3.0 gaps 6.3 (covariance propagation)
+    and 6.5 (Mahalanobis calibration); 6.4 (execution error modeling)
+    is closed by SCRUM-365 for the planner's own pre-burn scoring.
 
     **Scope**
     This contract governs collision avoidance maneuvers only. The GNC layer

@@ -67,7 +67,10 @@ Scientific gaps carried forward (APS_2_5_Research_V3.ipynb §6)
     delta_a variation. APS 3.0 scope.
   - Covariance propagation: P_rel is consumed as a static snapshot.
     Dilution region flagged via covariance_quality field. APS 3.0 scope.
-  - Maneuver execution errors: not modelled. m2_post is optimistic. §6.4.
+  - Maneuver execution errors: modelled when the satellite's propulsion
+    profile carries thrust_misalignment_deg and/or dv_magnitude_sigma
+    (SCRUM-365, Q_exec added to S before m2_post). m2_post is optimistic
+    only when the profile does not specify either parameter.
 
 References
 ----------
@@ -582,6 +585,20 @@ class ManeuverScoringResult:
 # Main scoring function
 # ---------------------------------------------------------------------------
 
+def _execution_error_modelled(cap: SatelliteCapability) -> bool:
+    """SCRUM-365: whether this satellite's propulsion profile carries
+    either execution-error parameter. A property of the satellite's
+    configuration, not of whether any particular event needed a burn --
+    used identically for both go and no-go results so a satellite with
+    these parameters set is never misreported as not modelling
+    execution error just because this event didn't require a maneuver.
+    """
+    return (
+        cap.propulsion.thrust_misalignment_deg is not None
+        or cap.propulsion.dv_magnitude_sigma is not None
+    )
+
+
 def score_maneuver_candidates(
     conjunction_id: str,
     r_sat_km: np.ndarray,
@@ -671,6 +688,7 @@ def score_maneuver_candidates(
             nogo_code=nogo_code,
             nogo_human=nogo_human,
             now_iso=now_iso,
+            execution_error_modelled=_execution_error_modelled(cap),
         )
 
     # --- Constellation slot context ---
@@ -841,6 +859,7 @@ def score_maneuver_candidates(
             all_candidates_v24=all_candidates_v24,
             all_candidates_v25=all_candidates_v25,
             m2_post=m2_pre,
+            execution_error_modelled=_execution_error_modelled(cap),
         )
 
     # Post-maneuver risk surrogate
@@ -858,10 +877,7 @@ def score_maneuver_candidates(
     # error, not a hardcoded False -- true whenever the profile carries
     # either parameter (matches compute_q_exec_km2's own "both None ->
     # zero contribution" check).
-    execution_error_modelled = (
-        cap.propulsion.thrust_misalignment_deg is not None
-        or cap.propulsion.dv_magnitude_sigma is not None
-    )
+    execution_error_modelled = _execution_error_modelled(cap)
 
     return ManeuverScoringResult(
         conjunction_id=conjunction_id,
@@ -1052,8 +1068,20 @@ def _build_nogo_result(
     all_candidates_v24: Optional[List] = None,
     all_candidates_v25: Optional[List] = None,
     m2_post: Optional[float] = None,
+    execution_error_modelled: bool = False,
 ) -> ManeuverScoringResult:
-    """Construct a no-go ManeuverScoringResult."""
+    """Construct a no-go ManeuverScoringResult.
+
+    SCRUM-365 follow-up: execution_error_modelled must reflect whether
+    the satellite's propulsion profile carries the execution-error
+    parameters, not a hardcoded False. A no-go result still has no
+    burn (so m2_post trivially equals m2_pre, with no Q_exec applied --
+    there is nothing to have an execution error in), but the flag
+    itself describes the satellite's capability/configuration, not
+    whether this specific event happened to need a burn. Reporting a
+    hardcoded False here would misleadingly suggest the capability is
+    absent for a satellite whose profile actually supports it.
+    """
     no_burn_v24 = [{"direction": "no-burn", "dv_eci_km_s": [0,0,0],
                     "delta_C": 0.0, "utility": 0.0}]
     pc_pre = pc_precomputed
@@ -1087,4 +1115,5 @@ def _build_nogo_result(
         drag_correction_applied=False,
         candidates_v25=all_candidates_v25 or [],
         evaluated_at=now_iso,
+        execution_error_modelled=execution_error_modelled,
     )

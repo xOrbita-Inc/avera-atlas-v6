@@ -212,33 +212,28 @@ class TestExecutionErrorScoringIntegration:
         (lower m2_post), correcting the optimistic bias the ticket
         describes -- not leave it unchanged or make it look safer.
 
-        Uses a deliberately large thrust_misalignment_deg (30 deg) rather
-        than a realistic bus value (typically 0.5-1.0 deg per
-        gnc_interface.yaml) -- with std_vectors' P=0.01*I (an
-        artificially tight 100 m covariance built for screen-threshold
-        testing, not representative of real conjunction uncertainty),
-        a realistic execution error is many orders of magnitude smaller
-        than the existing covariance and would make this assertion
-        margin floating-point-noise-level, not a meaningful regression
-        guard. The exaggerated value here is for test robustness only.
+        1.0 deg matches the realistic bus range in gnc_interface.yaml
+        (typical 0.5-1.0 deg). Independently verified against SCRUM-386's
+        re-measurement: this scenario gives approximately -99.7% change
+        in m2_post, not a marginal effect.
         """
         perfect = self._score(self._make_cap(), policy)
-        misaligned = self._score(self._make_cap(thrust_misalignment_deg=30.0), policy)
+        misaligned = self._score(self._make_cap(thrust_misalignment_deg=1.0), policy)
         assert misaligned.m2_post < perfect.m2_post - 1e-6
 
     def test_magnitude_uncertain_m2_post_lower_than_perfect_burn(self, policy):
-        """See test_misaligned_burn_m2_post_lower_than_perfect_burn for
-        why 0.3 (30%) is used here instead of a realistic 1-5%."""
+        """0.02 (2%) matches the realistic bus range in gnc_interface.yaml
+        (typical 1-5%). See test_misaligned_burn_m2_post_lower_than_perfect_burn."""
         perfect = self._score(self._make_cap(), policy)
-        uncertain = self._score(self._make_cap(dv_magnitude_sigma=0.3), policy)
+        uncertain = self._score(self._make_cap(dv_magnitude_sigma=0.02), policy)
         assert uncertain.m2_post < perfect.m2_post - 1e-6
 
     def test_both_together_lower_than_either_alone(self, policy):
         """Combined error sources should be at least as conservative as
         either alone (more uncertainty added, never less)."""
-        misaligned_only = self._score(self._make_cap(thrust_misalignment_deg=30.0), policy)
+        misaligned_only = self._score(self._make_cap(thrust_misalignment_deg=1.0), policy)
         both = self._score(
-            self._make_cap(thrust_misalignment_deg=30.0, dv_magnitude_sigma=0.3), policy
+            self._make_cap(thrust_misalignment_deg=1.0, dv_magnitude_sigma=0.02), policy
         )
         assert both.m2_post <= misaligned_only.m2_post
 
@@ -261,3 +256,31 @@ class TestExecutionErrorScoringIntegration:
         expected_m2_post = mahalanobis_sq(r_post, self.P_COV)
 
         assert math.isclose(result.m2_post, expected_m2_post, rel_tol=1e-9)
+
+    def test_no_go_result_reflects_profile_not_hardcoded_false(self, policy):
+        """Regression guard (John's PR #52 review): a no-go result must
+        report execution_error_modelled based on the satellite's actual
+        propulsion profile, not a hardcoded False. Previously, any
+        no-go result (feasibility pre-screen failure, or no positive-
+        utility candidate) always reported False regardless of the
+        profile, which would misleadingly suggest a satellite that
+        genuinely carries thrust_misalignment_deg/dv_magnitude_sigma
+        does not model execution error, just because this particular
+        event did not produce a recommended burn.
+
+        Forces the no_utility_gain no-go path with an extreme lambda_dv,
+        so no candidate burn can ever have positive utility, on a
+        satellite whose profile does carry execution-error parameters.
+        """
+        extreme_policy = OperatorPolicy(
+            operator_id="TEST_OP", policy_version="2.5.0",
+            max_dv_per_event_ms=2.0, mission_lifetime_days_total=1825.0,
+            scoring_weights=ScoringWeights(
+                lambda_dv=1.0e6, lambda_lifetime=0.8, lambda_slot_deviation=1.2
+            ),
+        )
+        cap = self._make_cap(thrust_misalignment_deg=1.0)
+        result = self._score(cap, extreme_policy)
+
+        assert result.no_go_reason_code != ""  # confirms this actually hit the no-go path
+        assert result.execution_error_modelled is True

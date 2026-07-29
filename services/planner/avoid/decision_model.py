@@ -221,12 +221,17 @@ def compute_q_exec_km2(
     Two independent error sources on the actual (vs. commanded) delta-v:
       - Magnitude error: along the commanded direction, 1-sigma =
         dv_magnitude_sigma (a dimensionless fraction) * dv_mag_km_s.
-      - Pointing error: perpendicular to the commanded direction, 1-sigma
-        = dv_mag_km_s * sin(thrust_misalignment_deg), split evenly
-        between the two perpendicular axes (isotropic in the plane
-        perpendicular to the burn, absent a preferred clocking angle for
-        the misalignment -- a standard, defensible assumption with no
-        more specific information).
+      - Pointing error: perpendicular to the commanded direction.
+        thrust_misalignment_deg is treated as a per-axis 1-sigma, not a
+        total cone-angle sigma -- each of the two perpendicular axes
+        independently gets 1-sigma = dv_mag_km_s * sin(thrust_misalignment_deg)
+        (isotropic in the plane perpendicular to the burn, absent a
+        preferred clocking angle for the misalignment -- a standard,
+        defensible assumption with no more specific information). Total
+        perpendicular variance is therefore 2 * (dv_mag_km_s *
+        sin(thrust_misalignment_deg))^2 across both axes combined, not
+        split/halved between them. This matches the P_burn formula in
+        gnc_interface.yaml's ExecutionError block.
 
     This gives a 3x3 velocity-error covariance in a local frame aligned
     with the commanded burn direction, which is then propagated to a

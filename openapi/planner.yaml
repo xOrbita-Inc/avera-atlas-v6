@@ -660,10 +660,15 @@ components:
           description: |
             SCRUM-365: true when the satellite's propulsion profile carries
             thrust_misalignment_deg and/or dv_magnitude_sigma, in which case
-            m2_post, mahalanobis_post, and risk_surrogate_post include the
-            resulting execution-error covariance (Q_exec). False when the
-            profile does not specify either parameter, in which case these
-            values reflect a perfect-burn assumption and are optimistic.
+            m2_post and mahalanobis_post include the resulting
+            execution-error covariance (Q_exec). False when the profile
+            does not specify either parameter, in which case these values
+            reflect a perfect-burn assumption and are optimistic.
+            risk_surrogate_post only reflects this when it is derived
+            from m2_post (1/m2_post); when a precomputed Pc is supplied
+            for the conjunction, risk_surrogate_post is that value
+            directly and does not include Q_exec at all, regardless of
+            execution_error_modelled.
         operator_note:
           type: string
           description: |
