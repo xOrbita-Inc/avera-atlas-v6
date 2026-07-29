@@ -42,6 +42,10 @@ from avoid.decision_model import (
     evaluate_batch,
 )
 from common.maneuver_scorer import evaluate_conjunction_v25, _policy_from_dict
+from common.evidence_record import (
+    EvidenceRecord, RecordType, canonical_json, build_decision_record,
+    GENESIS_HASH,
+)
 from common.atlas_artifact import build_atlas_artifact, DecisionLog
 from common.satellite_capability import SatelliteCapability
 from common.logging_setup import build_logger, _POLICY_CONFIG_PATH, SERVICE_NAME, SERVICE_VERSION
@@ -250,6 +254,136 @@ def _post_planner_output(
         log.warning("audit write failed", extra={"event": "audit_write_failed", "cdm_record_id": cdm_record_id, "exc": str(exc)})
 
 
+# SCRUM-377: audit writes must not fail silently. A missing evidence record is
+# as damaging as a modified one, and the old fire-and-forget path swallowed
+# every exception, so loss was undetectable. Failures are counted here and
+# surfaced on /health so a gap is visible without reading logs.
+_audit_failures: Dict[str, Any] = {
+    "evidence_write_failures": 0,
+    "decision_log_write_failures": 0,
+    "last_error": "",
+    "last_failed_record_id": "",
+}
+
+
+def _note_audit_failure(kind: str, record_id: str, exc: str) -> None:
+    key = f"{kind}_write_failures"
+    _audit_failures[key] = _audit_failures.get(key, 0) + 1
+    _audit_failures["last_error"] = exc
+    _audit_failures["last_failed_record_id"] = record_id
+    log.error(
+        "audit write failed, evidence chain may have a gap",
+        extra={"event": "audit_write_failed", "kind": kind, "record_id": record_id, "exc": exc},
+    )
+
+
+def _evidence_values(artifact, decision_log, policy: Dict[str, Any]) -> Dict[str, Any]:
+    """Map what exists on main today onto the MAF section 10 field catalogue.
+
+    Only fields with a real producer are returned. Everything else is left for
+    EvidenceRecord.build() to mark producer_not_implemented, so an absent value
+    is never mistaken for a measured one.
+    """
+    risk = artifact.risk_summary
+    values: Dict[str, Any] = {
+        "conjunction_id": artifact.conjunction_id,
+        "timestamp": decision_log.logged_at,
+        "software_version": SERVICE_VERSION,
+        "model_version": SERVICE_VERSION,
+        "policy_version": str(policy.get("policy_version", "")),
+        "inputs_and_provenance": {
+            "sat_id": artifact.sat_id,
+            "operator_id": str(policy.get("operator_id", "")),
+            "evaluated_at": artifact.evaluated_at,
+            "tca_utc": risk.tca_utc,
+            "decision": decision_log.decision,
+            "reason_code": decision_log.reason_code,
+        },
+        "covariance_state": {
+            "covariance_quality": risk.covariance_quality,
+            "mahalanobis_pre": risk.mahalanobis_pre,
+        },
+        "orbit_state": {
+            "miss_distance_km": risk.miss_distance_km,
+            "tca_utc": risk.tca_utc,
+        },
+        "candidate_maneuvers": _candidate_evidence(artifact),
+    }
+    if risk.pc_pre is not None:
+        values["pc_at_transition"] = risk.pc_pre
+    return values
+
+
+def _candidate_evidence(artifact) -> List[Dict[str, Any]]:
+    """Candidates considered, and why the ones not chosen were not chosen.
+
+    MAF section 10 requires the rejected candidates, not just the winner.
+    """
+    out: List[Dict[str, Any]] = []
+    chosen = artifact.direction
+    for c in (getattr(artifact.rationale, "all_candidates", None) or []):
+        entry = dict(c) if isinstance(c, dict) else {"direction": str(c)}
+        direction = entry.get("direction", "")
+        entry["selected"] = (direction == chosen)
+        if not entry["selected"]:
+            entry.setdefault(
+                "rejection_reason",
+                "lower utility than the selected candidate",
+            )
+        out.append(entry)
+    if not out and artifact.no_go is not None:
+        out.append({
+            "direction": "no-burn",
+            "selected": True,
+            "rejection_reason": artifact.no_go.reason_code,
+        })
+    return out
+
+
+def _post_evidence_record(artifact, decision_log, policy: Dict[str, Any]) -> Optional[str]:
+    """Append one decision record to this satellite's evidence chain.
+
+    Chain head is read from ingest so seq and prev_hash are correct. Ingest
+    rejects an out-of-order append, so a race produces a refusal rather than a
+    corrupted chain.
+    """
+    chain_id = artifact.sat_id or "UNKNOWN-SAT"
+    record_id = "?"
+    try:
+        head = http_requests.get(
+            f"{_ingest_url()}/store/evidence/{chain_id}/head", timeout=5.0
+        ).json()
+        seq = int(head.get("next_seq", 0))
+        prev_hash = head.get("content_hash", GENESIS_HASH)
+
+        record = build_decision_record(
+            chain_id=chain_id,
+            seq=seq,
+            prev_hash=prev_hash,
+            values=_evidence_values(artifact, decision_log, policy),
+        )
+        record_id = record.record_id
+        payload = {
+            "record": record.to_dict(),
+            "canonical_payload": canonical_json(record._hashable_payload()),
+        }
+        resp = http_requests.post(
+            f"{_ingest_url()}/evidence_record", json=payload, timeout=5.0
+        )
+        if resp.status_code != 201:
+            _note_audit_failure("evidence", record_id, f"status {resp.status_code}: {resp.text[:200]}")
+            return None
+        log.info(
+            "evidence record appended",
+            extra={"event": "evidence_record_appended", "record_id": record_id,
+                   "pending_producers": record.pending_producers()},
+        )
+        return record_id
+    except Exception as exc:
+        _note_audit_failure("evidence", record_id, str(exc))
+        return None
+
+
 def _post_decision_log(decision_log) -> None:
     """Persist the full DecisionLog audit record to the ingest store (SCRUM-351).
 
@@ -267,9 +401,9 @@ def _post_decision_log(decision_log) -> None:
         url = f"{_ingest_url()}/decision_log"
         resp = http_requests.post(url, json=payload, timeout=5.0)
         if resp.status_code != 201:
-            log.warning("decision log write unexpected status", extra={"event": "decision_log_write_unexpected_status", "status": resp.status_code, "log_id": decision_log.log_id})
+            _note_audit_failure("decision_log", decision_log.log_id, f"status {resp.status_code}")
     except Exception as exc:
-        log.warning("decision log write failed", extra={"event": "decision_log_write_failed", "log_id": getattr(decision_log, "log_id", "?"), "exc": str(exc)})
+        _note_audit_failure("decision_log", getattr(decision_log, "log_id", "?"), str(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +462,8 @@ async def health() -> Dict[str, Any]:
         "service":  SERVICE_NAME,
         "version":  SERVICE_VERSION,
         "uptime_s": round(time.time() - _start_time, 1),
+        # SCRUM-377: a failed audit write must be visible without reading logs.
+        "audit": dict(_audit_failures),
     }
 
 
@@ -695,6 +831,9 @@ async def post_evaluate(request: Request):
                 result["decision_log_id"] = decision_log.log_id
                 result["decision_log"] = vars(decision_log)
                 _post_decision_log(decision_log)
+                _ev_id = _post_evidence_record(artifact, decision_log, _pol)
+                if _ev_id:
+                    result["evidence_record_id"] = _ev_id
             except Exception as exc:
                 log.warning("decision log build failed", extra={"event": "decision_log_build_failed", "exc": str(exc)})
             log.info("atlas artifact built", extra={"event": "artifact_built", "conjunction_id": scoring.conjunction_id, "summary": artifact.operator_summary()})
