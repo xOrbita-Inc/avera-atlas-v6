@@ -4,3 +4,4 @@ numpy>=1.26,<2.0
 requests==2.31.0
 pyyaml>=6.0
 sgp4>=2.22
+scipy==1.11.4        # SCRUM-388: required by libs/aps_math.pc_utils (matches propagator pin)

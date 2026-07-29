@@ -22,7 +22,7 @@ from typing import Tuple, List, Dict, Any
 from sgp4.api import Satrec, WGS72
 
 # Import Pc utilities
-from pc_utils import compute_pc, default_covariance_from_uncertainty
+from aps_math.pc_utils import compute_pc, default_covariance_from_uncertainty
 
 # === CONSTANTS ===
 MU_EARTH = 398600.4418  # km³/s² - Earth gravitational parameter

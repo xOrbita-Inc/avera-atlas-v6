@@ -1,0 +1,36 @@
+# SCRUM-388: the planner and propagator now build from the repository root so
+# they can COPY libs/aps_math. Without this file the whole repo becomes build
+# context for those two images, which is slow and ships things that have no
+# business in a runtime image.
+
+.git
+.github
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.claude
+.claude
+
+# Tests and fixtures are not runtime artefacts.
+**/tests/
+conftest.py
+**/conftest.py
+
+# Docs, deployment manifests and local tooling.
+docs/
+k8s/
+demo/
+scripts/
+openapi/
+*.md
+docker-compose*.yaml
+
+# Other services are not part of these two images.
+services/detector/
+services/ingest/
+services/physics-classifier/
+services/sandbox/
+services/tracker/
+services/ui/
+services/viz/
+services/voice/

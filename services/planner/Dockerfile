@@ -19,7 +19,7 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-COPY requirements.txt .
+COPY services/planner/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy all runtime paths.
@@ -27,10 +27,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # container does not fail the moment atlas_artifact integration merges.
 # config/ is baked in so the default operator_policy_leo.yaml ships in
 # the image and /ready can verify it loads without a volume mount.
-COPY avoid/   /app/avoid/
-COPY common/  /app/common/
-COPY config/  /app/config/
-COPY server.py .
+# SCRUM-388: build context is the repository root so libs/ is reachable.
+COPY libs/aps_math/ /app/aps_math/
+COPY services/planner/avoid/   /app/avoid/
+COPY services/planner/common/  /app/common/
+COPY services/planner/config/  /app/config/
+COPY services/planner/server.py .
 
 # Non-root user -- principle of least privilege.
 RUN useradd --no-create-home --shell /bin/false planner \
