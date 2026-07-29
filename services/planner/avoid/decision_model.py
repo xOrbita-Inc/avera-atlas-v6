@@ -205,6 +205,112 @@ def mahalanobis_sq(r_km: np.ndarray, cov_km2: np.ndarray) -> float:
     return float(r_km.T @ inv_cov @ r_km)
 
 
+def compute_q_exec_km2(
+    direction_hat: np.ndarray,
+    dv_mag_km_s: float,
+    thrust_misalignment_deg: Optional[float],
+    dv_magnitude_sigma: Optional[float],
+    phi_rv: np.ndarray,
+) -> np.ndarray:
+    """
+    SCRUM-365: execution-error position covariance contribution (Q_exec),
+    from thrust misalignment and burn-magnitude uncertainty.
+
+    Physics
+    -------
+    Two independent error sources on the actual (vs. commanded) delta-v:
+      - Magnitude error: along the commanded direction, 1-sigma =
+        dv_magnitude_sigma (a dimensionless fraction) * dv_mag_km_s.
+      - Pointing error: perpendicular to the commanded direction.
+        thrust_misalignment_deg is treated as a per-axis 1-sigma, not a
+        total cone-angle sigma -- each of the two perpendicular axes
+        independently gets 1-sigma = dv_mag_km_s * sin(thrust_misalignment_deg)
+        (isotropic in the plane perpendicular to the burn, absent a
+        preferred clocking angle for the misalignment -- a standard,
+        defensible assumption with no more specific information). Total
+        perpendicular variance is therefore 2 * (dv_mag_km_s *
+        sin(thrust_misalignment_deg))^2 across both axes combined, not
+        split/halved between them. This matches the P_burn formula in
+        gnc_interface.yaml's ExecutionError block.
+
+    This gives a 3x3 velocity-error covariance in a local frame aligned
+    with the commanded burn direction, which is then propagated to a
+    position-error covariance using the SAME linear map (phi_rv) already
+    used elsewhere in this module to convert a commanded delta-v into a
+    post-maneuver position change (Cov(A x) = A Cov(x) A^T).
+
+    Frame note (matches existing convention, does not fix it)
+    -----------------------------------------------------------
+    phi_rv is a Clohessy-Wiltshire state-transition block defined in
+    true RTN (radial/transverse/normal) components. The caller (see
+    maneuver_scorer.py) already applies phi_rv directly to an ECI-frame
+    delta-v vector, which is only exact when the satellite's local
+    R/T/N axes happen to align with the ECI axes -- a pre-existing
+    simplification in this codebase, not something introduced here.
+    This function deliberately mirrors that same convention (building
+    the error covariance in the direction_hat frame exactly as the
+    caller builds dv_vec_km_s, and applying phi_rv the same way) so
+    Q_exec composes consistently with the existing, already-reviewed
+    r_post_km calculation. It does not independently "correct" the
+    RTN/ECI handling -- doing so here while delta_r_km uses the old
+    convention would make the position estimate and its uncertainty
+    internally inconsistent, which is worse than the existing
+    approximation alone. Fully resolving the RTN/ECI handling is a
+    separate, out-of-scope correction (flag for a future ticket if the
+    team wants it fixed for both quantities together).
+
+    Parameters
+    ----------
+    direction_hat : np.ndarray
+        Unit vector of the commanded burn direction, same frame as the
+        caller's dv_vec_km_s (currently ECI, per the note above).
+    dv_mag_km_s : float
+        Commanded delta-v magnitude [km/s].
+    thrust_misalignment_deg : float or None
+        1-sigma pointing error [deg]. None treated as 0 (no contribution).
+    dv_magnitude_sigma : float or None
+        1-sigma fractional magnitude uncertainty (dimensionless). None
+        treated as 0 (no contribution).
+    phi_rv : np.ndarray
+        3x3 CW Phi_rv block (from cw_phi_rv), same one used for the
+        nominal delta_r_km calculation for this candidate.
+
+    Returns
+    -------
+    np.ndarray
+        3x3 position-error covariance [km^2], same frame as delta_r_km.
+        All-zero matrix if both parameters are None (preserves existing
+        perfect-burn behavior exactly -- AC1).
+    """
+    if thrust_misalignment_deg is None and dv_magnitude_sigma is None:
+        return np.zeros((3, 3))
+
+    misalignment_rad = (
+        math.radians(thrust_misalignment_deg) if thrust_misalignment_deg is not None else 0.0
+    )
+    sigma_mag_frac = dv_magnitude_sigma if dv_magnitude_sigma is not None else 0.0
+
+    u = direction_hat / np.linalg.norm(direction_hat)
+    # Any vector not parallel to u, to build a perpendicular basis.
+    seed = np.array([1.0, 0.0, 0.0]) if abs(u[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    p1 = np.cross(u, seed)
+    p1 = p1 / np.linalg.norm(p1)
+    p2 = np.cross(u, p1)
+
+    sigma_along_km_s = sigma_mag_frac * dv_mag_km_s
+    sigma_perp_km_s = dv_mag_km_s * math.sin(misalignment_rad)
+
+    # Velocity-error covariance in the {u, p1, p2} local burn frame.
+    q_v_local = np.diag([sigma_along_km_s ** 2, sigma_perp_km_s ** 2, sigma_perp_km_s ** 2])
+    basis = np.column_stack([u, p1, p2])
+    q_v = basis @ q_v_local @ basis.T
+
+    # Propagate velocity-error covariance to position-error covariance,
+    # using the same phi_rv already applied to the nominal delta-v.
+    q_exec_km2 = phi_rv @ q_v @ phi_rv.T
+    return q_exec_km2
+
+
 # -----------------------------------------------------------------------------
 # Policy + core evaluation
 # -----------------------------------------------------------------------------

@@ -49,7 +49,7 @@ info:
     - No fields renamed or removed (SCRUM-281 constraint satisfied).
   contact:
     name: xOrbita APS Team
-  version: 2.5.3
+  version: 2.5.4
 servers:
 - url: http://localhost:8060
   description: Local / Jetson dev
@@ -658,15 +658,23 @@ components:
         execution_error_modelled:
           type: boolean
           description: |
-            Always false in APS 2.5. Thrust misalignment and magnitude uncertainty
-            are not included in the post-maneuver covariance. m2_post,
-            mahalanobis_post, and risk_surrogate_post are therefore optimistic.
-            APS 3.0 scope.
+            SCRUM-365: true when the satellite's propulsion profile carries
+            thrust_misalignment_deg and/or dv_magnitude_sigma, in which case
+            m2_post and mahalanobis_post include the resulting
+            execution-error covariance (Q_exec). False when the profile
+            does not specify either parameter, in which case these values
+            reflect a perfect-burn assumption and are optimistic.
+            risk_surrogate_post only reflects this when it is derived
+            from m2_post (1/m2_post); when a precomputed Pc is supplied
+            for the conjunction, risk_surrogate_post is that value
+            directly and does not include Q_exec at all, regardless of
+            execution_error_modelled.
         operator_note:
           type: string
           description: |
-            Human-readable explanation of the execution error limitation.
-            Present whenever execution_error_modelled is false.
+            Human-readable explanation of whether execution error is
+            reflected in this estimate, and why not if it isn't. Always
+            present, regardless of execution_error_modelled's value.
     NoGoReasoning:
       type: object
       description: "A5: Why are we not acting?"
@@ -714,6 +722,11 @@ components:
           type: number
         verification_note:
           type: string
+          description: |
+            Pass/fail summary plus a note on whether execution error
+            (thrust misalignment, magnitude uncertainty) is reflected in
+            this verification, matching PostManeuverProjection's
+            execution_error_modelled for the same candidate.
     MissionImpactSummary:
       type: object
       properties:
