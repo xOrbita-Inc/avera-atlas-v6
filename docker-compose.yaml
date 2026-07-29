@@ -41,7 +41,7 @@ services:
     restart: unless-stopped
 
   propagator:
-    build: {context: ./services/propagator}
+    build: {context: ., dockerfile: services/propagator/Dockerfile}   # SCRUM-388: root context for libs/aps_math
     image: avera/propagator:v6
     environment: [DATA_DIR=/data/planner_artifacts]
     volumes: [planner_data:/data/planner_artifacts]
@@ -49,7 +49,7 @@ services:
     restart: unless-stopped
 
   planner:
-    build: {context: ./services/planner}
+    build: {context: ., dockerfile: services/planner/Dockerfile}   # SCRUM-388: root context for libs/aps_math
     image: avera/planner:v6
     ports: ["8060:8060"]
     environment:
