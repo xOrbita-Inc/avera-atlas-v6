@@ -30,7 +30,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import requests as http_requests
@@ -277,12 +277,19 @@ def _note_audit_failure(kind: str, record_id: str, exc: str) -> None:
     )
 
 
-def _evidence_values(artifact, decision_log, policy: Dict[str, Any]) -> Dict[str, Any]:
+def _evidence_values(
+    artifact, decision_log, policy: Dict[str, Any]
+) -> Tuple[Dict[str, Any], List[str]]:
     """Map what exists on main today onto the MAF section 10 field catalogue.
 
-    Only fields with a real producer are returned. Everything else is left for
-    EvidenceRecord.build() to mark producer_not_implemented, so an absent value
-    is never mistaken for a measured one.
+    Returns (values, not_applicable).
+
+    The split matters. producer_not_implemented means the component that would
+    fill this field has not shipped. not_applicable means the producer exists
+    and this particular event simply had nothing to put there, e.g. a request
+    that supplied no Pc. Collapsing the two would make pending_producers()
+    report "main" as an outstanding ticket, which is meaningless, and would
+    hide which fields are genuinely still owed by 378 to 382.
     """
     risk = artifact.risk_summary
     values: Dict[str, Any] = {
@@ -309,9 +316,14 @@ def _evidence_values(artifact, decision_log, policy: Dict[str, Any]) -> Dict[str
         },
         "candidate_maneuvers": _candidate_evidence(artifact),
     }
+    not_applicable: List[str] = []
     if risk.pc_pre is not None:
         values["pc_at_transition"] = risk.pc_pre
-    return values
+    else:
+        # The producer exists; this request carried no Pc.
+        not_applicable.append("pc_at_transition")
+
+    return values, not_applicable
 
 
 def _candidate_evidence(artifact) -> List[Dict[str, Any]]:
@@ -347,8 +359,18 @@ def _post_evidence_record(artifact, decision_log, policy: Dict[str, Any]) -> Opt
     rejects an out-of-order append, so a race produces a refusal rather than a
     corrupted chain.
     """
-    chain_id = artifact.sat_id or "UNKNOWN-SAT"
+    chain_id = artifact.sat_id or "UNKNOWN"
     record_id = "?"
+    if chain_id == "UNKNOWN":
+        # Not fatal: an unidentifiable satellite still gets an audit record.
+        # But every such record lands in one shared chain, so say so loudly
+        # rather than letting distinct spacecraft interleave silently.
+        log.warning(
+            "evidence chain has no satellite identity; records will share the "
+            "UNKNOWN chain",
+            extra={"event": "evidence_chain_unidentified",
+                   "conjunction_id": artifact.conjunction_id},
+        )
     try:
         head = http_requests.get(
             f"{_ingest_url()}/store/evidence/{chain_id}/head", timeout=5.0
@@ -356,11 +378,13 @@ def _post_evidence_record(artifact, decision_log, policy: Dict[str, Any]) -> Opt
         seq = int(head.get("next_seq", 0))
         prev_hash = head.get("content_hash", GENESIS_HASH)
 
+        ev_values, ev_na = _evidence_values(artifact, decision_log, policy)
         record = build_decision_record(
             chain_id=chain_id,
             seq=seq,
             prev_hash=prev_hash,
-            values=_evidence_values(artifact, decision_log, policy),
+            values=ev_values,
+            not_applicable=ev_na,
         )
         record_id = record.record_id
         payload = {

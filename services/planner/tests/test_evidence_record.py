@@ -294,3 +294,83 @@ class TestSerialization:
     def test_record_id_is_chain_and_seq(self):
         rec = _chain(2)[1]
         assert rec.record_id == "SAT-A#1"
+
+
+# ---------------------------------------------------------------------------
+# Chain identity and field-state precision
+#
+# Both of these were found by running the planner against a live ingest rather
+# than a mocked one. Neither was caught by the unit tests above, which is the
+# argument for the end-to-end run being part of the story rather than optional.
+# ---------------------------------------------------------------------------
+
+class TestChainIdentity:
+    def test_sat_id_falls_back_to_norad_id(self):
+        """The evaluate contract carries norad_id, not sat_id.
+
+        Before this, every real request produced sat_id "UNKNOWN", which meant
+        every satellite's audit records would have landed in one shared chain.
+        """
+        from common.satellite_capability import SatelliteCapability
+
+        cap = SatelliteCapability.from_request({"norad_id": 25544, "a_ref_km": 6778.0})
+        assert cap.sat_id == "25544"
+
+    def test_explicit_sat_id_still_wins(self):
+        from common.satellite_capability import SatelliteCapability
+
+        cap = SatelliteCapability.from_request(
+            {"sat_id": "XORB-1", "norad_id": 25544, "a_ref_km": 6778.0}
+        )
+        assert cap.sat_id == "XORB-1"
+
+    def test_unidentifiable_satellite_still_yields_a_chain_id(self):
+        from common.satellite_capability import SatelliteCapability
+
+        cap = SatelliteCapability.from_request({"a_ref_km": 6778.0})
+        assert cap.sat_id == "UNKNOWN"
+
+
+class TestNotApplicableVersusNotImplemented:
+    """A field whose producer exists but had no input for this event must be
+    not_applicable, not producer_not_implemented.
+
+    Collapsing the two puts "main" into pending_producers(), which reads as an
+    outstanding ticket that does not exist, and hides which fields 378 to 382
+    genuinely still owe.
+    """
+
+    @staticmethod
+    def _all_main_fields_except(*omit):
+        """Populate everything main already produces, minus the named fields."""
+        return {
+            name: f"value-for-{name}"
+            for name, producer in FIELD_PRODUCERS.items()
+            if producer == "main" and name not in omit
+        }
+
+    def test_missing_input_is_not_applicable_not_producer_missing(self):
+        rec = build_decision_record(
+            "SAT-NA", 0, GENESIS_HASH,
+            self._all_main_fields_except("pc_at_transition"),
+            not_applicable=["pc_at_transition"],
+        )
+        assert rec.fields["pc_at_transition"]["state"] == FieldState.NOT_APPLICABLE
+        assert "main" not in rec.pending_producers()
+
+    def test_pending_producers_are_only_real_outstanding_tickets(self):
+        rec = build_decision_record(
+            "SAT-NA", 0, GENESIS_HASH,
+            self._all_main_fields_except("pc_at_transition"),
+            not_applicable=["pc_at_transition"],
+        )
+        assert rec.pending_producers() == [
+            "SCRUM-375", "SCRUM-378", "SCRUM-379", "SCRUM-382", "unassigned",
+        ]
+
+    def test_an_unpopulated_main_field_does_show_up_as_owed(self):
+        """The inverse, so the test above cannot pass vacuously."""
+        rec = build_decision_record(
+            "SAT-NA", 0, GENESIS_HASH, {"conjunction_id": "C1"},
+        )
+        assert "main" in rec.pending_producers()
