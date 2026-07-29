@@ -346,7 +346,14 @@ class SatelliteCapability:
         Build from a v2.5 OpenAPI satellite dict.
         Falls back to v2.4-compatible defaults for any missing sub-profile.
         """
-        sat_id   = str(sat.get("sat_id", "UNKNOWN"))
+        # SCRUM-377: fall back to norad_id before giving up on identity.
+        # The evaluate contract carries the satellite as norad_id, not sat_id,
+        # so every real request was collapsing to the literal "UNKNOWN". That
+        # was cosmetic while sat_id only appeared inside a DecisionLog id, but
+        # the evidence chain is keyed per satellite, and a constant key merges
+        # every spacecraft's audit trail into one chain. Found by running the
+        # planner against a live ingest rather than a mocked one.
+        sat_id   = str(sat.get("sat_id") or sat.get("norad_id") or "UNKNOWN")
         a_ref_km = float(sat.get("a_ref_km", 7000.0))
 
         # PropulsionProfile

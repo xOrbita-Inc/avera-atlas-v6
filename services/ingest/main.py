@@ -12,7 +12,10 @@ from spacetrack_client import SpaceTrackClient
 from cdm_parser import parse_cdm_kvn
 from cdm_to_conjunction import cdm_to_conjunction_state
 from fastapi.responses import JSONResponse
-from db import init_db, save_cdm_record, CdmRecord, PlannerOutput, DecisionLogRecord, get_session
+from db import (
+    init_db, save_cdm_record, CdmRecord, PlannerOutput, DecisionLogRecord,
+    EvidenceRecordRow, get_session,
+)
 
 # === CONFIGURATION ===
 BUFFER_WINDOW_SIZE = 5
@@ -536,10 +539,29 @@ async def save_decision_log(request: Request) -> dict:
         with get_session() as session:
             existing = session.query(DecisionLogRecord).filter_by(log_id=log_id).first()
             if existing is not None:
-                existing.decision_log_json = payload_json
-                existing.conjunction_id = body.get("conjunction_id")
-                existing.sat_id = body.get("sat_id")
-                existing.decision = body.get("decision")
+                # SCRUM-377: an audit record is not editable. Re-posting the
+                # identical payload stays idempotent (retries and at-least-once
+                # delivery must not fail), but a write that would CHANGE a
+                # stored decision is refused rather than silently overwriting
+                # it, which is what this endpoint used to do.
+                if existing.decision_log_json == payload_json:
+                    logging.info("[INGEST] Decision log re-post identical, no change: %s", log_id)
+                    return {"status": "saved", "log_id": log_id, "changed": False}
+                logging.warning(
+                    "[INGEST] Refused overwrite of existing decision log: %s", log_id
+                )
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "status": "error",
+                        "error": (
+                            f"decision log '{log_id}' already exists with different "
+                            "content; audit records are append-only and are not "
+                            "overwritten"
+                        ),
+                        "log_id": log_id,
+                    },
+                )
             else:
                 session.add(DecisionLogRecord(
                     log_id=log_id,
@@ -614,3 +636,259 @@ async def clear_cdm_records() -> dict:
     except Exception as e:
         logging.error("[INGEST] clear error: %s", e)
         return {"error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# SCRUM-377: Evidence package. Append-only, chained audit records.
+# MAF v2.0 section 10.
+# ---------------------------------------------------------------------------
+
+_GENESIS_HASH = "0" * 64
+
+
+def _sha256_hex(text: str) -> str:
+    import hashlib
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+@app.post("/evidence_record", status_code=201)
+async def save_evidence_record(request: Request) -> dict:
+    """Append one evidence record to its chain (SCRUM-377).
+
+    Append-only. Two things are refused rather than accepted:
+
+      - a record_id that already exists with different content. Re-posting the
+        identical record stays idempotent so retries are safe, but an audit
+        record is never edited in place.
+      - a seq that is not the next one in the chain. Enforcing contiguity at
+        write time means a well-behaved writer cannot create a gap, which is
+        what makes a gap discovered later actual evidence rather than noise.
+
+    Expects the body to be an EvidenceRecord.to_dict() plus the canonical
+    payload string the content_hash was computed over, so verification never
+    needs a second serializer.
+    """
+    body = await request.json()
+    record = body.get("record")
+    canonical_payload = body.get("canonical_payload")
+
+    if not isinstance(record, dict):
+        return JSONResponse(status_code=400, content={"status": "error", "error": "record object required"})
+    if not isinstance(canonical_payload, str) or not canonical_payload:
+        return JSONResponse(status_code=400, content={"status": "error", "error": "canonical_payload required"})
+
+    record_id = record.get("record_id")
+    chain_id = record.get("chain_id")
+    seq = record.get("seq")
+    content_hash = record.get("content_hash")
+    prev_hash = record.get("prev_hash")
+
+    if not record_id or not chain_id or seq is None or not content_hash or not prev_hash:
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "error": "record_id, chain_id, seq, prev_hash and content_hash are required"},
+        )
+
+    # The hash must actually cover the payload we were handed. Catches a
+    # mismatched or truncated write before it enters the chain.
+    if _sha256_hex(canonical_payload) != content_hash:
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "error": "content_hash does not match canonical_payload"},
+        )
+
+    record_json = json.dumps(record, sort_keys=True)
+
+    try:
+        with get_session() as session:
+            existing = session.query(EvidenceRecordRow).filter_by(record_id=record_id).first()
+            if existing is not None:
+                if existing.content_hash == content_hash and existing.record_json == record_json:
+                    return {"status": "saved", "record_id": record_id, "changed": False}
+                logging.warning("[INGEST] Refused overwrite of evidence record: %s", record_id)
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "status": "error",
+                        "error": (
+                            f"evidence record '{record_id}' already exists with different "
+                            "content; the evidence chain is append-only"
+                        ),
+                        "record_id": record_id,
+                    },
+                )
+
+            head = (
+                session.query(EvidenceRecordRow)
+                .filter_by(chain_id=chain_id)
+                .order_by(EvidenceRecordRow.seq.desc())
+                .first()
+            )
+            expected_seq = 0 if head is None else head.seq + 1
+            expected_prev = _GENESIS_HASH if head is None else head.content_hash
+
+            if int(seq) != expected_seq:
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "status": "error",
+                        "error": (
+                            f"out-of-order append to chain '{chain_id}': expected seq "
+                            f"{expected_seq}, got {seq}"
+                        ),
+                        "expected_seq": expected_seq,
+                    },
+                )
+            if prev_hash != expected_prev:
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "status": "error",
+                        "error": (
+                            f"prev_hash does not match the head of chain '{chain_id}'; "
+                            "the record does not link to the record before it"
+                        ),
+                        "expected_prev_hash": expected_prev,
+                    },
+                )
+
+            session.add(EvidenceRecordRow(
+                record_id=record_id,
+                chain_id=chain_id,
+                seq=int(seq),
+                record_type=record.get("record_type", ""),
+                conjunction_id=(
+                    (record.get("fields", {}).get("conjunction_id") or {}).get("value")
+                ),
+                prev_hash=prev_hash,
+                content_hash=content_hash,
+                canonical_payload=canonical_payload,
+                record_json=record_json,
+                created_at=datetime.utcnow().isoformat() + "Z",
+            ))
+            logging.info("[INGEST] Evidence record appended: %s", record_id)
+            return {"status": "saved", "record_id": record_id, "changed": True}
+    except Exception as e:
+        logging.error("[INGEST] save_evidence_record error: %s", e)
+        return JSONResponse(status_code=500, content={"status": "error", "error": str(e)})
+
+
+@app.get("/store/evidence/{chain_id}")
+async def store_evidence_chain(chain_id: str):
+    """Return every record in a chain, in sequence order (SCRUM-377)."""
+    try:
+        with get_session() as session:
+            rows = (
+                session.query(EvidenceRecordRow)
+                .filter_by(chain_id=chain_id)
+                .order_by(EvidenceRecordRow.seq.asc())
+                .all()
+            )
+            if not rows:
+                return JSONResponse(
+                    status_code=404,
+                    content={"error": f"No evidence chain found for '{chain_id}'"},
+                )
+            return {
+                "chain_id": chain_id,
+                "count": len(rows),
+                "records": [json.loads(r.record_json) for r in rows],
+            }
+    except Exception as e:
+        logging.error("[INGEST] store_evidence_chain error: %s", e)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/store/evidence/{chain_id}/head")
+async def store_evidence_head(chain_id: str):
+    """Return the chain's current head so a writer knows the next seq/prev_hash.
+
+    Returns seq -1 and the genesis hash for a chain that does not exist yet, so
+    a first append needs no special case.
+    """
+    try:
+        with get_session() as session:
+            row = (
+                session.query(EvidenceRecordRow)
+                .filter_by(chain_id=chain_id)
+                .order_by(EvidenceRecordRow.seq.desc())
+                .first()
+            )
+            if row is None:
+                return {"chain_id": chain_id, "seq": -1, "next_seq": 0,
+                        "content_hash": _GENESIS_HASH, "exists": False}
+            return {"chain_id": chain_id, "seq": row.seq, "next_seq": row.seq + 1,
+                    "content_hash": row.content_hash, "exists": True}
+    except Exception as e:
+        logging.error("[INGEST] store_evidence_head error: %s", e)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/store/evidence/{chain_id}/verify")
+async def verify_evidence_chain(chain_id: str):
+    """Walk a chain and report the first break, if any (SCRUM-377).
+
+    Detects modification (a record whose stored hash no longer covers its
+    payload), deletion (a seq gap, or a prev_hash that does not link), and a
+    chain that does not begin at the genesis hash.
+
+    Honest limit: a hash chain held entirely inside the store it protects
+    detects corruption, partial edits and dropped records, but not an actor who
+    can rewrite every record forward from the change. Defending against that
+    needs an anchor outside this database. See the note in
+    services/planner/common/evidence_record.py.
+    """
+    try:
+        with get_session() as session:
+            rows = (
+                session.query(EvidenceRecordRow)
+                .filter_by(chain_id=chain_id)
+                .order_by(EvidenceRecordRow.seq.asc())
+                .all()
+            )
+            if not rows:
+                return JSONResponse(
+                    status_code=404,
+                    content={"error": f"No evidence chain found for '{chain_id}'"},
+                )
+
+            expected_seq = 0
+            expected_prev = _GENESIS_HASH
+            for i, row in enumerate(rows):
+                if row.seq != expected_seq:
+                    return {
+                        "chain_id": chain_id, "ok": False, "break_seq": expected_seq,
+                        "checked": i,
+                        "reason": (
+                            f"sequence gap: expected seq {expected_seq}, found {row.seq}. "
+                            "A record is missing from this chain."
+                        ),
+                    }
+                if _sha256_hex(row.canonical_payload) != row.content_hash:
+                    return {
+                        "chain_id": chain_id, "ok": False, "break_seq": row.seq,
+                        "checked": i + 1,
+                        "reason": (
+                            f"record {row.record_id} has been modified: stored "
+                            "content_hash does not cover its payload"
+                        ),
+                    }
+                if row.prev_hash != expected_prev:
+                    return {
+                        "chain_id": chain_id, "ok": False, "break_seq": row.seq,
+                        "checked": i + 1,
+                        "reason": (
+                            f"record {row.record_id} does not link to its predecessor: "
+                            "prev_hash mismatch. A record was removed or reordered."
+                        ),
+                    }
+                expected_prev = row.content_hash
+                expected_seq += 1
+
+            return {
+                "chain_id": chain_id, "ok": True, "break_seq": None,
+                "checked": len(rows), "reason": "", "head_hash": expected_prev,
+            }
+    except Exception as e:
+        logging.error("[INGEST] verify_evidence_chain error: %s", e)
+        return JSONResponse(status_code=500, content={"error": str(e)})

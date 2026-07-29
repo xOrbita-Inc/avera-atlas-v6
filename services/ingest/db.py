@@ -16,7 +16,9 @@ from typing import Any, Generator
 
 import os
 
-from sqlalchemy import create_engine, Column, Integer, Float, String, text
+from sqlalchemy import (
+    create_engine, Column, Integer, Float, String, text, UniqueConstraint, Index,
+)
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from sqlalchemy.pool import StaticPool
 
@@ -111,6 +113,42 @@ class DecisionLogRecord(Base):
     decision          = Column(String, nullable=True)
     decision_log_json = Column(String, nullable=False)     # full DecisionLog.to_json()
     created_at        = Column(String, nullable=False)     # ISO 8601 UTC text
+
+
+class EvidenceRecordRow(Base):
+    """One append-only evidence record (SCRUM-377, MAF v2.0 section 10).
+
+    Separate from decision_logs on purpose. decision_logs is SCRUM-351's
+    retrieval-by-decision-ID store and keeps working unchanged; this table is
+    the append-only chained audit trail. ADR-008 says existing tables are never
+    altered, so the new semantics get a new table rather than a migration.
+
+    Append-only is enforced in two places: the (chain_id, seq) unique constraint
+    below, and the write path in main.py, which refuses a seq that is not the
+    next one in the chain. A gap therefore cannot be created by a well-behaved
+    writer, which is what makes a gap found later meaningful.
+
+    canonical_payload is the exact string content_hash was computed over. Storing
+    it means verification never has to re-derive a canonical form, so there is no
+    second serializer to drift out of sync with the planner's.
+    """
+    __tablename__ = "evidence_records"
+
+    record_id         = Column(String, primary_key=True)   # '{chain_id}#{seq}'
+    chain_id          = Column(String, nullable=False)
+    seq               = Column(Integer, nullable=False)
+    record_type       = Column(String, nullable=False)     # 'decision' | 'transition'
+    conjunction_id    = Column(String, nullable=True)
+    prev_hash         = Column(String, nullable=False)
+    content_hash      = Column(String, nullable=False)
+    canonical_payload = Column(String, nullable=False)     # exact bytes hashed
+    record_json       = Column(String, nullable=False)     # full record for retrieval
+    created_at        = Column(String, nullable=False)     # ISO 8601 UTC text
+
+    __table_args__ = (
+        UniqueConstraint("chain_id", "seq", name="uq_evidence_chain_seq"),
+        Index("ix_evidence_chain_seq", "chain_id", "seq"),
+    )
 
 
 def init_db() -> None:
