@@ -416,7 +416,14 @@ def pc_circle(
                    _erf_vec_dif((zmrep + Hxrep) / dzrep, (zmrep - Hxrep) / dzrep))
             
             Psum = np.sum(wGC * Fint, axis=1)
-            Pc[Iset] = (hbr[Iset] / sx[Iset]) * Psum
+            # SCRUM-390. Substituting x = xm + H*u into the disc integral gives
+            #     Pc = H / (2 * sqrt(2*pi) * sx) * INT_{-1}^{1} F(u) du
+            # The 1/(2*sqrt(2*pi)) came from the Gaussian normalisation and the
+            # factor of one half on the erf difference. It was missing here, so
+            # the prefactor was H/sx.
+            Pc[Iset] = (
+                hbr[Iset] / (2.0 * np.sqrt(2.0 * np.pi) * sx[Iset])
+            ) * Psum
         
         # Numerical integration for remaining cases
         Iset_remaining = ~Iset & ~zero_vmag
@@ -651,12 +658,37 @@ def _eig2x2(Amat: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.nd
 
 
 def _gen_gc_quad(n: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Generate Gauss-Chebyshev quadrature points and weights."""
+    """Chebyshev nodes and weights for a PLAIN measure on [-1, 1].
+
+    SCRUM-390. This previously returned Gauss-Chebyshev second-kind nodes and
+    weights, theta = k*pi/(n+1) with w = (pi/(n+1)) * sin^2(theta), which
+    approximates
+
+        INT_{-1}^{1} f(u) * sqrt(1 - u^2) du
+
+    The Pc integral needs a plain measure:
+
+        INT_{-1}^{1} f(u) du
+
+    The chord half-width is already carried inside the erf difference in
+    pc_circle, so the extra sqrt(1 - u^2) from the second-kind weight was
+    counted twice. Writing INT f du as INT [f * sqrt(1-u^2)] / sqrt(1-u^2) du
+    and applying first-kind Gauss-Chebyshev gives
+
+        w_k = (pi / n) * sin(theta_k),   theta_k = (2k - 1) * pi / (2n)
+
+    Sanity: with f = 1 the old weights summed to pi/2, which is
+    INT sqrt(1-u^2) du, not 2. These sum to 2.
+
+    Returns (cos theta, sin theta, weights). sin theta is still the chord
+    half-width factor used by the caller and is unaffected by the change of
+    node family.
+    """
     k = np.arange(1, n + 1)
-    theta = k * np.pi / (n + 1)
+    theta = (2.0 * k - 1.0) * np.pi / (2.0 * n)
     xGC = np.cos(theta)
     yGC = np.sin(theta)
-    wGC = (np.pi / (n + 1)) * yGC**2
+    wGC = (np.pi / n) * yGC
     return xGC, yGC, wGC
 
 
