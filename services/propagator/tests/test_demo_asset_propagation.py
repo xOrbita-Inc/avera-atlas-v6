@@ -10,15 +10,39 @@ constant relative offset ``rel0 + vrel * t``. Because miss distance, TCA index,
 and the 2D Pc depend only on relative position/velocity (plus the fixed diagonal
 covariances), no preset's miss / TCA / risk / badge may move.
 
-This module is a regression guard. ``BASELINE`` below was captured from the
-pre-change (linear-everything) demo path. If these assertions fail, the
-relative-geometry invariant has been broken, not "fixed" -- investigate rather
-than updating the numbers.
+This module is a regression guard. If these assertions fail, the relative-geometry
+invariant has been broken, not "fixed" -- investigate rather than updating the
+numbers.
 
 The four preset scenarios are built in-code here (geometry + deterministic
 confidences) to mirror ``services/ui/app/main.py::_generate_synthetic_scenario``.
 Input states are generated deterministically rather than committed as ``.npz``
 fixtures, which the repo gitignores.
+
+SCRUM-390: why BASELINE moved, once
+-----------------------------------
+The original BASELINE was captured from the pre-change demo path while
+``compute_pc`` was still running its broken default mode, which overestimated Pc
+by about 4.2554x. Correcting the Pc changed the input to ``pc_to_risk_level``, so
+the risk labels moved. The relative-geometry invariant did not move: miss
+distances, TCA indices and relative velocities are all bit-identical, and the
+three geometry tests below still pass untouched. Only the labels derived from Pc
+changed, which is the change the fix was supposed to produce.
+
+The baseline now pins Pc itself, not just the label it falls into. A colour
+bucket spans a decade, so the old label-only baseline would have accepted a
+fresh 4x error without complaint. It did, for as long as the defect was live.
+
+What the corrected numbers say about the presets
+------------------------------------------------
+No preset reaches RED any more, and none can. ``PC_RED_THRESHOLD`` is 1e-4, and
+at the demo's own inputs -- ``HBR_M`` 15 m, ``DEFAULT_DEBRIS_UNCERTAINTY_M``
+2000 m scaled by the seeded confidences -- the encounter-plane sigma is roughly
+1.1 km, which caps Pc at about 9.7e-5 even for an object placed exactly on the
+asset. That is a covariance ceiling, not a geometry shortfall, so moving the
+objects closer cannot restore RED; ``test_red_is_unreachable_at_the_demo_covariance``
+asserts the ceiling so that nobody tries. Restoring a RED demo case needs a real
+covariance for the secondary, which is tracked separately.
 """
 
 import importlib.util
@@ -57,14 +81,40 @@ _PRESETS = {
 }
 _LABEL = {"nominal": "NOM", "warning": "WRN", "critical": "CRT", "mixed": "MIX"}
 
-# Pre-change baseline (linear-everything demo path), captured on these exact
-# deterministic states before the SCRUM-370 refactor. The refactor must preserve
-# these values.
+# Baseline captured on these exact deterministic states. TCA indices are the
+# pre-change values and have never moved. Risk and Pc were recaptured under
+# SCRUM-390, once, for the reason recorded in the module docstring.
 BASELINE = {
-    "nominal":  {"risk": ["NOMINAL", "NOMINAL", "NOMINAL"], "tca": [17, 17, 20]},
-    "warning":  {"risk": ["AMBER", "GREEN", "GREEN", "AMBER"], "tca": [17, 17, 17, 17]},
-    "critical": {"risk": ["RED", "RED", "RED", "RED"], "tca": [17, 17, 17, 17]},
-    "mixed":    {"risk": ["RED", "AMBER", "GREEN", "RED", "NOMINAL"], "tca": [17, 17, 17, 17, 17]},
+    "nominal": {
+        "risk": ["NOMINAL", "NOMINAL", "NOMINAL"],
+        "tca": [17, 17, 20],
+        "pc": [0.000000e+00, 2.639157e-194, 0.000000e+00],
+    },
+    "warning": {
+        "risk": ["AMBER", "GREEN", "GREEN", "GREEN"],
+        "tca": [17, 17, 17, 17],
+        "pc": [1.052580e-05, 1.063763e-06, 2.241367e-06, 4.889303e-06],
+    },
+    "critical": {
+        "risk": ["AMBER", "AMBER", "AMBER", "AMBER"],
+        "tca": [17, 17, 17, 17],
+        "pc": [7.018983e-05, 7.371553e-05, 4.822367e-05, 7.224133e-05],
+    },
+    "mixed": {
+        "risk": ["AMBER", "GREEN", "GREEN", "AMBER", "NOMINAL"],
+        "tca": [17, 17, 17, 17, 17],
+        "pc": [6.809577e-05, 4.155794e-06, 2.658082e-07, 2.858628e-05, 0.000000e+00],
+    },
+}
+
+# Miss distance in metres at TCA, per preset, from the same run. Pinned because
+# it is the one quantity the SCRUM-370 refactor was required to leave alone, and
+# because it is what makes the Pc figures above checkable by hand.
+BASELINE_MISS_M = {
+    "nominal":  [50159.7448, 31764.7603, 80156.0977],
+    "warning":  [2435.1591, 3231.0989, 3061.0456, 2773.0849],
+    "critical": [400.6245, 801.5610, 1240.9674, 608.2763],
+    "mixed":    [502.5933, 2700.0000, 3848.3763, 1700.0000, 50159.7448],
 }
 
 
@@ -102,7 +152,7 @@ def _run_demo_preset(preset: str, data_dir: Path):
 @pytest.mark.parametrize("preset", ["nominal", "warning", "critical", "mixed"])
 def test_demo_preset_risk_and_tca_unchanged(preset, tmp_path):
     """Every preset's per-object risk level and TCA index must match the
-    pre-change baseline exactly."""
+    baseline exactly."""
     d = _run_demo_preset(preset, tmp_path)
     risk = [str(x) for x in d["risk_levels"]]
     tca = [int(x) for x in d["tca_indices"]]
@@ -111,6 +161,73 @@ def test_demo_preset_risk_and_tca_unchanged(preset, tmp_path):
     )
     assert tca == BASELINE[preset]["tca"], (
         f"{preset}: TCA indices moved {BASELINE[preset]['tca']} -> {tca}"
+    )
+
+
+@pytest.mark.parametrize("preset", ["nominal", "warning", "critical", "mixed"])
+def test_demo_preset_pc_values_unchanged(preset, tmp_path):
+    """Pin Pc itself, not the colour it falls into.
+
+    A risk label covers a decade of Pc, so a label-only baseline accepts a
+    multiplicative error silently. That is exactly how the 4.2554x default-mode
+    error in SCRUM-390 survived: every preset kept its label while the number
+    behind it was wrong.
+    """
+    d = _run_demo_preset(preset, tmp_path)
+    pc = [float(x) for x in d["pc_values"]]
+    expected = BASELINE[preset]["pc"]
+    assert pc == pytest.approx(expected, rel=1e-5, abs=1e-12), (
+        f"{preset}: Pc moved {expected} -> {pc}"
+    )
+
+
+@pytest.mark.parametrize("preset", ["nominal", "warning", "critical", "mixed"])
+def test_demo_preset_miss_distance_unchanged(preset, tmp_path):
+    """Miss distance is the invariant the SCRUM-370 refactor had to preserve,
+    and it is unaffected by any Pc change. It must never move."""
+    d = _run_demo_preset(preset, tmp_path)
+    miss_m = [float(x) * 1000.0 for x in d["ca_table"]]
+    assert miss_m == pytest.approx(BASELINE_MISS_M[preset], rel=1e-6), (
+        f"{preset}: miss distances moved {BASELINE_MISS_M[preset]} -> {miss_m}"
+    )
+
+
+def test_red_is_unreachable_at_the_demo_covariance(tmp_path):
+    """SCRUM-390. RED is out of reach for the demo presets by construction, so
+    nobody should try to recover it by moving objects closer.
+
+    Place an object essentially on top of the asset, which is the most dangerous
+    geometry the preset format can express, and show it still lands short of
+    PC_RED_THRESHOLD. The limit is the covariance: HBR_M is 15 m while the
+    encounter-plane sigma is about 1.1 km, and Pc for a near-zero miss is
+    approximately HBR^2 / (2 sigma_x sigma_z), which no amount of closing the
+    miss distance can raise.
+
+    If this test starts failing, something changed HBR_M, the debris uncertainty
+    model, or the thresholds. Any of those is worth reading about before the
+    baseline above is touched.
+    """
+    # Sub-metre miss, TCA on the 60 s sample grid so the geometry is exact.
+    on_top = [(0.02 * 1020.0, 0.0005, 0.0, 0.02)]
+    _PRESETS["_ceiling"] = on_top
+    _LABEL["_ceiling"] = "CEIL"
+    try:
+        d = _run_demo_preset("_ceiling", tmp_path)
+    finally:
+        del _PRESETS["_ceiling"], _LABEL["_ceiling"]
+
+    miss_m = float(d["ca_table"][0]) * 1000.0
+    pc = float(d["pc_values"][0])
+    assert miss_m < 1.0, f"probe did not close the miss: {miss_m:.3f} m"
+    assert pc < propagator_main.PC_RED_THRESHOLD, (
+        f"RED is now reachable at the demo covariance: Pc={pc:.4e} at a "
+        f"{miss_m:.3f} m miss. Read the SCRUM-390 note in this module's "
+        f"docstring before updating BASELINE."
+    )
+    # And it is close to the threshold, not orders below, which is why the
+    # original inflated numbers read as RED so convincingly.
+    assert pc > 0.5 * propagator_main.PC_RED_THRESHOLD, (
+        f"ceiling moved far from the threshold: Pc={pc:.4e}"
     )
 
 
