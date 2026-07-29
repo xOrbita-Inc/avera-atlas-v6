@@ -152,8 +152,32 @@ def _validate_constraints(policy_raw: Dict[str, Any], t_burn_utc: str) -> None:
 
 def cw_phi_rv(a_km: float, dt_s: float) -> np.ndarray:
     """
-    Clohessy–Wiltshire Phi_rv block for circular reference orbit.
+    Clohessy–Wiltshire Phi_rv block for a circular reference orbit.
     Maps impulsive Δv (km/s) at burn time to Δr (km) at time dt later.
+
+    SCRUM-386. This previously returned the Phi_rr (position-to-position)
+    block, which is dimensionless, so applying it to a Δv in km/s produced a
+    number in km/s that was then read as km. Phi_rv carries units of seconds,
+    which is what makes Δv * Φ a displacement.
+
+    The error was large, not marginal. A 2 m/s along-track burn 4 hours before
+    TCA at a = 6928 km came out as 2 metres of separation change where the
+    correct block gives 86.8 km.
+
+    Closed form (Clohessy–Wiltshire, RTN ordering, n = orbital mean motion):
+
+        Φ_rv = [[  sin(nt)/n,        2(1 - cos(nt))/n,      0          ],
+                [ -2(1 - cos(nt))/n, (4 sin(nt) - 3nt)/n,   0          ],
+                [  0,                0,                     sin(nt)/n  ]]
+
+    For contrast, the block that used to be here is Φ_rr:
+
+        Φ_rr = [[ 4 - 3cos(nt),      0,  0        ],
+                [ 6(sin(nt) - nt),   1,  0        ],
+                [ 0,                 0,  cos(nt)  ]]
+
+    Reference: Clohessy & Wiltshire (1960); Vallado, Fundamentals of
+    Astrodynamics and Applications, §6.7.
     """
     if a_km <= 0:
         raise ValueError("a_ref_km must be > 0")
@@ -162,9 +186,9 @@ def cw_phi_rv(a_km: float, dt_s: float) -> np.ndarray:
     s = math.sin(omega * dt_s)
     return np.array(
         [
-            [4 - 3 * c, 0.0, 0.0],
-            [6 * (s - omega * dt_s), 1.0, 0.0],
-            [0.0, 0.0, c],
+            [s / omega, 2.0 * (1.0 - c) / omega, 0.0],
+            [-2.0 * (1.0 - c) / omega, (4.0 * s - 3.0 * omega * dt_s) / omega, 0.0],
+            [0.0, 0.0, s / omega],
         ],
         dtype=float,
     )
@@ -438,15 +462,39 @@ def evaluate_conjunction(req: Dict[str, Any]) -> Dict[str, Any]:
         r_post_km = r_rel_km - delta_r_km
 
         m2_post = mahalanobis_sq(r_post_km, P_rel)
-        delta_C = m2_pre - m2_post
 
-        U = delta_C - policy.lambda_v * dv_mag_m_s - policy.lambda_L * lifetime_penalty
+        # SCRUM-386. Two quantities, deliberately kept apart.
+        #
+        # delta_C is the v2.4 OUTPUT convention (m2_pre - m2_post) and is
+        # reported unchanged, so the response schema is untouched.
+        #
+        # The utility must use the research-doc convention, APS_2_5_Research
+        # section 5.4, delta_C = m2_post - m2_pre. Mahalanobis distance is
+        # separation measured in sigma, so larger post-maneuver is safer and
+        # is what a burn should be rewarded for. This line previously fed the
+        # v2.4 quantity straight into U, which paid the planner for reducing
+        # separation, that is for maneuvering toward the secondary.
+        #
+        # It was invisible until now because cw_phi_rv returned the Phi_rr
+        # block, so a 1 m/s burn moved the relative position by about a
+        # millimetre and m2_post was numerically indistinguishable from
+        # m2_pre. With the corrected Phi_rv the displacement is kilometres,
+        # the sign dominates, and every burn direction scored negative,
+        # leaving no-burn optimal for every conjunction on this path.
+        #
+        # maneuver_scorer.py has always used the research convention. This
+        # brings the v2.4 path, which still serves POST /v1/evaluate/batch,
+        # into agreement with it.
+        delta_C_v24 = m2_pre - m2_post          # reported (unchanged)
+        confidence_gain = m2_post - m2_pre      # scored (section 5.4)
+
+        U = confidence_gain - policy.lambda_v * dv_mag_m_s - policy.lambda_L * lifetime_penalty
 
         all_candidates.append(
             {
                 "direction": name,
                 "dv_eci_km_s": dv_vec_km_s.tolist(),
-                "delta_C": float(delta_C),
+                "delta_C": float(delta_C_v24),
                 "utility": float(U),
             }
         )
@@ -459,7 +507,7 @@ def evaluate_conjunction(req: Dict[str, Any]) -> Dict[str, Any]:
                 "t_burn_utc": t_burn_utc,
                 "utility": float(U),
                 "_m2_post": float(m2_post),
-                "_delta_C": float(delta_C),
+                "_delta_C": float(delta_C_v24),
             }
 
     assert best is not None
