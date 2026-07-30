@@ -494,8 +494,54 @@ components:
           example: 0.04
         risk_surrogate_post:
           type: number
-          description: Post-maneuver risk surrogate (1/m2_post or Pc if available)
-          example: 0.31
+          description: |
+            SCRUM-393. Post-maneuver risk for the recommended burn.
+
+            This is the probability of collision AFTER the recommended
+            maneuver whenever one can be computed, which requires a
+            relative velocity to define the encounter plane. When none
+            can be, it falls back to 1/m2_post, an inverse square
+            kilometre rather than a probability.
+
+            Read risk_surrogate_source before comparing this value
+            against a threshold. The two branches are different
+            quantities in different units and both land in the same
+            numeric range at the covariances this system produces.
+
+            Before SCRUM-393 this field carried the PRE-maneuver Pc
+            whenever one was supplied, so it reported that the
+            recommended burn reduced risk by exactly zero. Any stored
+            value predating that fix means the pre-maneuver figure.
+          example: 0.00012
+        risk_surrogate_source:
+          type: string
+          enum: [pc_post, inverse_m2_post, pc_pre_no_burn]
+          description: |
+            SCRUM-393. Which quantity risk_surrogate_post is carrying.
+
+            pc_post: the probability of collision after the recommended
+            burn, including Q_exec when the propulsion profile carries
+            execution error.
+
+            inverse_m2_post: 1/m2_post, used when no relative velocity
+            was supplied so no Pc exists at either end. An inverse area,
+            not a probability.
+
+            pc_pre_no_burn: no maneuver was recommended, so the
+            post-maneuver risk is the pre-maneuver Pc. Equal by
+            construction rather than by defect.
+          example: pc_post
+        pc_post:
+          type: number
+          nullable: true
+          description: |
+            SCRUM-393. Probability of collision after the recommended
+            maneuver. Null when no Pc could be established, and on a
+            no-go, where there is no burn to compute one for.
+
+            Null is not zero. An event whose Pc could not be computed is
+            not an event that is safe.
+          example: 0.0000412
         all_candidates:
           type: array
           description: Full sweep results for all evaluated directions (for audit / ATLAS)
@@ -691,11 +737,25 @@ components:
             execution-error covariance (Q_exec). False when the profile
             does not specify either parameter, in which case these values
             reflect a perfect-burn assumption and are optimistic.
-            risk_surrogate_post only reflects this when it is derived
-            from m2_post (1/m2_post); when a precomputed Pc is supplied
-            for the conjunction, risk_surrogate_post is that value
-            directly and does not include Q_exec at all, regardless of
-            execution_error_modelled.
+
+            SCRUM-393 restated the risk_surrogate_post sentence that used
+            to sit here. That sentence said risk_surrogate_post reflects
+            Q_exec only on the 1/m2_post branch, and carries a supplied
+            Pc directly otherwise. It was an accurate description of a
+            defect. risk_surrogate_post now reports the burn's own Pc,
+            computed from the same covariance as m2_post, so it includes
+            Q_exec on both branches whenever the profile carries it.
+
+            One caveat worth stating, because it is counterintuitive.
+            Adding Q_exec does not always raise Pc. Pc goes as
+            (HBR^2 / 2 sigma_x sigma_z) * exp(-m^2 / 2), so widening the
+            covariance shrinks the prefactor and raises the exponential.
+            Inside roughly 1.4 sigma the first effect wins and a less
+            precise burn scores a LOWER Pc. That is probability dilution,
+            the same effect covariance_quality flags as dilution_region,
+            and it is a property of Pc rather than of this
+            implementation. Do not read a fall in Pc as evidence the
+            execution error was benign.
         operator_note:
           type: string
           description: |

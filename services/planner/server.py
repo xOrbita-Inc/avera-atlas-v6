@@ -216,20 +216,42 @@ def _post_planner_output(
     result: Dict[str, Any],
     body: Dict[str, Any],
     covariance_source: str,
+    scoring: Optional[Any] = None,
 ) -> None:
     """Write a planner decision audit record to the ingest service.
 
     Fire-and-forget. Any failure is logged and silently swallowed.
+
+    SCRUM-393: pc_computed comes from the scoring result's pc_pre, not from
+    risk_surrogate_post.
+
+    This used to read risk_surrogate_post, which meant the audit trail received
+    the pre-maneuver Pc when one was supplied and an inverse square kilometre
+    when one was not. That second value lands between 1e-4 and 1e-2 at the
+    covariances this system produces, which is exactly where a real Pc lives, so
+    nothing about the number invited anyone to check it. It was written into a
+    non-nullable column described as "APS-computed Pc" and into RiskInputs in
+    gnc_interface.yaml, and the SCRUM-377 trail is tamper-evident, so wrong
+    entries are preserved rather than corrected.
+
+    pc_computed belongs alongside m2_pre, covariance_source and data_age_s in
+    RiskInputs, and those are all pre-maneuver inputs, so the field wants the
+    pre-maneuver Pc. risk_surrogate_post was never the right source for it, and
+    that stays true now that it carries a genuine post-maneuver Pc.
+
+    None when no Pc could be established. Sent as 0.0 only because the column is
+    non-nullable, which is a schema question rather than this ticket's, and is
+    noted on SCRUM-396.
     """
     try:
         rec = result.get("recommendation", {})
-        metrics = result.get("metrics", {})
         policy = body.get("policy", {})
 
         utility = float(rec.get("utility", 0.0))
         recommendation = "maneuver" if utility > 0.0 else "no_maneuver"
         delta_v_ms = float(rec.get("dv_magnitude_m_s")) if recommendation == "maneuver" else None
-        pc_computed = float(metrics.get("risk_surrogate_post", 0.0))
+        pc_pre = getattr(scoring, "pc_pre", None) if scoring is not None else None
+        pc_computed = float(pc_pre) if pc_pre is not None else 0.0
 
         payload = {
             "cdm_record_id":     cdm_record_id,
@@ -766,6 +788,12 @@ async def post_evaluate(request: Request):
                 "fuel_cost_m_s":       scoring.fuel_cost_m_s,
                 "lifetime_penalty":    scoring.lifetime_penalty,
                 "risk_surrogate_post": scoring.risk_surrogate_post,
+                # SCRUM-393: risk_surrogate_post has carried three different
+                # quantities over its life and its name says none of them, so
+                # the source travels with the number rather than leaving a
+                # consumer to guess from the magnitude.
+                "risk_surrogate_source": scoring.risk_surrogate_source,
+                "pc_post": scoring.pc_post,
                 "all_candidates":      scoring.all_candidates,
             },
             "covariance_source": covariance_source,
@@ -867,7 +895,7 @@ async def post_evaluate(request: Request):
 
         # --- Audit write --------------------------------------------------
         if cdm_record_id is not None:
-            _post_planner_output(cdm_record_id, result, body, covariance_source)
+            _post_planner_output(cdm_record_id, result, body, covariance_source, scoring)
         # ------------------------------------------------------------------
 
         return JSONResponse(status_code=200, content=result)
