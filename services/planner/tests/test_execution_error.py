@@ -268,9 +268,12 @@ class TestExecutionErrorScoringIntegration:
         does not model execution error, just because this particular
         event did not produce a recommended burn.
 
-        Forces the no_utility_gain no-go path with an extreme lambda_dv,
-        so no candidate burn can ever have positive utility, on a
-        satellite whose profile does carry execution-error parameters.
+        Uses an extreme lambda_dv so no candidate burn can have positive
+        utility on a satellite whose profile does carry execution-error
+        parameters. This is intended to force the no_utility_gain path,
+        but the assertion below does not depend on which specific
+        no-go path actually triggers -- both call sites carry the same
+        fix, so the guard holds either way.
         """
         extreme_policy = OperatorPolicy(
             operator_id="TEST_OP", policy_version="2.5.0",
