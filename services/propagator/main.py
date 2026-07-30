@@ -288,6 +288,26 @@ def _validate_demo_asset_state(r0: np.ndarray, v0: np.ndarray) -> None:
               f"Keplerian propagation will fall back to linear")
 
 
+def _debris_uncertainty_m(position_sigma_m: float, confidence: float):
+    """SCRUM-391: pick the debris 1-sigma position uncertainty for one object.
+
+    Returns (uncertainty_m, source).
+
+    A supplied ``position_sigma_m`` is used as given and is deliberately NOT
+    divided by confidence. Confidence is a stand-in for how well the object is
+    known; a supplied sigma *is* how well it is known. Scaling one by the other
+    would count the same uncertainty twice, and would mean a tracked object with
+    a 250 m covariance and a 0.85 confidence silently got 294 m.
+
+    Absent a supplied value, the previous behaviour is unchanged:
+    ``DEFAULT_DEBRIS_UNCERTAINTY_M / max(confidence, 0.1)``, which represents an
+    object known only from a TLE and can only ever inflate above 2 km.
+    """
+    if np.isfinite(position_sigma_m) and position_sigma_m > 0.0:
+        return float(position_sigma_m), "supplied"
+    return DEFAULT_DEBRIS_UNCERTAINTY_M / max(confidence, 0.1), "confidence_default"
+
+
 def propagate_and_screen():
     """Main propagation and conjunction screening."""
     input_path = os.path.join(DATA_DIR, INPUT_FILE)
@@ -305,6 +325,15 @@ def propagate_and_screen():
         t_window = data['t_window']
         metadata = json.loads(str(data['metadata']))
         confidences = data['confidences'] if 'confidences' in data else np.full(len(obj_ids), 0.8)
+        # SCRUM-391: optional per-object 1-sigma position uncertainty in metres.
+        # A non-finite or non-positive entry means "not supplied for this
+        # object", which falls back to the confidence-scaled default below. See
+        # _debris_uncertainty_m.
+        position_sigma_m = (
+            np.asarray(data['position_sigma_m'], dtype=float)
+            if 'position_sigma_m' in data
+            else np.full(len(obj_ids), np.nan)
+        )
     except Exception as e:
         print(f"[ERROR] Corrupt artifact: {e}")
         os.rename(input_path, input_path + ".err")
@@ -381,7 +410,10 @@ def propagate_and_screen():
     results = {
         'min_miss_distances': [], 'pc_values': [], 'risk_levels': [],
         'tca_indices': [], 'relative_velocities': [], 'decisions': [],
-        'decision_urgencies': [], 'propulsion_options': [], 'delta_v_estimates': []
+        'decision_urgencies': [], 'propulsion_options': [], 'delta_v_estimates': [],
+        # SCRUM-391: which covariance each object's Pc was computed against, so
+        # an operator can tell a supplied sigma from the TLE-grade default.
+        'debris_sigma_m': [], 'covariance_sources': []
     }
     
     red_alerts, amber_alerts, go_decisions, standby_decisions = [], [], [], []
@@ -405,13 +437,17 @@ def propagate_and_screen():
         results['relative_velocities'].append(rel_vel)
         
         # Pc calculation
+        conf = float(confidences[i]) if i < len(confidences) else 0.8
+        sigma_in = float(position_sigma_m[i]) if i < len(position_sigma_m) else float('nan')
+        uncertainty_m, uncertainty_source = _debris_uncertainty_m(sigma_in, conf)
+        results['debris_sigma_m'].append(uncertainty_m)
+        results['covariance_sources'].append(uncertainty_source)
+
         if min_dist_km > SCREENING_THRESHOLD_KM:
             pc = 0.0
         else:
-            conf = float(confidences[i]) if i < len(confidences) else 0.8
-            uncertainty_m = DEFAULT_DEBRIS_UNCERTAINTY_M / max(conf, 0.1)
             cov_debris = default_covariance_from_uncertainty(uncertainty_m, cross_track_factor=0.5)
-            
+
             try:
                 result = compute_pc(
                     r_asset[tca_idx] * 1000, v_asset[tca_idx] * 1000, cov_asset,
@@ -488,6 +524,8 @@ def propagate_and_screen():
         risk_levels=np.array(results['risk_levels']),
         tca_indices=np.array(results['tca_indices']),
         relative_velocities=np.array(results['relative_velocities']),
+        debris_sigma_m=np.array(results['debris_sigma_m']),
+        covariance_sources=np.array(results['covariance_sources']),
         decisions=np.array(results['decisions']),
         decision_urgencies=np.array(results['decision_urgencies']),
         propulsion_options=np.array(results['propulsion_options']),

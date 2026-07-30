@@ -69,6 +69,28 @@ ASSET_R_ECI_KM = [ASSET_R_MAG_KM, 0.0, 0.0]
 ASSET_V_ECI_KM_S = [0.0, ASSET_V_CIRC_KM_S, 0.0]
 
 
+# SCRUM-391: the 1-sigma position uncertainty of a secondary that has actually
+# been tracked, rather than one known only from a TLE.
+#
+# Chosen on grounds, then measured, not the other way round. It is an order of
+# magnitude better than DEFAULT_DEBRIS_UNCERTAINTY_M (2000 m), which is the
+# TLE-grade figure the propagator falls back to, and it sits in the range a CDM
+# for a well-tracked LEO object carries a day or two before TCA.
+#
+# The choice is not sensitive. Pc against the critical preset's own misses moves
+# less than 2x across a 5x change in this value, because once sigma approaches
+# the miss distances the probability saturates:
+#
+#     sigma     Pc at 22 m    Pc at 100 m    Pc at 316 m
+#      500 m     7.36e-04       7.14e-04       5.31e-04
+#      250 m     1.06e-03       1.02e-03       6.63e-04
+#      100 m     1.21e-03       1.15e-03       7.08e-04
+#
+# So anything in that band gives the same risk labels. This is not a number tuned
+# to clear PC_RED_THRESHOLD; the threshold is cleared by a wide margin either way.
+TRACKED_SECONDARY_SIGMA_M = 250.0
+
+
 @dataclass(frozen=True)
 class DebrisSpec:
     """One demo debris object, specified by when and how close it passes.
@@ -81,6 +103,13 @@ class DebrisSpec:
 
     t_star_s must be a multiple of SAMPLE_DT_S, or the propagator's argmin over
     samples will not see that separation. See the module docstring.
+
+    position_sigma_m is optional. When set, the propagator uses it directly as
+    the debris 1-sigma position uncertainty and does not scale it by confidence,
+    because a supplied sigma *is* how well the object is known and confidence is
+    only a stand-in for the same thing. When left None, the propagator falls back
+    to DEFAULT_DEBRIS_UNCERTAINTY_M / confidence, unchanged from before
+    SCRUM-391.
     """
 
     t_star_s: float
@@ -88,6 +117,7 @@ class DebrisSpec:
     miss_z_km: float
     v_approach_km_s: float
     confidence: float
+    position_sigma_m: float | None = None
 
     @property
     def start_dist_km(self) -> float:
@@ -127,17 +157,24 @@ PRESETS: Dict[str, List[DebrisSpec]] = {
         DebrisSpec(_T17, 3.0, 0.1, 0.03, _C[2]),
         DebrisSpec(_T17, 2.5, 0.0, 0.06, _C[3]),
     ],
-    # The closest geometry the preset format expresses. Note this no longer
-    # reaches RED, and cannot at the demo's current covariance. See SCRUM-391.
+    # The closest geometry the preset format expresses.
+    #
+    # SCRUM-391: the first two objects carry a tracked covariance and reach RED.
+    # The last two are the same close geometry at TLE-grade uncertainty and stay
+    # AMBER, which is the point worth showing. Risk is not geometry alone, it is
+    # geometry against how well you know where the object is. Two objects 100 m
+    # and 316 m away are a lower graded risk than one 22 m away only because we
+    # know less about them.
     "critical": [
-        DebrisSpec(_T17, 0.02, 0.01, 0.02, _C[0]),
-        DebrisSpec(_T17, 0.05, 0.00, 0.04, _C[1]),
+        DebrisSpec(_T17, 0.02, 0.01, 0.02, _C[0], TRACKED_SECONDARY_SIGMA_M),
+        DebrisSpec(_T17, 0.05, 0.00, 0.04, _C[1], TRACKED_SECONDARY_SIGMA_M),
         DebrisSpec(_T17, 0.30, 0.10, 0.06, _C[2]),
         DebrisSpec(_T17, 0.10, 0.00, 0.03, _C[3]),
     ],
-    # A spread, for showing the operator list with more than one severity.
+    # A spread, for showing the operator list with more than one severity. The
+    # first object is tracked (SCRUM-391) so this preset spans all four tiers.
     "mixed": [
-        DebrisSpec(_T17, 0.05, 0.01, 0.025, _C[0]),
+        DebrisSpec(_T17, 0.05, 0.01, 0.025, _C[0], TRACKED_SECONDARY_SIGMA_M),
         DebrisSpec(_T17, 2.50, 0.20, 0.050, _C[1]),
         DebrisSpec(_T17, 3.50, 0.00, 0.080, _C[2]),
         DebrisSpec(_T17, 1.50, 0.00, 0.040, _C[3]),
@@ -161,6 +198,7 @@ class CuratedSpec:
     t_star_s: float
     v_approach_km_s: float
     confidence: float
+    position_sigma_m: float | None = None
 
     @property
     def miss_km(self) -> float:
@@ -187,7 +225,7 @@ def _build_tuple_preset(specs: Sequence[DebrisSpec], label: str):
     """Linear-relative-motion states for one of the four tuple presets."""
     asset_r = np.asarray(ASSET_R_ECI_KM, dtype=float)
     asset_v = np.asarray(ASSET_V_ECI_KM_S, dtype=float)
-    obj_ids, r_list, v_list, confidences = [], [], [], []
+    obj_ids, r_list, v_list, confidences, sigmas = [], [], [], [], []
     for i, s in enumerate(specs):
         obj_ids.append(f"OBJ-{label}-{i:03d}")
         r_list.append([
@@ -197,7 +235,8 @@ def _build_tuple_preset(specs: Sequence[DebrisSpec], label: str):
         ])
         v_list.append([asset_v[0] - s.v_approach_km_s, asset_v[1], asset_v[2]])
         confidences.append(s.confidence)
-    return obj_ids, r_list, v_list, confidences
+        sigmas.append(_sigma_or_nan(s))
+    return obj_ids, r_list, v_list, confidences, sigmas
 
 
 def _build_curated():
@@ -211,7 +250,7 @@ def _build_curated():
     asset_v = np.asarray(ASSET_V_ECI_KM_S, dtype=float)
     n = np.sqrt(MU_EARTH / ASSET_R_MAG_KM ** 3)  # mean motion
 
-    obj_ids, r_list, v_list, confidences = [], [], [], []
+    obj_ids, r_list, v_list, confidences, sigmas = [], [], [], [], []
     for s in CURATED:
         theta = n * s.t_star_s
         r_hat = np.array([np.cos(theta), np.sin(theta), 0.0])
@@ -225,14 +264,28 @@ def _build_curated():
         r_list.append((asset_r + rel0).tolist())
         v_list.append((asset_v + vrel_eci).tolist())
         confidences.append(s.confidence)
-    return obj_ids, r_list, v_list, confidences
+        sigmas.append(_sigma_or_nan(s))
+    return obj_ids, r_list, v_list, confidences, sigmas
+
+
+def _sigma_or_nan(spec) -> float:
+    """NaN is the artifact-level marker for "no covariance supplied".
+
+    The npz carries a plain float array, so absence has to be representable as a
+    number. The propagator treats non-finite or non-positive as absent and falls
+    back to the confidence-scaled default.
+    """
+    sigma = getattr(spec, "position_sigma_m", None)
+    return float("nan") if sigma is None else float(sigma)
 
 
 def build_scenario(scenario: str):
     """Build one scenario's debris states.
 
-    Returns (object_ids, r_eci_km, v_eci_km_s, confidences). Unknown names fall
-    back to DEFAULT_SCENARIO, matching the previous behaviour of both callers.
+    Returns (object_ids, r_eci_km, v_eci_km_s, confidences, position_sigma_m).
+    The last is 1-sigma position uncertainty in metres per object, NaN where the
+    scenario does not supply one. Unknown names fall back to DEFAULT_SCENARIO,
+    matching the previous behaviour of both callers.
     """
     if scenario == "demo":
         return _build_curated()

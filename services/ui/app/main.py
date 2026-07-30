@@ -710,7 +710,9 @@ def _generate_synthetic_scenario(scenario):
     """
     asset_r = list(demo_presets.ASSET_R_ECI_KM)
     asset_v = list(demo_presets.ASSET_V_ECI_KM_S)
-    obj_ids, r_list, v_list, confidences = demo_presets.build_scenario(scenario)
+    obj_ids, r_list, v_list, confidences, position_sigma_m = (
+        demo_presets.build_scenario(scenario)
+    )
 
     os.makedirs(DATA_DIR, exist_ok=True)
     out = os.path.join(DATA_DIR, "states_multi.npz")
@@ -721,6 +723,10 @@ def _generate_synthetic_scenario(scenario):
         r_eci_km=np.array(r_list),
         v_eci_km_s=np.array(v_list),
         confidences=np.array(confidences),
+        # SCRUM-391: per-object 1-sigma position uncertainty in metres, NaN
+        # where the scenario supplies none. The propagator falls back to its
+        # confidence-scaled default for those.
+        position_sigma_m=np.array(position_sigma_m, dtype=float),
         t_window=np.array([demo_presets.SAMPLE_DT_S, demo_presets.N_STEPS]),
         metadata=json.dumps({
             "source": "demo_scenario",
