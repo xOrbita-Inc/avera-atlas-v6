@@ -28,6 +28,10 @@ import math
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+# SCRUM-389 / ADR-010: the default primary radius is a shared convention, not a
+# value this module should own a second copy of.
+from aps_math import conventions
+
 # ---------------------------------------------------------------------------
 # Propulsion type enum
 # ---------------------------------------------------------------------------
@@ -341,6 +345,13 @@ class SatelliteCapability:
     New in v2.5:
         propulsion, lifetime, cadence, slot
 
+    New in SCRUM-389:
+        radius_m -- the spacecraft's own hard-body radius in metres, used to
+        build a combined hard-body radius for Pc. This is a fact about the
+        spacecraft, so it lives here rather than in operator policy (ADR-010).
+        The default is a 6U CubeSat with deployed arrays; any operator who
+        knows their spacecraft should state it.
+
     Usage
     -----
     From a v2.5 API request dict:
@@ -351,6 +362,7 @@ class SatelliteCapability:
     """
     sat_id: str
     a_ref_km: float = 7000.0
+    radius_m: float = conventions.DEFAULT_PRIMARY_RADIUS_M
     propulsion: PropulsionProfile = field(default_factory=PropulsionProfile)
     lifetime: LifetimeProfile = field(default_factory=LifetimeProfile)
     cadence: ManeuverCadence = field(default_factory=ManeuverCadence)
@@ -361,6 +373,8 @@ class SatelliteCapability:
             raise ValueError("sat_id must be a non-empty string")
         if self.a_ref_km <= 0:
             raise ValueError("a_ref_km must be > 0")
+        if self.radius_m <= 0:
+            raise ValueError("radius_m must be > 0")
 
     @classmethod
     def from_request(cls, sat: dict) -> "SatelliteCapability":
@@ -377,6 +391,7 @@ class SatelliteCapability:
         # planner against a live ingest rather than a mocked one.
         sat_id   = str(sat.get("sat_id") or sat.get("norad_id") or "UNKNOWN")
         a_ref_km = float(sat.get("a_ref_km", 7000.0))
+        radius_m = float(sat.get("radius_m", conventions.DEFAULT_PRIMARY_RADIUS_M))
 
         # PropulsionProfile
         p_raw = sat.get("propulsion", {})
@@ -426,6 +441,7 @@ class SatelliteCapability:
         return cls(
             sat_id     = sat_id,
             a_ref_km   = a_ref_km,
+            radius_m   = radius_m,
             propulsion = propulsion,
             lifetime   = lifetime,
             cadence    = cadence,

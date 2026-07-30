@@ -87,6 +87,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+# SCRUM-389: the planner computes its own Pc. compute_pc and the shared
+# conventions both live in libs/aps_math, reachable since SCRUM-388.
+from aps_math.pc_utils import compute_pc
+from aps_math import conventions
+
 # ---------------------------------------------------------------------------
 # Imports from locked modules (do not modify those files)
 # ---------------------------------------------------------------------------
@@ -325,31 +330,79 @@ def _passes_feasibility(
     cap: SatelliteCapability,
     policy: OperatorPolicy,
     dv_mag_m_s: float,
-    pc_pre: Optional[float],
+    pc: Optional[float],
+    pc_source: str,
     miss_distance_km: Optional[float],
     mahalanobis: float,
-) -> Tuple[bool, str, str]:
+) -> Tuple[bool, str, str, str]:
     """Apply all feasibility filters before candidate scoring.
 
-    Returns (passes, reason_code, human_readable).
-    If passes=True, scoring proceeds.
-    If passes=False, a no-go is issued immediately.
+    Returns (passes, reason_code, human_readable, risk_gate).
+    risk_gate names which quantity actually decided, "pc" or "mahalanobis".
 
-    Filters applied in priority order:
-      1. Mahalanobis pre-screen (policy gate)
-      2. Propulsion infeasible (zero effective dv)
-      3. Pc below threshold (when pc_precomputed provided)
-      4. Miss distance above floor (when provided)
+    SCRUM-389: which gate runs, and why
+    -----------------------------------
+    The operator policy expresses risk in Pc. It always did, and both thresholds
+    are described in operator_policy.py as physics-based gates. But the Pc gate
+    only ran when an external CDM or UDL supplied a Pc, and the Mahalanobis
+    pre-screen ran always and first. So for every event without an external Pc,
+    a filter documented as a pre-screen was silently the maneuver decision, and
+    the two gates could disagree.
+
+    Now that the planner can compute Pc, the Pc gate decides whenever a Pc
+    exists, whether supplied or computed, and the Mahalanobis screen decides
+    only when no Pc could be established at all. That is not two gates in
+    priority order; it is one gate with a documented fallback, and the result
+    records which one ran.
+
+    Why Mahalanobis is not simply deleted
+    -------------------------------------
+    A Pc needs a relative velocity to define the encounter plane, and the
+    conjunction contract makes that field optional. An event that omits it has
+    no Pc, and something still has to decide. Mahalanobis is that something.
+
+    The screen is conservative at every covariance this system produces, but it
+    is conservative by accident rather than by construction. At a hard-body
+    radius of 15 m, Pc at exactly MD 4.0 is 1.5e-07 at a 500 m covariance and
+    6.1e-07 at 250 m, both far below the 1e-5 monitor threshold. It stops being
+    conservative near a 65 m encounter-plane sigma, which is tighter than
+    anything we currently produce but not impossible for a well-tracked object
+    close to TCA. That is asserted in the tests so it fails loudly rather than
+    silently if a tighter covariance ever arrives.
     """
-    # 1. Mahalanobis pre-screen
-    if not policy.passes_pre_screen(mahalanobis):
-        return (
-            False,
-            "trivial_event",
-            f"Mahalanobis distance {mahalanobis:.2f} exceeds screen threshold "
-            f"{policy.mahalanobis_screen_threshold:.1f}. Event is outside the "
-            f"risk-relevant region. No maneuver warranted.",
-        )
+    # 1. Risk gate. Pc when we have one, Mahalanobis only when we do not.
+    if pc is not None:
+        risk_gate = "pc"
+        if not policy.is_maneuver_required(pc, miss_distance_km or 999.0):
+            if policy.is_monitor_only(pc):
+                return (
+                    False,
+                    "pc_below_threshold",
+                    f"Pc {pc:.2e} ({pc_source}) is below maneuver threshold "
+                    f"{policy.pc_maneuver_threshold:.1e} but above monitor "
+                    f"threshold {policy.pc_monitor_threshold:.1e}. "
+                    f"Event escalated to watch status. No burn required.",
+                    risk_gate,
+                )
+            return (
+                False,
+                "pc_below_threshold",
+                f"Pc {pc:.2e} ({pc_source}) is below maneuver threshold "
+                f"{policy.pc_maneuver_threshold:.1e}. No maneuver warranted.",
+                risk_gate,
+            )
+    else:
+        risk_gate = "mahalanobis"
+        if not policy.passes_pre_screen(mahalanobis):
+            return (
+                False,
+                "trivial_event",
+                f"Mahalanobis distance {mahalanobis:.2f} exceeds screen threshold "
+                f"{policy.mahalanobis_screen_threshold:.1f}, and no Pc could be "
+                f"established for this event. Outside the risk-relevant region. "
+                f"No maneuver warranted.",
+                risk_gate,
+            )
 
     # 2. Propulsion infeasible
     effective_dv = cap.effective_dv_limit_m_s(dv_mag_m_s)
@@ -360,28 +413,122 @@ def _passes_feasibility(
             f"Effective delta-v {effective_dv:.4f} m/s is at or below minimum "
             f"executable burn {cap.propulsion.min_dv_m_s:.4f} m/s. "
             f"Satellite cannot execute a meaningful maneuver.",
+            risk_gate,
         )
 
-    # 3. Pc below threshold (optional — only when pc_precomputed supplied)
-    if pc_pre is not None:
-        if not policy.is_maneuver_required(pc_pre, miss_distance_km or 999.0):
-            if policy.is_monitor_only(pc_pre):
-                return (
-                    False,
-                    "pc_below_threshold",
-                    f"Pc {pc_pre:.2e} is below maneuver threshold "
-                    f"{policy.pc_maneuver_threshold:.1e} but above monitor "
-                    f"threshold {policy.pc_monitor_threshold:.1e}. "
-                    f"Event escalated to watch status. No burn required.",
-                )
-            return (
-                False,
-                "pc_below_threshold",
-                f"Pc {pc_pre:.2e} is below maneuver threshold "
-                f"{policy.pc_maneuver_threshold:.1e}. No maneuver warranted.",
-            )
+    return True, "", "", risk_gate
 
-    return True, "", ""
+
+
+# ---------------------------------------------------------------------------
+# SCRUM-389: probability of collision
+# ---------------------------------------------------------------------------
+
+PC_SOURCE_SUPPLIED = "supplied"
+PC_SOURCE_COMPUTED = "computed"
+PC_SOURCE_UNAVAILABLE = "unavailable"
+
+
+def resolve_hard_body_radius(cap: SatelliteCapability) -> Tuple[float, str]:
+    """Combined hard-body radius for this conjunction, and where it came from.
+
+    Delegates to the shared convention so the planner and the propagator cannot
+    disagree about the radius for the same event. See ADR-010 and the reasoning
+    beside the constants in libs/aps_math/conventions.py.
+    """
+    return conventions.combined_hbr_m(cap.radius_m)
+
+
+def compute_pc_from_geometry(
+    r_sat_km: np.ndarray,
+    v_sat_km_s: np.ndarray,
+    r_rel_km: np.ndarray,
+    v_rel_km_s: np.ndarray,
+    p_rel_km2: np.ndarray,
+    hbr_m: float,
+) -> float:
+    """Probability of collision from the planner's own conjunction geometry.
+
+    Why relative velocity is required
+    ---------------------------------
+    The 2D Pc is an integral over the encounter plane, which is the plane
+    perpendicular to the relative velocity at TCA. Without a relative velocity
+    there is no plane to project the miss and the covariance into, so there is no
+    Pc to compute. This is why v_rel_km_s is not optional here even though it is
+    optional on the request: a caller that cannot supply it gets no Pc rather
+    than an invented one.
+
+    Why the combined covariance is SPLIT rather than put on the primary
+    -------------------------------------------------------------------
+    compute_pc takes two objects and adds their covariances, so the obvious move
+    is to pass the combined matrix as the primary's and zero as the secondary's.
+    That is wrong, and silently so.
+
+    compute_pc checks whether either covariance is all-zero and, if so, routes to
+    frisbee_max_pc, which returns an UPPER BOUND on Pc for the case where one
+    object's covariance is unknown. It is not the same quantity. The returned
+    PcResult looks identical apart from is_remediated, and the bound falls off as
+    1/k in Mahalanobis distance rather than exp(-k^2/2), so it agrees closely
+    with the real Pc for a small miss and is four orders of magnitude high by
+    four sigma. Splitting the covariance in half between the two objects sums to
+    exactly the same combined matrix and takes the ordinary path.
+
+    test_the_split_matches_a_hand_split_at_every_miss pins this across misses
+    rather than at one geometry, because at one small-miss geometry the wrong
+    version passes.
+    """
+    r1 = np.asarray(r_sat_km, dtype=float) * 1000.0
+    v1 = np.asarray(v_sat_km_s, dtype=float) * 1000.0
+    r2 = r1 + np.asarray(r_rel_km, dtype=float) * 1000.0
+    v2 = v1 + np.asarray(v_rel_km_s, dtype=float) * 1000.0
+    # Half each, summing to the combined matrix. See the docstring: a zero
+    # covariance on either object silently selects a different method.
+    half_m2 = np.asarray(p_rel_km2, dtype=float) * 1.0e6 * 0.5  # km^2 -> m^2
+    result = compute_pc(r1, v1, half_m2, r2, v2, half_m2, hbr_m)
+    return float(result.Pc)
+
+
+def resolve_pc(
+    cap: SatelliteCapability,
+    r_sat_km: np.ndarray,
+    v_sat_km_s: np.ndarray,
+    r_rel_km: np.ndarray,
+    v_rel_km_s: Optional[np.ndarray],
+    p_rel_km2: np.ndarray,
+    pc_precomputed: Optional[float],
+) -> Tuple[Optional[float], str, float, str]:
+    """Decide this event's Pc and record where it came from.
+
+    Returns (pc, pc_source, hbr_m, hbr_source). pc is None when no Pc could be
+    established, which is not the same as a Pc of zero and must not be treated
+    as one.
+
+    Precedence, per SCRUM-389 AC3: an externally supplied Pc wins. A CDM or UDL
+    Pc is produced by an authority with more information than we have, and
+    overriding it with our own would be arrogant. We compute one only when
+    nobody has.
+    """
+    hbr_m, hbr_source = resolve_hard_body_radius(cap)
+
+    if pc_precomputed is not None:
+        return float(pc_precomputed), PC_SOURCE_SUPPLIED, hbr_m, hbr_source
+
+    if v_rel_km_s is None:
+        return None, PC_SOURCE_UNAVAILABLE, hbr_m, hbr_source
+
+    try:
+        pc = compute_pc_from_geometry(
+            r_sat_km, v_sat_km_s, r_rel_km, v_rel_km_s, p_rel_km2, hbr_m
+        )
+    except Exception:
+        # A degenerate geometry (zero relative velocity, singular covariance)
+        # yields no Pc. Reporting unavailable is correct; reporting zero would
+        # claim the event is safe.
+        return None, PC_SOURCE_UNAVAILABLE, hbr_m, hbr_source
+
+    if not math.isfinite(pc):
+        return None, PC_SOURCE_UNAVAILABLE, hbr_m, hbr_source
+    return pc, PC_SOURCE_COMPUTED, hbr_m, hbr_source
 
 
 # ---------------------------------------------------------------------------
@@ -535,6 +682,14 @@ class ManeuverScoringResult:
     evaluated_at: str
     execution_error_modelled: bool = False
 
+    # SCRUM-389 provenance. A number is only trustworthy if you can tell where
+    # it came from, which is the covariance_source pattern from ADR-008.
+    pc_pre: Optional[float] = None
+    pc_source: str = PC_SOURCE_UNAVAILABLE
+    hbr_m: float = 0.0
+    hbr_source: str = ""
+    risk_gate: str = ""
+
     def is_maneuver_recommended(self) -> bool:
         return self.direction != "no-burn"
 
@@ -613,6 +768,7 @@ def score_maneuver_candidates(
     pc_precomputed: Optional[float] = None,
     miss_distance_km: Optional[float] = None,
     recovery_orbits: float = 1.0,
+    v_rel_km_s: Optional[np.ndarray] = None,
 ) -> ManeuverScoringResult:
     """Core APS 2.5 scoring function.
 
@@ -648,6 +804,11 @@ def score_maneuver_candidates(
         Miss distance at TCA [km].  Optional.
     recovery_orbits : float
         Recovery window [orbits].  Used for drag-corrected return cost.
+    v_rel_km_s : np.ndarray shape (3,) or None
+        Relative velocity at TCA [km/s].  SCRUM-389.  Required to compute Pc,
+        because the encounter plane is perpendicular to it and without one there
+        is no plane to integrate over.  When absent the planner establishes no
+        Pc and falls back to the Mahalanobis screen, recording that it did.
 
     Returns
     -------
@@ -672,9 +833,15 @@ def score_maneuver_candidates(
     requested_dv = policy.max_dv_per_event_ms
     dv_mag_m_s = cap.effective_dv_limit_m_s(requested_dv)
 
+    # --- SCRUM-389: establish this event's Pc and hard-body radius ---
+    pc_pre, pc_source, hbr_m, hbr_source = resolve_pc(
+        cap, r_sat_km, v_sat_km_s, r_rel_km, v_rel_km_s, p_rel_km2, pc_precomputed
+    )
+
     # --- Feasibility pre-screen ---
-    passes, nogo_code, nogo_human = _passes_feasibility(
-        cap, policy, dv_mag_m_s, pc_precomputed, miss_distance_km, math.sqrt(m2_pre)
+    passes, nogo_code, nogo_human, risk_gate = _passes_feasibility(
+        cap, policy, dv_mag_m_s, pc_pre, pc_source, miss_distance_km,
+        math.sqrt(m2_pre),
     )
 
     if not passes:
@@ -689,6 +856,11 @@ def score_maneuver_candidates(
             nogo_human=nogo_human,
             now_iso=now_iso,
             execution_error_modelled=_execution_error_modelled(cap),
+            pc_pre=pc_pre,
+            pc_source=pc_source,
+            hbr_m=hbr_m,
+            hbr_source=hbr_source,
+            risk_gate=risk_gate,
         )
 
     # --- Constellation slot context ---
@@ -860,11 +1032,20 @@ def score_maneuver_candidates(
             all_candidates_v25=all_candidates_v25,
             m2_post=m2_pre,
             execution_error_modelled=_execution_error_modelled(cap),
+            pc_pre=pc_pre,
+            pc_source=pc_source,
+            hbr_m=hbr_m,
+            hbr_source=hbr_source,
+            risk_gate=risk_gate,
         )
 
     # Post-maneuver risk surrogate
-    if pc_precomputed is not None:
-        risk_surrogate_post = float(pc_precomputed)
+    # SCRUM-393 note: when a Pc exists this reports the PRE-maneuver value under
+    # a post-maneuver name, which is wrong and predates this ticket. Left as-is
+    # here deliberately so 389 does not change a reported metric while it is
+    # changing the gates. SCRUM-393 carries the fix.
+    if pc_pre is not None:
+        risk_surrogate_post = float(pc_pre)
     else:
         risk_surrogate_post = 1.0 / max(1e-12, best_candidate.m2_post)
 
@@ -907,6 +1088,11 @@ def score_maneuver_candidates(
         drag_correction_applied=best_candidate.drag_correction_applied,
         candidates_v25=all_candidates_v25,
         evaluated_at=now_iso,
+        pc_pre=pc_pre,
+        pc_source=pc_source,
+        hbr_m=hbr_m,
+        hbr_source=hbr_source,
+        risk_gate=risk_gate,
         execution_error_modelled=execution_error_modelled,
     )
 
@@ -943,6 +1129,7 @@ def evaluate_conjunction_v25(
             "p_rel_km2": [9 floats],
             "pc_precomputed": float (optional),
             "miss_distance_km": float (optional),
+            "v_rel_km_s": [vx, vy, vz] (optional, SCRUM-389),
           },
           "policy": { ... OperatorPolicy fields ... }
         }
@@ -977,6 +1164,10 @@ def evaluate_conjunction_v25(
     t_ca_utc   = conj_dict["t_ca_utc"]
     pc_pre     = conj_dict.get("pc_precomputed")
     miss_dist  = conj_dict.get("miss_distance_km")
+    v_rel_raw  = conj_dict.get("v_rel_km_s")
+    v_rel_km_s = (
+        _as_vec3(v_rel_raw, "conjunction.v_rel_km_s") if v_rel_raw is not None else None
+    )
 
     return score_maneuver_candidates(
         conjunction_id=conjunction_id,
@@ -992,6 +1183,7 @@ def evaluate_conjunction_v25(
         pc_precomputed=pc_pre,
         miss_distance_km=miss_dist,
         recovery_orbits=recovery_orbits,
+        v_rel_km_s=v_rel_km_s,
     )
 
 
@@ -1069,6 +1261,11 @@ def _build_nogo_result(
     all_candidates_v25: Optional[List] = None,
     m2_post: Optional[float] = None,
     execution_error_modelled: bool = False,
+    pc_pre: Optional[float] = None,
+    pc_source: str = PC_SOURCE_UNAVAILABLE,
+    hbr_m: float = 0.0,
+    hbr_source: str = "",
+    risk_gate: str = "",
 ) -> ManeuverScoringResult:
     """Construct a no-go ManeuverScoringResult.
 
@@ -1116,4 +1313,9 @@ def _build_nogo_result(
         candidates_v25=all_candidates_v25 or [],
         evaluated_at=now_iso,
         execution_error_modelled=execution_error_modelled,
+        pc_pre=pc_pre,
+        pc_source=pc_source,
+        hbr_m=hbr_m,
+        hbr_source=hbr_source,
+        risk_gate=risk_gate,
     )

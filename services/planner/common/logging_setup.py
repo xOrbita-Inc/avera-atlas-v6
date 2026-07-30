@@ -43,7 +43,7 @@ SERVICE_NAME = "planner"
 # metadata in server.py. Lives here so server.py and any future importer share
 # one definition. openapi/planner.yaml is the source of truth for the
 # contract version; this constant must be kept in sync with it manually.
-SERVICE_VERSION = "2.5.4"
+SERVICE_VERSION = "2.5.5"
 
 # Default config path -- baked into image via COPY config/ /app/config/
 # Can be overridden via env var for future operator policy hot-swap support.

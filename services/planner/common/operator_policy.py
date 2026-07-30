@@ -376,8 +376,17 @@ class OperatorPolicy:
     def passes_pre_screen(self, mahalanobis_distance: float) -> bool:
         """
         Pre-screen: skip events outside the risk-relevant Mahalanobis radius.
-        Runs before the optimizer to avoid scoring trivially safe events.
-        Not configurable -- physics-based gate.
+
+        SCRUM-389: this is the fallback risk gate, used only when no Pc could be
+        established for the event. When a Pc exists, supplied or computed, the Pc
+        gate decides and this is reported as a diagnostic rather than applied.
+
+        Configurable via mahalanobis_screen_threshold in the operator policy.
+        The docstring here previously said "not configurable, physics-based
+        gate" while from_dict read the threshold straight out of the policy
+        dict, which it still does. The loader was right and the docstring was
+        wrong. Per ADR-010 a threshold an operator may legitimately set is an
+        operator choice, so it stays in YAML.
         """
         return mahalanobis_distance <= self.mahalanobis_screen_threshold
 
@@ -387,7 +396,18 @@ class OperatorPolicy:
         """
         Hard trigger: Pc threshold OR miss distance floor.
         Either condition alone is sufficient to require a maneuver.
-        Not configurable -- physics-based gate.
+
+        Configurable via pc_maneuver_threshold and min_miss_distance_km in the
+        operator policy. The docstring here previously said "not configurable,
+        physics-based gate" while from_dict read both out of the policy dict,
+        which it still does. The loader was right and the docstring was wrong.
+        Per ADR-010 this expresses an operator's risk appetite, which is exactly
+        the kind of value that should be settable without a redeploy.
+
+        What is NOT configurable is the hard-body radius the Pc was computed
+        against, which lives in libs/aps_math/conventions.py. Lowering that
+        would reduce every Pc and suppress maneuvers, which is a safety property
+        rather than a preference.
         """
         return (
             pc >= self.pc_maneuver_threshold

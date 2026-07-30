@@ -49,7 +49,7 @@ info:
     - No fields renamed or removed (SCRUM-281 constraint satisfied).
   contact:
     name: xOrbita APS Team
-  version: 2.5.4
+  version: 2.5.5
 servers:
 - url: http://localhost:8060
   description: Local / Jetson dev
@@ -238,12 +238,39 @@ components:
           example: [0.01, 0, 0, 0, 0.01, 0, 0, 0, 0.01]
           items:
             type: number
+        v_rel_km_s:
+          maxItems: 3
+          minItems: 3
+          type: array
+          description: |
+            SCRUM-389. Optional relative velocity at TCA [vx, vy, vz] (km/s),
+            dv = v_obj - v_sat, ECI frame.
+
+            Required for the planner to compute its own Pc. The 2D collision
+            probability is an integral over the encounter plane, which is the
+            plane perpendicular to the relative velocity, so without one there
+            is no plane to project the miss and the covariance into and no Pc
+            to compute.
+
+            When omitted and no pc_precomputed is supplied, the planner
+            establishes no Pc, reports pc_source as "unavailable", and falls
+            back to the Mahalanobis screen as the risk gate for that event.
+            It does not report a Pc of zero, which would assert the event is
+            safe rather than that its risk is unknown.
+          example: [0.0, -15.0, 0.2]
+          nullable: true
+          items:
+            type: number
         pc_precomputed:
           type: number
           description: |
             Optional pre-computed collision probability from ingest
             (Space-Track published Pc, if available).
-            If null the planner uses Mahalanobis distance as risk surrogate.
+
+            Takes precedence over a Pc the planner could compute itself: an
+            authority with more information than we have should win. The
+            planner computes one only when nobody has supplied one, and
+            pc_source in the response records which happened.
           nullable: true
         miss_distance_km:
           type: number
