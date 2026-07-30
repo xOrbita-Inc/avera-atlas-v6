@@ -466,6 +466,23 @@ def test_red_is_still_unreachable_without_a_supplied_covariance(tmp_path):
     )
 
 
+def test_the_propagator_uses_the_shared_hbr_convention(tmp_path):
+    """SCRUM-389, half of the anti-divergence property.
+
+    The other half is in the planner suite, which pins its resolved hard-body
+    radius to the same constant. If either service ever defines its own, the
+    same conjunction gets two different Pc values, which is the class of defect
+    SCRUM-386 and SCRUM-390 both were.
+    """
+    from aps_math import conventions
+
+    assert propagator_main.HBR_M == conventions.DEFAULT_COMBINED_HBR_M
+    assert propagator_main.DEFAULT_DEBRIS_UNCERTAINTY_M == (
+        conventions.DEFAULT_DEBRIS_UNCERTAINTY_M
+    )
+    assert propagator_main.SCREENING_THRESHOLD_KM == conventions.SCREENING_THRESHOLD_KM
+
+
 def test_thresholds_and_hard_body_radius_are_unchanged(tmp_path):
     """SCRUM-391 AC5. RED was recovered by describing the covariance honestly,
     not by moving the goalposts. Both of these are physical or policy quantities

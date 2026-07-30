@@ -305,44 +305,49 @@ class TestFeasibilityFilters:
         )
 
     def test_passes_normal(self):
-        # mahalanobis=2.0 < screen_threshold=4.0 -> passes pre-screen
-        passes, code, _ = _passes_feasibility(
-            self._make_cap(), self._policy(), 2.0, None, None, 2.0
+        # No Pc, so the Mahalanobis fallback decides. 2.0 < 4.0 -> passes.
+        passes, code, _, gate = _passes_feasibility(
+            self._make_cap(), self._policy(), 2.0, None, "unavailable", None, 2.0
         )
         assert passes is True
         assert code == ""
+        assert gate == "mahalanobis"
 
     def test_nogo_trivial_event(self):
         """Mahalanobis above screen threshold -> trivial_event."""
-        passes, code, _ = _passes_feasibility(
-            self._make_cap(), self._policy(md_thresh=3.0), 2.0, None, None, 10.0
+        passes, code, _, gate = _passes_feasibility(
+            self._make_cap(), self._policy(md_thresh=3.0), 2.0, None,
+            "unavailable", None, 10.0,
         )
         assert passes is False
         assert code == "trivial_event"
+        assert gate == "mahalanobis"
 
     def test_nogo_propulsion_infeasible(self):
         """Zero available dv -> propulsion_infeasible."""
         cap = self._make_cap(v_remaining=5.0, v_reserved=5.0)  # v_available=0
-        passes, code, _ = _passes_feasibility(
-            cap, self._policy(), 2.0, None, None, 2.0
+        passes, code, _, _ = _passes_feasibility(
+            cap, self._policy(), 2.0, None, "unavailable", None, 2.0
         )
         assert passes is False
         assert code == "propulsion_infeasible"
 
     def test_nogo_pc_below_threshold(self):
         """Pc below maneuver threshold -> pc_below_threshold."""
-        passes, code, _ = _passes_feasibility(
-            self._make_cap(), self._policy(), 2.0, 1e-6, 5.0, 2.0
+        passes, code, _, gate = _passes_feasibility(
+            self._make_cap(), self._policy(), 2.0, 1e-6, "supplied", 5.0, 2.0
         )
         assert passes is False
         assert code == "pc_below_threshold"
+        assert gate == "pc"
 
     def test_passes_pc_above_threshold(self):
         """Pc above threshold -> passes."""
-        passes, _, _ = _passes_feasibility(
-            self._make_cap(), self._policy(), 2.0, 5e-4, 0.5, 2.0
+        passes, _, _, gate = _passes_feasibility(
+            self._make_cap(), self._policy(), 2.0, 5e-4, "supplied", 0.5, 2.0
         )
         assert passes is True
+        assert gate == "pc"
 
 
 # ---------------------------------------------------------------------------

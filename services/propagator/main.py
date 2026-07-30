@@ -24,6 +24,11 @@ from sgp4.api import Satrec, WGS72
 # Import Pc utilities
 from aps_math.pc_utils import compute_pc, default_covariance_from_uncertainty
 
+# SCRUM-389 / ADR-010: values the planner and the propagator must agree on live
+# in one place, so the two services cannot compute a different Pc for the same
+# conjunction. Each constant carries its reasoning at the definition.
+from aps_math import conventions
+
 # === CONSTANTS ===
 MU_EARTH = 398600.4418  # km³/s² - Earth gravitational parameter
 R_EARTH = 6371.0  # km
@@ -33,12 +38,18 @@ DATA_DIR = os.getenv("DATA_DIR", "/data/planner_artifacts")
 INPUT_FILE = "states_multi.npz"
 OUTPUT_FILE = "prop_multi.npz"
 
-HBR_M = 15.0  # Combined hard body radius (meters)
-SCREENING_THRESHOLD_KM = 100.0
+# Shared conventions (ADR-010). Re-exported under the propagator's historic
+# names so existing call sites and tests keep working, but there is now exactly
+# one definition and the planner imports the same one.
+HBR_M = conventions.DEFAULT_COMBINED_HBR_M
+SCREENING_THRESHOLD_KM = conventions.SCREENING_THRESHOLD_KM
+DEFAULT_DEBRIS_UNCERTAINTY_M = conventions.DEFAULT_DEBRIS_UNCERTAINTY_M
+
+# Risk banding is the propagator's own presentation concern, not a shared
+# convention. The planner gates on the operator policy's Pc thresholds instead.
 PC_RED_THRESHOLD = 1e-4
 PC_AMBER_THRESHOLD = 1e-5
 PC_GREEN_THRESHOLD = 1e-7
-DEFAULT_DEBRIS_UNCERTAINTY_M = 2000.0  # 2 km uncertainty
 
 # Asset TLE (ISS)
 MY_SAT_TLE_LINE1 = "1 25544U 98067A   23321.56445781  .00018593  00000-0  34139-3 0  9995"
@@ -405,7 +416,10 @@ def propagate_and_screen():
     # Conjunction Screening
     print(f"[PROP] Running conjunction assessment...")
     
-    cov_asset = default_covariance_from_uncertainty(1000.0, cross_track_factor=0.3)
+    cov_asset = default_covariance_from_uncertainty(
+        conventions.DEFAULT_ASSET_UNCERTAINTY_M,
+        cross_track_factor=conventions.DEFAULT_PRIMARY_CROSS_TRACK_FACTOR,
+    )
     
     results = {
         'min_miss_distances': [], 'pc_values': [], 'risk_levels': [],
@@ -446,7 +460,10 @@ def propagate_and_screen():
         if min_dist_km > SCREENING_THRESHOLD_KM:
             pc = 0.0
         else:
-            cov_debris = default_covariance_from_uncertainty(uncertainty_m, cross_track_factor=0.5)
+            cov_debris = default_covariance_from_uncertainty(
+                uncertainty_m,
+                cross_track_factor=conventions.DEFAULT_SECONDARY_CROSS_TRACK_FACTOR,
+            )
 
             try:
                 result = compute_pc(

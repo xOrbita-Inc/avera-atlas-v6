@@ -24,8 +24,16 @@ repository root, not the service directory, because a build cannot COPY from
 outside its context. See services/planner/Dockerfile and
 services/propagator/Dockerfile, and the `context: .` entries in
 docker-compose.yaml.
+
+Modules
+-------
+pc_utils      probability of collision, Alfano 2005 and Frisbee
+conventions   shared numerical conventions (ADR-010). Values every service must
+              agree on, each carrying why it was chosen and what changing it
+              would affect.
 """
 
+from . import conventions  # noqa: F401
 from .pc_utils import (  # noqa: F401
     PcResult,
     compute_pc,
@@ -36,6 +44,7 @@ from .pc_utils import (  # noqa: F401
 )
 
 __all__ = [
+    "conventions",
     "PcResult",
     "compute_pc",
     "compute_pc_batch",
