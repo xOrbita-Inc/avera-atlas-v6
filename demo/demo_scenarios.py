@@ -59,7 +59,9 @@ def _resolve_data_dir() -> str:
 
 
 def write_scenario(scenario: str, output_dir: str | None = None) -> str:
-    obj_ids, r_list, v_list, confidences = demo_presets.build_scenario(scenario)
+    obj_ids, r_list, v_list, confidences, position_sigma_m = (
+        demo_presets.build_scenario(scenario)
+    )
 
     out_dir = output_dir or _resolve_data_dir()
     os.makedirs(out_dir, exist_ok=True)
@@ -71,6 +73,7 @@ def write_scenario(scenario: str, output_dir: str | None = None) -> str:
         r_eci_km=np.array(r_list, dtype=float),
         v_eci_km_s=np.array(v_list, dtype=float),
         confidences=np.array(confidences, dtype=float),
+        position_sigma_m=np.array(position_sigma_m, dtype=float),
         t_window=np.array([demo_presets.SAMPLE_DT_S, demo_presets.N_STEPS]),
         metadata=json.dumps({
             "source": "demo_scenarios_cli",
@@ -92,12 +95,20 @@ def write_scenario(scenario: str, output_dir: str | None = None) -> str:
     print()
     print("Geometry (what the preset asks for):")
     print("-" * 68)
-    print(f"  {'object':18} {'miss at TCA':>14}  {'TCA':>11}  {'confidence':>10}")
+    print(f"  {'object':18} {'miss at TCA':>14}  {'TCA':>11}  {'position sigma':>16}")
     for obj_id, s in zip(obj_ids, specs):
         tca_min = s.t_star_s / 60.0
+        if s.position_sigma_m is None:
+            sigma = f"conf {s.confidence:.3f}"
+        else:
+            sigma = f"{s.position_sigma_m:.0f} m tracked"
         print(f"  {obj_id:18} {s.miss_km * 1000:11.1f} m  T+{tca_min:6.1f}min  "
-              f"{s.confidence:10.3f}")
+              f"{sigma:>16}")
     print("-" * 68)
+    print("Objects marked 'conf' carry no supplied covariance; the propagator uses")
+    print("its TLE-grade default of 2000 m divided by that confidence. Objects")
+    print("marked 'tracked' use the stated sigma directly (SCRUM-391).")
+    print()
     print("Risk level is not predicted here. The propagator computes Pc from this")
     print("geometry and the covariance model, and pc_to_risk_level assigns the")
     print("band. Run the propagator to see it.")
