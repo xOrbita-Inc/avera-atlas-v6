@@ -364,3 +364,93 @@ class TestBackwardCompatibility:
             "the v2.4 path has grown a feasibility screen; update AC5 and this test"
         )
         assert "screen" not in source.lower()
+
+
+# ---------------------------------------------------------------------------
+# SCRUM-395: a no-go result has to carry the Pc that produced it
+# ---------------------------------------------------------------------------
+
+class TestNoGoResultsCarryTheResolvedPc:
+    """SCRUM-389 added pc_pre as a parameter of _build_nogo_result carrying the
+    resolved Pc, supplied or computed. A leftover local assignment inside that
+    function overwrote it with pc_precomputed, which is None for every computed
+    Pc. Two things followed.
+
+    The event that the Pc threshold rejected reported no Pc at all, so the one
+    number that explains the decision was missing from the record of it.
+
+    And risk_surrogate_post fell through to the 1/m^2 branch. That branch exists
+    only for events with no Pc, and its units are inverse square kilometres. It
+    publishes about 1.7e-01 where the Pc branch publishes 4.2e-05, on the field
+    the UI reads as risk. Wrong quantity, wrong units, three orders of magnitude
+    high, and only on rejected events, which are the majority.
+
+    Geometry below is chosen so the computed Pc lands between the monitor and
+    maneuver thresholds. That is the escalate-to-watch case, the one an operator
+    is most likely to look at closely.
+    """
+
+    R_REL_BELOW_THRESHOLD = np.array([0.0, 0.0, 1.2])
+
+    def _result(self, **kw):
+        return score_maneuver_candidates(
+            "CID-NOGO", R_SAT, V_SAT, self.R_REL_BELOW_THRESHOLD, P_SURROGATE,
+            T_BURN, T_CA, _cap(), _policy(), v_rel_km_s=V_REL_HEAD_ON, **kw
+        )
+
+    def test_the_geometry_still_produces_the_no_go_this_class_tests(self):
+        """If a later change moves the Pc across a threshold, the assertions
+        below would pass vacuously against a go result. Fail here instead."""
+        assert self._result().no_go_reason_code == "pc_below_threshold"
+
+    def test_a_rejected_event_reports_the_pc_that_rejected_it(self):
+        result = self._result()
+        assert result.pc_source == PC_SOURCE_COMPUTED
+        assert result.pc_pre is not None, (
+            "the Pc that made the decision was dropped from the result"
+        )
+
+        hbr_m, _hbr_source = resolve_hard_body_radius(_cap())
+        expected = compute_pc_from_geometry(
+            R_SAT, V_SAT, self.R_REL_BELOW_THRESHOLD, V_REL_HEAD_ON,
+            P_SURROGATE, hbr_m,
+        )
+        assert result.pc_pre == pytest.approx(expected, rel=1e-12)
+
+    def test_risk_surrogate_post_is_the_pc_and_not_the_inverse_square_branch(self):
+        result = self._result()
+        assert result.risk_surrogate_post == pytest.approx(result.pc_pre, rel=1e-12)
+
+        inverse_m2 = 1.0 / result.m2_pre
+        assert result.risk_surrogate_post != pytest.approx(inverse_m2, rel=1e-6)
+        assert result.risk_surrogate_post < 1.0, (
+            "risk_surrogate_post is carrying inverse square kilometres, not a "
+            "probability"
+        )
+
+    def test_the_reported_pc_sits_between_the_two_thresholds(self):
+        """Confirms the number is the escalate-to-watch case it claims to be,
+        so the human-readable string and the field agree."""
+        policy = _policy()
+        result = self._result()
+        assert policy.pc_monitor_threshold < result.pc_pre < policy.pc_maneuver_threshold
+        assert "watch" in result.no_go_human_readable.lower()
+
+    def test_a_supplied_pc_on_a_rejected_event_is_still_reported(self):
+        """The path that always worked. Guards it while fixing the other one."""
+        result = self._result(pc_precomputed=5.0e-5)
+        assert result.pc_source == PC_SOURCE_SUPPLIED
+        assert result.pc_pre == pytest.approx(5.0e-5)
+        assert result.risk_surrogate_post == pytest.approx(5.0e-5)
+
+    def test_an_event_with_no_pc_still_uses_the_inverse_square_branch(self):
+        """The fallback is not removed. An event with no relative velocity has
+        no Pc, and risk_surrogate_post has nothing else to carry."""
+        r_rel = np.array([0.0, 0.0, 3.0])
+        result = score_maneuver_candidates(
+            "CID-NOGO-NOPC", R_SAT, V_SAT, r_rel, P_SURROGATE,
+            T_BURN, T_CA, _cap(), _policy(),
+        )
+        assert result.no_go_reason_code == "trivial_event"
+        assert result.pc_pre is None
+        assert result.risk_surrogate_post == pytest.approx(1.0 / result.m2_pre)

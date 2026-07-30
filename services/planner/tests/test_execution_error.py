@@ -284,3 +284,119 @@ class TestExecutionErrorScoringIntegration:
 
         assert result.no_go_reason_code != ""  # confirms this actually hit the no-go path
         assert result.execution_error_modelled is True
+
+
+# ---------------------------------------------------------------------------
+# SCRUM-395: the request adapter has to carry the fields too
+# ---------------------------------------------------------------------------
+
+class TestRequestAdapterCarriesExecutionError:
+    """SCRUM-365 added thrust_misalignment_deg and dv_magnitude_sigma to
+    PropulsionProfile but not to SatelliteCapability.from_request, which is the
+    only way a real HTTP request becomes a SatelliteCapability. So every request
+    that crossed the API arrived with both as None, Q_exec was never applied,
+    and execution_error_modelled was False in production for a satellite whose
+    operator had stated both values.
+
+    Every test above this line builds SatelliteCapability directly. None of them
+    crosses the adapter, which is exactly why the suite was green while the
+    feature was inert. These tests go through from_request on purpose.
+    """
+
+    @staticmethod
+    def _request(**propulsion_extra) -> dict:
+        p = {
+            "propulsion_type": "chemical",
+            "isp_s": 220.0,
+            "thrust_n": 1.0,
+            "min_dv_m_s": 0.01,
+            "max_dv_per_burn_m_s": 10.0,
+        }
+        p.update(propulsion_extra)
+        return {
+            "sat_id": "SAT-ADAPTER",
+            "a_ref_km": _mean_motion_to_sma_km(15.3020),
+            "propulsion": p,
+            "lifetime": {
+                "mass_kg": 100.0,
+                "v_remaining_m_s": 50.0,
+                "v_reserved_m_s": 5.0,
+                "mission_lifetime_days_remaining": 365.0,
+            },
+        }
+
+    def test_both_fields_survive_the_adapter(self):
+        cap = SatelliteCapability.from_request(
+            self._request(thrust_misalignment_deg=1.5, dv_magnitude_sigma=0.03)
+        )
+        assert cap.propulsion.thrust_misalignment_deg == 1.5
+        assert cap.propulsion.dv_magnitude_sigma == 0.03
+
+    def test_omitting_them_still_yields_none(self):
+        """The default has to stay None, not 0.0. Zero would claim a perfectly
+        executed burn was modelled; None says nothing was stated."""
+        cap = SatelliteCapability.from_request(self._request())
+        assert cap.propulsion.thrust_misalignment_deg is None
+        assert cap.propulsion.dv_magnitude_sigma is None
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {"thrust_misalignment_deg": 1.0},
+            {"dv_magnitude_sigma": 0.02},
+            {"thrust_misalignment_deg": 1.0, "dv_magnitude_sigma": 0.02},
+        ],
+    )
+    def test_a_request_that_states_them_actually_models_execution_error(self, extra):
+        """The end the operator cares about. A request stating either parameter
+        must produce a scored result that says execution error was modelled.
+        Before the fix this asserted False for all three cases."""
+        cap = SatelliteCapability.from_request(self._request(**extra))
+        policy = OperatorPolicy(
+            operator_id="TEST_OP", policy_version="2.5.0",
+            max_dv_per_event_ms=2.0, mission_lifetime_days_total=1825.0,
+            scoring_weights=ScoringWeights(
+                lambda_dv=1.0, lambda_lifetime=0.8, lambda_slot_deviation=1.2
+            ),
+        )
+        result = score_maneuver_candidates(
+            "CID-ADAPTER",
+            np.array([6853.0, 0.0, 0.0]),
+            np.array([0.0, 7.626, 0.0]),
+            np.array([0.3, 0.0, 0.0]),
+            np.eye(3) * 0.01,
+            "2026-04-14T08:00:00Z",
+            "2026-04-14T12:00:00Z",
+            cap,
+            policy,
+        )
+        assert result.execution_error_modelled is True
+
+    def test_the_adapter_covers_every_optional_propulsion_field(self):
+        """Guards the class of defect rather than this instance of it. If a
+        later ticket adds another optional field to PropulsionProfile and
+        forgets the adapter again, this fails and names the field."""
+        import dataclasses
+
+        stated = {
+            "power_available_w": 45.0,
+            "thruster_efficiency": 0.6,
+            "burn_window_s": 120.0,
+            "thrust_misalignment_deg": 1.0,
+            "dv_magnitude_sigma": 0.02,
+        }
+        optional = [
+            f.name for f in dataclasses.fields(PropulsionProfile)
+            if f.default is None
+        ]
+        missing = [name for name in optional if name not in stated]
+        assert not missing, (
+            f"PropulsionProfile gained optional fields {missing}; state them in "
+            f"this test and confirm from_request reads them"
+        )
+
+        cap = SatelliteCapability.from_request(self._request(**stated))
+        for name, value in stated.items():
+            assert getattr(cap.propulsion, name) == value, (
+                f"from_request dropped {name}"
+            )
