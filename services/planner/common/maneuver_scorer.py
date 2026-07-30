@@ -1281,7 +1281,14 @@ def _build_nogo_result(
     """
     no_burn_v24 = [{"direction": "no-burn", "dv_eci_km_s": [0,0,0],
                     "delta_C": 0.0, "utility": 0.0}]
-    pc_pre = pc_precomputed
+    # SCRUM-389 added pc_pre as a parameter carrying the RESOLVED Pc, supplied
+    # or computed. A local assignment here shadowed it with the external value,
+    # so an event rejected by the Pc threshold reported no Pc at all and
+    # risk_surrogate_post fell to the 1/m^2 branch, publishing roughly 1e-2 on a
+    # field that otherwise carries a probability near 1e-8. Wrong units, wrong
+    # magnitude, on the field the UI reads.
+    if pc_pre is None:
+        pc_pre = pc_precomputed
     risk_post = (1.0 / max(1e-12, m2_post or m2_pre))
     if pc_pre is not None:
         risk_post = float(pc_pre)

@@ -405,6 +405,13 @@ class SatelliteCapability:
             power_available_w   = _opt(p_raw.get("power_available_w")),
             thruster_efficiency = _opt(p_raw.get("thruster_efficiency")),
             burn_window_s       = _opt(p_raw.get("burn_window_s")),
+            # SCRUM-365 added these to PropulsionProfile but not to this
+            # adapter, so every request over HTTP arrived with both as None and
+            # execution error was never modelled in production. The tests all
+            # construct SatelliteCapability directly and never cross this
+            # function, which is why a green suite said otherwise.
+            thrust_misalignment_deg = _opt(p_raw.get("thrust_misalignment_deg")),
+            dv_magnitude_sigma      = _opt(p_raw.get("dv_magnitude_sigma")),
         )
 
         # LifetimeProfile — v_remaining_m_s bridges from v2.4
