@@ -532,6 +532,75 @@ def resolve_pc(
 
 
 # ---------------------------------------------------------------------------
+# SCRUM-393: post-maneuver probability of collision
+# ---------------------------------------------------------------------------
+
+# Where risk_surrogate_post's value came from. The field has carried three
+# different quantities over its life and the name says none of them, so the
+# source travels with the number. Same reasoning as pc_source and hbr_source.
+RISK_SURROGATE_PC_POST = "pc_post"
+RISK_SURROGATE_INVERSE_M2 = "inverse_m2_post"
+RISK_SURROGATE_PC_PRE_NO_BURN = "pc_pre_no_burn"
+
+
+def compute_pc_post(
+    r_sat_km: np.ndarray,
+    v_sat_km_s: np.ndarray,
+    r_post_km: np.ndarray,
+    v_rel_km_s: Optional[np.ndarray],
+    s_covariance_km2: np.ndarray,
+    hbr_m: float,
+) -> Optional[float]:
+    """Probability of collision AFTER a candidate burn.
+
+    Same computation as the pre-maneuver Pc, on the post-burn geometry. The
+    inputs that change are the relative position, which the burn moves, and the
+    covariance, which gains Q_exec when the propulsion profile carries execution
+    error. Returns None when no Pc can be established, which is not a Pc of zero
+    and must not be read as one.
+
+    Why the relative velocity is held fixed
+    ---------------------------------------
+    The burn changes the primary's velocity, so strictly the relative velocity
+    at TCA changes too, which rotates the encounter plane. That is neglected
+    here, and the size of what is neglected is bounded rather than assumed.
+
+    Under Clohessy-Wiltshire the velocity-to-velocity block is
+
+        Phi_vv = [[ cos(nt),     2 sin(nt),      0       ],
+                  [ -2 sin(nt),  4 cos(nt) - 3,  0       ],
+                  [ 0,           0,              cos(nt) ]]
+
+    whose entries are bounded by 1, 2 and 7 regardless of how long the
+    propagation runs, so the change in relative velocity is at most about
+    7.3 times the burn magnitude. At the policy ceiling of a few m/s against a
+    LEO relative velocity of 7 to 15 km/s that is a plane rotation under
+    2e-3 rad, which moves the projected miss by under 2 m per km of separation.
+    Against a 15 m hard-body radius that is not a difference the answer can see.
+
+    test_holding_v_rel_fixed_is_below_the_stated_bound implements Phi_vv
+    independently and measures the difference rather than trusting this
+    paragraph. If a future change raises the delta-v ceiling far enough for the
+    approximation to matter, that test is what fails.
+
+    Including Phi_vv here would be false precision anyway. The post-burn
+    position itself comes from a linearised CW propagation, and that is a larger
+    modelling error than the plane rotation it would correct.
+    """
+    if v_rel_km_s is None:
+        return None
+    try:
+        pc = compute_pc_from_geometry(
+            r_sat_km, v_sat_km_s, r_post_km, v_rel_km_s, s_covariance_km2, hbr_m
+        )
+    except Exception:
+        return None
+    if not math.isfinite(pc):
+        return None
+    return float(pc)
+
+
+# ---------------------------------------------------------------------------
 # Candidate generation
 # ---------------------------------------------------------------------------
 
@@ -631,6 +700,13 @@ class CandidateScore:
     recovery_plan: Optional[SlotRecoveryPlan]
     drag_correction_applied: bool
 
+    # SCRUM-393. Probability of collision if THIS candidate is executed, or None
+    # when no Pc could be established for the event. Computed for every
+    # candidate rather than only the winner, because SCRUM-387 needs to trade in
+    # Pc across the whole candidate set and reading it here beats recomputing it
+    # there.
+    pc_post: Optional[float] = None
+
 
 @dataclass
 class ManeuverScoringResult:
@@ -689,6 +765,12 @@ class ManeuverScoringResult:
     hbr_m: float = 0.0
     hbr_source: str = ""
     risk_gate: str = ""
+
+    # SCRUM-393. The genuine post-maneuver Pc for the recommended burn, and what
+    # risk_surrogate_post is actually carrying. pc_post is None when no Pc could
+    # be established, and on a no-go, where there is no burn to compute one for.
+    pc_post: Optional[float] = None
+    risk_surrogate_source: str = ""
 
     def is_maneuver_recommended(self) -> bool:
         return self.direction != "no-burn"
@@ -917,6 +999,14 @@ def score_maneuver_candidates(
         delta_C_v25 = m2_post - m2_pre      # research doc convention
         delta_C_v24 = m2_pre - m2_post      # v2.4 output convention
 
+        # SCRUM-393: what the collision probability becomes if this candidate is
+        # executed. Uses the post-burn relative position and the same covariance
+        # the Mahalanobis gain uses, so Q_exec is included whenever the profile
+        # carries execution error and the Pc is not quietly a perfect-burn one.
+        pc_post_candidate = compute_pc_post(
+            r_sat_km, v_sat_km_s, r_post_km, v_rel_km_s, s_covariance_km2, hbr_m
+        )
+
         # --- Co-optimized return cost (CTO items 1 and 2) ---
         post_drift_km = 0.0
         dv_return = 0.0
@@ -996,6 +1086,7 @@ def score_maneuver_candidates(
             post_drift_km=float(post_drift_km),
             recovery_plan=recovery_plan,
             drag_correction_applied=drag_applied,
+            pc_post=pc_post_candidate,
         )
         all_candidates_v25.append(candidate)
 
@@ -1040,14 +1131,30 @@ def score_maneuver_candidates(
         )
 
     # Post-maneuver risk surrogate
-    # SCRUM-393 note: when a Pc exists this reports the PRE-maneuver value under
-    # a post-maneuver name, which is wrong and predates this ticket. Left as-is
-    # here deliberately so 389 does not change a reported metric while it is
-    # changing the gates. SCRUM-393 carries the fix.
-    if pc_pre is not None:
-        risk_surrogate_post = float(pc_pre)
+    #
+    # SCRUM-393. This used to report pc_precomputed whenever one was supplied,
+    # which is the PRE-maneuver probability under a post-maneuver name. The
+    # field therefore said the recommended burn reduced risk by exactly zero,
+    # and it said it most confidently on the events carrying the most real data.
+    # It now reports the burn's own Pc.
+    #
+    # A supplied Pc still wins for pc_pre, per SCRUM-389 AC3, because a CDM or
+    # UDL Pc comes from an authority with more information than we have. That
+    # does not make it the post-maneuver figure. Nobody external has computed
+    # the Pc after a burn we have not flown, so the post-maneuver value is ours
+    # to compute whether or not the pre-maneuver one was given to us.
+    #
+    # The 1/m2_post fallback stays for events with no relative velocity, where
+    # there is no encounter plane and so no Pc at either end. It is an inverse
+    # area rather than a probability, which is why the source is recorded
+    # alongside it rather than left for a reader to infer from the magnitude.
+    pc_post = best_candidate.pc_post
+    if pc_post is not None:
+        risk_surrogate_post = float(pc_post)
+        risk_surrogate_source = RISK_SURROGATE_PC_POST
     else:
         risk_surrogate_post = 1.0 / max(1e-12, best_candidate.m2_post)
+        risk_surrogate_source = RISK_SURROGATE_INVERSE_M2
 
     # lifetime_penalty in v2.4 form (dv_avoid / v_remaining) for backward compat
     lifetime_penalty_v24 = (
@@ -1094,6 +1201,8 @@ def score_maneuver_candidates(
         hbr_source=hbr_source,
         risk_gate=risk_gate,
         execution_error_modelled=execution_error_modelled,
+        pc_post=pc_post,
+        risk_surrogate_source=risk_surrogate_source,
     )
 
 
@@ -1289,9 +1398,16 @@ def _build_nogo_result(
     # magnitude, on the field the UI reads.
     if pc_pre is None:
         pc_pre = pc_precomputed
+    # SCRUM-393. On a no-go there is no burn, so the post-maneuver risk is the
+    # pre-maneuver risk. That is correct rather than a defect, and the source
+    # says so explicitly. The rule this has to satisfy is that a pre-maneuver
+    # value is never carried under a post-maneuver name SILENTLY, not that the
+    # two can never be equal.
     risk_post = (1.0 / max(1e-12, m2_post or m2_pre))
+    risk_source = RISK_SURROGATE_INVERSE_M2
     if pc_pre is not None:
         risk_post = float(pc_pre)
+        risk_source = RISK_SURROGATE_PC_PRE_NO_BURN
 
     return ManeuverScoringResult(
         conjunction_id=conjunction_id,
@@ -1325,4 +1441,6 @@ def _build_nogo_result(
         hbr_m=hbr_m,
         hbr_source=hbr_source,
         risk_gate=risk_gate,
+        pc_post=None,
+        risk_surrogate_source=risk_source,
     )

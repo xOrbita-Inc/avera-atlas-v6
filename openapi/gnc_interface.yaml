@@ -366,7 +366,20 @@ components:
       properties:
         pc_computed:
           type: number
-          description: Collision probability as computed by APS
+          description: |
+            PRE-maneuver collision probability for this event, whether
+            APS computed it or an external CDM or UDL supplied it.
+
+            SCRUM-393 narrowed this wording. The planner used to populate
+            it from risk_surrogate_post, which meant it received an
+            inverse square kilometre for any event without a supplied Pc.
+            It now comes from the scoring result's pc_pre. 0.0 means no
+            Pc could be established, since the storage column cannot hold
+            null.
+
+            Pre-maneuver, like m2_pre and covariance_source beside it.
+            The post-maneuver probability is pc_post on the planner
+            response and is not carried here.
           example: 0.000312
         m2_pre:
           type: number
