@@ -31,9 +31,17 @@ pc_utils      probability of collision, Alfano 2005 and Frisbee
 conventions   shared numerical conventions (ADR-010). Values every service must
               agree on, each carrying why it was chosen and what changing it
               would affect.
+frames        reference-frame transforms (SCRUM-397). RTN to ECI, and expressing
+              an RTN-ordered linear map in ECI.
 """
 
 from . import conventions  # noqa: F401
+from . import frames  # noqa: F401
+from .frames import (  # noqa: F401
+    is_degenerate_state,
+    rotate_cw_block,
+    rtn_to_eci_rotation,
+)
 from .pc_utils import (  # noqa: F401
     PcResult,
     compute_pc,
@@ -45,6 +53,10 @@ from .pc_utils import (  # noqa: F401
 
 __all__ = [
     "conventions",
+    "frames",
+    "is_degenerate_state",
+    "rotate_cw_block",
+    "rtn_to_eci_rotation",
     "PcResult",
     "compute_pc",
     "compute_pc_batch",
