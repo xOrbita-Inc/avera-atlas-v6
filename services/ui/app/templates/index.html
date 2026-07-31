@@ -938,6 +938,11 @@ async function evaluateConjunction(conj,idx){
       ...(secondaryNoradId ? {secondary_norad: secondaryNoradId} : {}),
       t_ca_utc:new Date(Date.now()+conj.time_to_tca_s*1000).toISOString(),
       r_rel_km:conj.r_obj_km?[conj.r_obj_km[0]-asset_r[0],conj.r_obj_km[1]-asset_r[1],conj.r_obj_km[2]-asset_r[2]]:[conj.miss_distance_km,0.0,0.0],
+      // SCRUM-398: the planner needs a relative velocity to define the
+      // encounter plane. Without one it establishes no Pc and falls back to the
+      // Mahalanobis screen. Omitted rather than faked when the propagator
+      // artifact does not carry object velocities.
+      ...(conj.v_rel_km_s ? {v_rel_km_s: conj.v_rel_km_s} : {}),
       pc_precomputed:conj.pc>0?conj.pc:null},
     policy:getPolicy()
   };

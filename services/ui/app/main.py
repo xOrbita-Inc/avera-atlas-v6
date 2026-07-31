@@ -407,6 +407,11 @@ async def get_conjunctions():
         r_asset = data.get("r_asset", None)
         v_asset = data.get("v_asset", None)
         r_objects = data.get("r_objects", None)
+        # SCRUM-398: the propagator has always saved v_objects alongside
+        # r_objects. Nothing read it, so the demo path could not supply a
+        # relative velocity and every demo event reached the planner with no
+        # encounter plane and therefore no Pc.
+        v_objects = data.get("v_objects", None)
 
         conjunctions = []
         for i in range(len(obj_ids)):
@@ -437,6 +442,16 @@ async def get_conjunctions():
                 # orbital frame instead of against a hardcoded velocity.
                 if v_asset is not None:
                     conj["v_asset_km_s"] = v_asset[tca_idx].tolist()
+                    # SCRUM-398: secondary minus primary at TCA, which is the
+                    # sense compute_pc_from_geometry expects. Both propagated
+                    # from the same states over the same grid, so this is the
+                    # relative velocity at the sample the miss distance is
+                    # measured at, not an interpolation.
+                    if v_objects is not None:
+                        conj["v_obj_km_s"] = v_objects[i, tca_idx].tolist()
+                        conj["v_rel_km_s"] = (
+                            v_objects[i, tca_idx] - v_asset[tca_idx]
+                        ).tolist()
 
             conjunctions.append(conj)
 
