@@ -235,10 +235,50 @@ def _parse_conjunction(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
         p_rel_km2 = (p_rel_eci_m2 / 1e6).flatten().tolist()  # m^2 -> km^2
 
+        # --- Relative velocity (ECI, km/s) -------------------------------
+        #
+        # SCRUM-398. sv2's velocity was already being fetched and thrown away,
+        # since this function only read its covariance. Without a relative
+        # velocity the planner has no encounter plane, so no Pc, so the Pc gate
+        # from SCRUM-389 never runs on a UDL-sourced event.
+        #
+        # Sign convention is secondary minus primary, matching r_rel_km above
+        # and matching compute_pc_from_geometry's v2 = v1 + v_rel.
+        #
+        # UDL's relVelR/T/N, when present, is RTN in metres per second, the same
+        # shape as relPosR/T/N which this function already rotates. Preferred
+        # over the state-vector difference because it is the originator's own
+        # figure at TCA rather than ours.
+        rel_vel_r = record.get("relVelR")
+        if rel_vel_r is not None:
+            dv_rtn_m_s = np.array([
+                float(rel_vel_r),
+                float(record.get("relVelT", 0.0)),
+                float(record.get("relVelN", 0.0)),
+            ])
+            v_rel_km_s = (rot @ dv_rtn_m_s / 1000.0).tolist()
+            v_rel_source = "relative_velocity_rtn"
+        elif sv2.get("xvel") is not None:
+            v_sec = np.array([
+                float(sv2.get("xvel", 0.0)),
+                float(sv2.get("yvel", 0.0)),
+                float(sv2.get("zvel", 0.0)),
+            ])
+            v_rel_km_s = (v_sec - v_sat).tolist()   # already km/s, already ECI
+            v_rel_source = "state_vector_difference"
+        else:
+            # None rather than zero. The planner reads a missing relative
+            # velocity as "no Pc could be established", which is correct. A zero
+            # would claim the two objects are co-moving.
+            v_rel_km_s = None
+            v_rel_source = "unavailable"
+
         return {
             "obj_id":          obj_id,
             "t_ca_utc":        t_ca_utc,
             "r_rel_km":        r_rel_km,
+            "v_rel_km_s":      v_rel_km_s,
+            "v_rel_source":    v_rel_source,
             "p_rel_km2":       p_rel_km2,
             "pc_precomputed":  pc_precomputed,
             "miss_distance_km": miss_distance_km,

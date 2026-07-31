@@ -62,8 +62,15 @@ def cdm_to_conjunction_state(cdm: dict[str, Any]) -> dict[str, Any]:
     """Convert a parsed CDM dict into a ConjunctionState dict.
 
     Returns a dict with keys:
-      obj_id, t_ca_utc, r_rel_km, p_rel_km2, pc_precomputed
-    matching the planner's OpenAPI v2.4.1 schema.
+      obj_id, t_ca_utc, r_rel_km, v_rel_km_s, v_rel_source, p_rel_km2,
+      pc_precomputed
+
+    SCRUM-398 added v_rel_km_s and v_rel_source. This producer CAN supply a
+    relative velocity: a CCSDS CDM carries RELATIVE_VELOCITY_R/T/N in the
+    relative metadata section, and both objects' state vectors at TCA, so it is
+    either a direct read or a subtraction of two vectors this function already
+    parses. v_rel_source records which route was taken, so "derived" and
+    "as supplied by the originator" are distinguishable in the audit trail.
     """
 
     # ── Object IDs ────────────────────────────────────────────────
@@ -106,6 +113,46 @@ def cdm_to_conjunction_state(cdm: dict[str, Any]) -> dict[str, Any]:
         )
         r_rel_km = r2 - r1  # already km
 
+    # ── Relative velocity (ECI, km/s) ────────────────────────────
+    #
+    # SCRUM-398. Without this the planner cannot define an encounter plane, so
+    # it cannot compute a Pc, so the Pc gate SCRUM-389 built never runs and the
+    # Mahalanobis screen decides every event. The field was optional on the
+    # contract and no producer filled it.
+    #
+    # Sign convention: secondary minus primary, matching r_rel above and
+    # matching compute_pc_from_geometry, which builds the secondary as
+    # v2 = v1 + v_rel. CCSDS defines RELATIVE_VELOCITY as object 2 relative to
+    # object 1, the same sense. A sign error here would rotate the encounter
+    # plane by 180 degrees and be invisible for a symmetric covariance, which is
+    # why the tests assert the sense rather than trusting this paragraph.
+    rel_v = cdm.get("RELATIVE_VELOCITY_R")
+    if rel_v is not None:
+        # CDM relative velocity is RTN, metres per second.
+        dv_rtn_m_s = np.array(
+            [
+                cdm["RELATIVE_VELOCITY_R"],
+                cdm["RELATIVE_VELOCITY_T"],
+                cdm["RELATIVE_VELOCITY_N"],
+            ],
+            dtype=np.float64,
+        )
+        v_rel_km_s = (rot @ dv_rtn_m_s) / 1000.0  # m/s → km/s
+        v_rel_source = "relative_velocity_rtn"
+    elif "OBJECT2_X_DOT" in cdm:
+        v2 = np.array(
+            [cdm["OBJECT2_X_DOT"], cdm["OBJECT2_Y_DOT"], cdm["OBJECT2_Z_DOT"]],
+            dtype=np.float64,
+        )
+        v_rel_km_s = v2 - v1  # already km/s, already ECI
+        v_rel_source = "state_vector_difference"
+    else:
+        # A CDM carrying neither is malformed against CCSDS 508.0-B-1, but the
+        # planner treats a missing relative velocity as "no Pc" rather than as
+        # zero, so passing None through is safe and honest.
+        v_rel_km_s = None
+        v_rel_source = "unavailable"
+
     # ── Covariance ────────────────────────────────────────────────
     # Step A: per-object 3×3 RTN covariance (m²)
     p1 = _build_rtn_covariance(cdm, "OBJECT1")
@@ -131,6 +178,8 @@ def cdm_to_conjunction_state(cdm: dict[str, Any]) -> dict[str, Any]:
         "obj_id": obj_id,
         "t_ca_utc": t_ca_utc,
         "r_rel_km": r_rel_km.tolist(),
+        "v_rel_km_s": v_rel_km_s.tolist() if v_rel_km_s is not None else None,
+        "v_rel_source": v_rel_source,
         "p_rel_km2": p_rel_km2,
         "pc_precomputed": pc_precomputed,
     }
