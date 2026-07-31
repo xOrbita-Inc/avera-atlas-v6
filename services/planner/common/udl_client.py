@@ -56,6 +56,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+
+from aps_math import frames
 import requests
 
 log = logging.getLogger("planner")
@@ -106,15 +108,14 @@ def _auth_header() -> Dict[str, str]:
 def _rtn_to_eci_rotation(r_km: np.ndarray, v_km_s: np.ndarray) -> np.ndarray:
     """Build the 3x3 RTN->ECI rotation matrix from an ECI state vector.
 
-    R = r_hat  (radial)
-    N = (r x v) / |r x v|  (cross-track / normal)
-    T = N x R  (along-track / tangential)
+    SCRUM-397: delegates to aps_math.frames. This was one of three copies of
+    the same function in the repo, and the one place that needed it most called
+    none of them. Kept as a name so this module's callers do not change.
+
+    Behaviour change: the shared version returns the identity for a degenerate
+    state vector rather than dividing by zero. That is strictly safer here.
     """
-    r_hat = r_km / np.linalg.norm(r_km)
-    h = np.cross(r_km, v_km_s)
-    n_hat = h / np.linalg.norm(h)
-    t_hat = np.cross(n_hat, r_hat)
-    return np.column_stack([r_hat, t_hat, n_hat])
+    return frames.rtn_to_eci_rotation(r_km, v_km_s)
 
 
 def _expand_cov_upper_triangle(cov6: List[float]) -> np.ndarray:

@@ -33,6 +33,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from aps_math import frames
+
 MU_EARTH = 398600.4418  # km^3/s^2
 
 
@@ -239,25 +241,37 @@ def compute_q_exec_km2(
     used elsewhere in this module to convert a commanded delta-v into a
     post-maneuver position change (Cov(A x) = A Cov(x) A^T).
 
-    Frame note (matches existing convention, does not fix it)
-    -----------------------------------------------------------
-    phi_rv is a Clohessy-Wiltshire state-transition block defined in
-    true RTN (radial/transverse/normal) components. The caller (see
-    maneuver_scorer.py) already applies phi_rv directly to an ECI-frame
-    delta-v vector, which is only exact when the satellite's local
-    R/T/N axes happen to align with the ECI axes -- a pre-existing
-    simplification in this codebase, not something introduced here.
-    This function deliberately mirrors that same convention (building
-    the error covariance in the direction_hat frame exactly as the
-    caller builds dv_vec_km_s, and applying phi_rv the same way) so
-    Q_exec composes consistently with the existing, already-reviewed
-    r_post_km calculation. It does not independently "correct" the
-    RTN/ECI handling -- doing so here while delta_r_km uses the old
-    convention would make the position estimate and its uncertainty
-    internally inconsistent, which is worse than the existing
-    approximation alone. Fully resolving the RTN/ECI handling is a
-    separate, out-of-scope correction (flag for a future ticket if the
-    team wants it fixed for both quantities together).
+    Frame contract (SCRUM-397)
+    --------------------------
+    direction_hat and phi_rv must be in the SAME frame. This function does
+    not rotate anything. It builds the velocity covariance in whatever
+    frame direction_hat is given in and propagates it through whatever map
+    phi_rv is, so the caller owns the frame and gets what it asks for.
+
+    Both callers pass an ECI direction and an ECI-expressed map, built by
+    conjugating cw_phi_rv's RTN block through aps_math.frames.rotate_cw_block.
+    That is correct because M_eci Q_eci M_eci^T expands to
+    rot (M_rtn Q_rtn M_rtn^T) rot^T, which is the RTN answer rotated into ECI.
+
+    What was here before, and why it is worth reading
+    ------------------------------------------------
+    This docstring used to carry a note saying phi_rv is RTN-ordered, that the
+    caller applies it directly to an ECI delta-v, that this is "only exact when
+    the satellite's local R/T/N axes happen to align with the ECI axes", and
+    that fully resolving it was out of scope, to be flagged "for a future ticket
+    if the team wants it fixed".
+
+    The defect was correctly identified and the ticket was never raised. It sat
+    for a sprint, and it is not a small approximation: on a 53 degree inclined
+    orbit the post-burn displacement was wrong by 54 km for a prograde burn and
+    by a factor of 543 for a cross-track one. The reasoning for deferring was
+    sound in itself, that fixing the covariance while leaving the position wrong
+    would be worse than leaving both wrong, and SCRUM-397 fixes both together as
+    that note asked.
+
+    The lesson worth keeping is about where a finding lives. A defect recorded
+    only in a docstring is a defect nobody is accountable for. If you find one
+    while doing something else, raise it.
 
     Parameters
     ----------
@@ -531,7 +545,15 @@ def evaluate_conjunction(req: Dict[str, Any]) -> Dict[str, Any]:
     directions = _candidate_directions(r_sat_km, v_sat_km_s, attitude_restricted)
 
     # CW mapping
-    phi_rv = cw_phi_rv(policy.a_ref_km, dt_to_ca_s)
+    #
+    # SCRUM-397. Same defect and same fix as maneuver_scorer.py. cw_phi_rv is
+    # RTN-ordered, the candidate directions and r_rel_km are ECI, and nothing
+    # rotated between them. Conjugating the block by the RTN-to-ECI rotation
+    # gives a map that takes ECI in and returns ECI out.
+    rtn_to_eci = frames.rtn_to_eci_rotation(r_sat_km, v_sat_km_s)
+    phi_rv = frames.rotate_cw_block(
+        cw_phi_rv(policy.a_ref_km, dt_to_ca_s), rtn_to_eci
+    )
 
     # Mahalanobis baseline
     m2_pre = mahalanobis_sq(r_rel_km, P_rel)

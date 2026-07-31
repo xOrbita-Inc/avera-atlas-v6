@@ -90,7 +90,7 @@ import numpy as np
 # SCRUM-389: the planner computes its own Pc. compute_pc and the shared
 # conventions both live in libs/aps_math, reachable since SCRUM-388.
 from aps_math.pc_utils import compute_pc
-from aps_math import conventions
+from aps_math import conventions, frames
 
 # ---------------------------------------------------------------------------
 # Imports from locked modules (do not modify those files)
@@ -952,7 +952,30 @@ def score_maneuver_candidates(
     max_recovery_s = cap.slot.max_recovery_time_s
 
     # --- CW state transition matrix ---
-    phi_rv = cw_phi_rv(cap.a_ref_km, dt_to_ca_s)
+    #
+    # SCRUM-397. cw_phi_rv returns an RTN-ORDERED block. The candidate burn
+    # directions and r_rel_km are ECI. Multiplying the two directly, which is
+    # what this code did, feeds each ECI component into whichever CW block sits
+    # at that index. On a 53 degree inclined orbit that reported 57 km of
+    # separation change from a cross-track burn that produces 105 m, because the
+    # ECI cross-track unit vector has components on all three ECI axes and picks
+    # up the along-track block, whose entry grows as -3nt.
+    #
+    # The clearest symptom: the correct displacement for a given burn is the
+    # same on every circular orbit, because a prograde burn does the same thing
+    # wherever you are. The unrotated one varied with inertial position.
+    #
+    # Conjugating the block by the rotation once here gives a map that takes ECI
+    # in and returns ECI out, so every use below is frame-correct without
+    # rotating in and out at each one. Half-applied rotations are the failure
+    # mode this is guarding against, so there is one place to get it right.
+    #
+    # For an axis-aligned geometry, r along +x and v along +y, the rotation is
+    # exactly the identity and phi_rv_eci equals the raw block. Every scoring
+    # test used such a geometry, which is why this was green.
+    rtn_to_eci = frames.rtn_to_eci_rotation(r_sat_km, v_sat_km_s)
+    phi_rv_rtn = cw_phi_rv(cap.a_ref_km, dt_to_ca_s)
+    phi_rv = frames.rotate_cw_block(phi_rv_rtn, rtn_to_eci)
 
     # --- Scoring weights ---
     weights = policy.scoring_weights
@@ -985,6 +1008,12 @@ def score_maneuver_candidates(
         # SCRUM-365: execution-error covariance (thrust misalignment +
         # magnitude uncertainty). Zero matrix (no change) when the
         # profile does not carry these parameters -- AC1.
+        #
+        # SCRUM-397: d_hat is ECI and phi_rv is now the ECI-expressed map, so
+        # the velocity covariance and the map it is propagated through are in
+        # the same frame. Passing the raw RTN block here, as this did, made
+        # Q_exec wrong in the same way and for the same reason delta_r was.
+        # compute_q_exec_km2's own docstring flagged that and deferred it.
         q_exec_km2 = compute_q_exec_km2(
             direction_hat=d_hat,
             dv_mag_km_s=dv_mag_m_s / 1000.0,

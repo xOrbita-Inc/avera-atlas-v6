@@ -33,6 +33,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+
+from aps_math import frames
 import requests as http_requests
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -85,35 +87,31 @@ def _ingest_url() -> str:
 def _rtn_to_eci_rotation(r_km: np.ndarray, v_km_s: np.ndarray) -> np.ndarray:
     """Build the 3x3 RTN->ECI rotation matrix from an ECI state vector.
 
-    Identical math to cdm_to_conjunction._rtn_to_eci_rotation in the ingest
-    service. Duplicated here because the planner cannot import from ingest.
-
     SCRUM-369 follow-up: guards against a zero or degenerate state vector
     (e.g. the [0,0,0] fallback used when satellite data is missing in the
     outermost exception handler), which would otherwise divide by zero.
     Falls back to the identity matrix (no rotation -- the surrogate ellipse
     stays aligned with ECI axes rather than correctly oriented to the real
     orbit) and logs a warning, rather than crashing the request.
+
+    SCRUM-397: the rotation itself now comes from aps_math.frames, which is the
+    one definition. This wrapper survives because the logging is a service
+    concern rather than a library one. A library that decides how a service logs
+    is a library nobody wants to share.
+
+    ingest/cdm_to_conjunction.py still carries its own copy. The ingest image
+    builds with context ./services/ingest, so it cannot COPY libs/aps_math
+    without a build-context change, and dragging a third service's image build
+    into a frame-correctness fix is the wrong trade. A test asserts the two
+    agree to machine precision across a range of geometries, which catches
+    divergence more reliably than an import would.
     """
-    r_norm = np.linalg.norm(r_km)
-    if r_norm < 1e-9:
+    if frames.is_degenerate_state(r_km, v_km_s):
         log.warning(
-            "degenerate satellite state vector (zero position), using identity rotation",
-            extra={"event": "rtn_rotation_degenerate", "reason": "zero_r_km"},
+            "degenerate satellite state vector, using identity rotation",
+            extra={"event": "rtn_rotation_degenerate"},
         )
-        return np.eye(3)
-    r_hat = r_km / r_norm
-    h = np.cross(r_km, v_km_s)
-    h_norm = np.linalg.norm(h)
-    if h_norm < 1e-9:
-        log.warning(
-            "degenerate satellite state vector (r and v parallel or v zero), using identity rotation",
-            extra={"event": "rtn_rotation_degenerate", "reason": "zero_angular_momentum"},
-        )
-        return np.eye(3)
-    n_hat = h / h_norm
-    t_hat = np.cross(n_hat, r_hat)
-    return np.column_stack([r_hat, t_hat, n_hat])
+    return frames.rtn_to_eci_rotation(r_km, v_km_s)
 
 
 def _surrogate_covariance(
