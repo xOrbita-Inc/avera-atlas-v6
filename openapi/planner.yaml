@@ -531,6 +531,29 @@ components:
             post-maneuver risk is the pre-maneuver Pc. Equal by
             construction rather than by defect.
           example: pc_post
+        utility_basis:
+          type: string
+          enum: [pc_traded, delta_c_legacy, ""]
+          description: |
+            SCRUM-387. Which quantity the risk term of the utility was
+            computed from.
+
+            pc_traded: the utility bought down a real collision
+            probability. The benefit is the fraction of risk the burn
+            removes, applied to the authoritative pre-maneuver level, so
+            an externally supplied Pc sets the level while the ratio
+            comes from our geometry.
+
+            delta_c_legacy: no Pc could be established, so the utility
+            fell back to the Mahalanobis gain. That term is unbounded
+            and grows quadratically in delta-v against a linear cost, so
+            the recommendation tends to the delta-v ceiling and the
+            magnitude should not be read as an optimum.
+
+            Empty on a no-go, where no candidate was scored.
+
+            The two bases are on entirely different scales. Never
+            compare or rank utilities across them.
         pc_post:
           type: number
           nullable: true

@@ -33,7 +33,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from aps_math import frames
+from aps_math import conventions, frames
+from aps_math.pc_utils import compute_pc
 
 MU_EARTH = 398600.4418  # km^3/s^2
 
@@ -207,6 +208,59 @@ def mahalanobis_sq(r_km: np.ndarray, cov_km2: np.ndarray) -> float:
     return float(r_km.T @ inv_cov @ r_km)
 
 
+def pc_from_geometry(
+    r_sat_km: np.ndarray,
+    v_sat_km_s: np.ndarray,
+    r_rel_km: np.ndarray,
+    v_rel_km_s: Optional[np.ndarray],
+    p_rel_km2: np.ndarray,
+    hbr_m: float,
+) -> Optional[float]:
+    """Probability of collision from conjunction geometry, or None.
+
+    SCRUM-387. The same computation maneuver_scorer performs, written here
+    because maneuver_scorer imports from this module and the reverse would be a
+    cycle. Both call the same compute_pc in aps_math, so the two paths cannot
+    disagree about the physics, only about which of them is asked.
+
+    The covariance is SPLIT in half between the two objects rather than put
+    entirely on the primary. compute_pc routes to frisbee_max_pc, an upper
+    bound, whenever either covariance is all-zero, and the bound falls off as
+    1/k rather than exp(-k^2/2). Halves sum to the same combined matrix and take
+    the ordinary path. Same trap SCRUM-389 documented, same fix.
+    """
+    if v_rel_km_s is None:
+        return None
+    try:
+        r1 = np.asarray(r_sat_km, dtype=float) * 1000.0
+        v1 = np.asarray(v_sat_km_s, dtype=float) * 1000.0
+        r2 = r1 + np.asarray(r_rel_km, dtype=float) * 1000.0
+        v2 = v1 + np.asarray(v_rel_km_s, dtype=float) * 1000.0
+        half_m2 = np.asarray(p_rel_km2, dtype=float) * 1.0e6 * 0.5
+        pc = float(compute_pc(r1, v1, half_m2, r2, v2, half_m2, hbr_m).Pc)
+    except Exception:
+        return None
+    return pc if math.isfinite(pc) else None
+
+
+def risk_exchange_rate(
+    lambda_dv: float, max_dv_m_s: float, pc_maneuver_threshold: float
+) -> float:
+    """Value of one unit of collision probability, in the cost terms' units.
+
+    SCRUM-387. Lives here rather than in maneuver_scorer because both scoring
+    paths need it and maneuver_scorer already imports from this module, so this
+    is the direction that does not create a cycle. The v2.5 wrapper reads the
+    three numbers off an OperatorPolicy and calls this.
+
+    At exactly the maneuver threshold, spending the whole per-event delta-v
+    budget to eliminate the risk breaks even. Every input is a number the
+    operator already set for another reason, so nothing here is fitted to the
+    demo fixtures, which is what AC3 requires.
+    """
+    return lambda_dv * max_dv_m_s / pc_maneuver_threshold
+
+
 def compute_q_exec_km2(
     direction_hat: np.ndarray,
     dv_mag_km_s: float,
@@ -336,6 +390,12 @@ class OperatorPolicy:
     dv_mag_limit_m_s: float
     a_ref_km: float = 7000.0  # optional override (not required by spec)
 
+    # SCRUM-387. Needed to derive the risk exchange rate on this path the same
+    # way the v2.5 path derives it. Defaults to the same 1e-4 the v2.5 operator
+    # policy defaults to, so a v2.4 caller that says nothing gets the same trade
+    # a v2.5 caller would.
+    pc_maneuver_threshold: float = 1.0e-4
+
 
 def _candidate_directions(
     r_sat_km: np.ndarray,
@@ -435,6 +495,10 @@ def _validate_request(req: Dict[str, Any]) -> Tuple[str, Dict[str, Any], Dict[st
         lambda_L=lambda_L_f,
         dv_mag_limit_m_s=dv_mag_limit_f,
         a_ref_km=a_ref_km,
+        # SCRUM-387
+        pc_maneuver_threshold=float(
+            policy_raw.get("pc_maneuver_threshold", 1.0e-4)
+        ),
     )
 
     # Enforce constraint checks on t_burn_utc if present
@@ -517,6 +581,17 @@ def evaluate_conjunction(req: Dict[str, Any]) -> Dict[str, Any]:
     r_rel_km = _as_vec3(conj["r_rel_km"], "conjunction.r_rel_km")
     P_rel = _as_cov9(conj["p_rel_km2"], "conjunction.p_rel_km2")
 
+    # SCRUM-387 / SCRUM-398: optional relative velocity, same field and same
+    # meaning as on the v2.5 path. Present means a Pc can be computed and the
+    # utility can trade in probability. Absent means it cannot, and this path
+    # falls back to the Mahalanobis gain exactly as it always did.
+    _v_rel_raw = conj.get("v_rel_km_s")
+    v_rel_km_s = (
+        _as_vec3(_v_rel_raw, "conjunction.v_rel_km_s")
+        if _v_rel_raw is not None
+        else None
+    )
+
     t_burn_utc = sat["t_burn_utc"]
     t_ca_utc = conj["t_ca_utc"]
     dt_to_ca_s = _dt_seconds(t_burn_utc, t_ca_utc)
@@ -584,12 +659,43 @@ def evaluate_conjunction(req: Dict[str, Any]) -> Dict[str, Any]:
         "_delta_C": 0.0,
     }
 
+    # SCRUM-387: this path's own Pc, so the utility can trade in probability
+    # rather than in log-risk. AC8 asks for the two scoring paths to be
+    # consistent or for the difference to be recorded; this is the consistent
+    # option. Same aps_math.compute_pc, same hard-body radius convention, same
+    # exchange rate formula, same fallback when no relative velocity is supplied.
+    #
+    # This path still applies no risk screen of its own. That difference is
+    # deliberate and predates this ticket: /v1/evaluate/batch is a backward
+    # compatibility contract with its own callers, and SCRUM-389 AC5 recorded
+    # the decision not to add one. Scoring consistently and screening
+    # differently is the intended state, not an oversight.
+    hbr_m, _hbr_source = conventions.combined_hbr_m(
+        conventions.DEFAULT_PRIMARY_RADIUS_M
+    )
+    pc_pre_geometric = pc_from_geometry(
+        r_sat_km, v_sat_km_s, r_rel_km, v_rel_km_s, P_rel, hbr_m
+    )
+    # pc_precomputed is read again further down for the response; read it here
+    # too rather than moving that line, so the response assembly is untouched.
+    _pc_supplied = conj.get("pc_precomputed", None)
+    pc_pre_level = (
+        float(_pc_supplied) if _pc_supplied is not None else pc_pre_geometric
+    )
+    lambda_risk = risk_exchange_rate(
+        policy.lambda_v, policy.dv_mag_limit_m_s, policy.pc_maneuver_threshold
+    )
+
     for name, d_hat in directions:
         dv_vec_km_s = d_hat * dv_mag_km_s
         delta_r_km = phi_rv @ dv_vec_km_s
         r_post_km = r_rel_km - delta_r_km
 
         m2_post = mahalanobis_sq(r_post_km, P_rel)
+
+        pc_post = pc_from_geometry(
+            r_sat_km, v_sat_km_s, r_post_km, v_rel_km_s, P_rel, hbr_m
+        )
 
         # SCRUM-386. Two quantities, deliberately kept apart.
         #
@@ -616,7 +722,24 @@ def evaluate_conjunction(req: Dict[str, Any]) -> Dict[str, Any]:
         delta_C_v24 = m2_pre - m2_post          # reported (unchanged)
         confidence_gain = m2_post - m2_pre      # scored (section 5.4)
 
-        U = confidence_gain - policy.lambda_v * dv_mag_m_s - policy.lambda_L * lifetime_penalty
+        # SCRUM-387. Trade in Pc when one exists, fall back to the Mahalanobis
+        # gain when it does not. The benefit is the FRACTION of risk the burn
+        # removes in our model applied to the authoritative level, so a supplied
+        # Pc that disagrees with our geometry does not get subtracted from a
+        # number computed on ours. When the Pc was computed rather than supplied
+        # the two are the same and this collapses to the difference.
+        if (
+            pc_pre_level is not None
+            and pc_post is not None
+            and pc_pre_geometric is not None
+            and pc_pre_geometric > 0.0
+        ):
+            reduction_fraction = max(0.0, 1.0 - pc_post / pc_pre_geometric)
+            risk_benefit = lambda_risk * pc_pre_level * reduction_fraction
+        else:
+            risk_benefit = confidence_gain
+
+        U = risk_benefit - policy.lambda_v * dv_mag_m_s - policy.lambda_L * lifetime_penalty
 
         all_candidates.append(
             {
