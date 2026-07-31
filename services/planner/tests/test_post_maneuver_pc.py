@@ -72,13 +72,20 @@ P_SURROGATE = np.diag([0.3 ** 2, 2.5 ** 2, 0.5 ** 2])
 
 T_CA = "2026-03-02T15:30:00Z"
 
-# A ten-minute lead with a small delta-v ceiling. Chosen so the burn moves the
+# A one-hour lead with a small delta-v ceiling. Chosen so the burn moves the
 # object enough to change Pc measurably but not enough to drive it to underflow.
-# At the four-hour lead used elsewhere the recommended burn takes Pc to exactly
-# 0.0 in double precision, which is a true answer but a useless test: it passes
-# against any implementation that returns something small.
-T_BURN_SHORT = "2026-03-02T15:20:00Z"
-DV_CEILING_SMALL = 0.02
+# At the four-hour lead used elsewhere the recommended burn takes Pc to nearly
+# 0.0, which is a true answer but a weak test: it passes against any
+# implementation that returns something small.
+#
+# SCRUM-387 moved this. The original was a ten-minute lead with a 0.02 m/s
+# ceiling, where the whole delta-v budget bought a 1.4 percent reduction in Pc.
+# Under the Pc-traded utility that is correctly scored as not worth flying, so
+# the fixture stopped producing a burn. The geometry moved rather than the
+# assertions, which are still about what risk_surrogate_post carries.
+T_BURN_SHORT = "2026-03-02T14:30:00Z"
+DT_SHORT_S = 3600.0
+DV_CEILING_SMALL = 0.05
 
 T_BURN_LONG = "2026-03-02T11:30:00Z"
 
@@ -183,7 +190,7 @@ class TestPcPostIsAnchored:
             c for c in result.candidates_v25 if c.direction == result.direction
         )
 
-        dt_s = 600.0  # T_BURN_SHORT to T_CA
+        dt_s = DT_SHORT_S
         phi_rv = cw_phi_rv(_A_KM, dt_s)
         r_post = R_REL - phi_rv @ np.asarray(winner.dv_eci_km_s, dtype=float)
 
@@ -209,9 +216,40 @@ class TestPcPostIsAnchored:
         )
 
     def test_a_bigger_burn_gives_a_smaller_pc(self):
-        small = _score(dv_ceiling=0.005)
-        large = _score(dv_ceiling=0.02)
-        assert large.pc_post < small.pc_post
+        """Rewritten by SCRUM-387.
+
+        This used to raise the policy delta-v ceiling and assert the resulting
+        Pc fell, which worked only because the recommended burn WAS the ceiling.
+        387 added a magnitude search, so raising the ceiling no longer raises
+        the burn once the ceiling exceeds what the geometry needs, and that is
+        the entire point of the ticket rather than a regression.
+
+        The property the old test was reaching for still holds and is asserted
+        directly: at a fixed geometry, moving further reduces Pc.
+        """
+        hbr_m, _ = resolve_hard_body_radius(_cap())
+        phi_rv = cw_phi_rv(_A_KM, DT_SHORT_S)
+        d_hat = V_SAT / np.linalg.norm(V_SAT)
+
+        previous = None
+        for dv_m_s in (0.005, 0.02, 0.05, 0.2):
+            r_post = R_REL - phi_rv @ (d_hat * dv_m_s / 1000.0)
+            pc = compute_pc_post(
+                R_SAT, V_SAT, r_post, V_REL_HEAD_ON, P_SURROGATE, hbr_m
+            )
+            if previous is not None:
+                assert pc < previous, f"Pc did not fall at dv {dv_m_s} m/s"
+            previous = pc
+
+    def test_the_recommended_burn_is_no_longer_the_ceiling(self):
+        """SCRUM-387 AC5, from the other side. Raising the ceiling well past
+        what the geometry needs must stop changing the recommendation, which is
+        what an interior optimum means and what the old form could never do."""
+        modest = _score(dv_ceiling=0.5)
+        generous = _score(dv_ceiling=2.0)
+
+        assert modest.dv_magnitude_m_s < 0.5 * 0.5
+        assert generous.dv_magnitude_m_s < 0.1 * 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -237,10 +275,19 @@ class TestEveryCandidateCarriesItsOwnPc:
         assert by_pc == by_m2
 
     def test_the_recommended_candidate_is_the_lowest_pc_one(self):
-        """True today because the utility maximises the Mahalanobis gain and the
-        two orderings agree. SCRUM-387 changes the utility to trade in Pc, so if
-        this ever stops holding it is a deliberate decision that ticket has to
-        record rather than a silent drift."""
+        """Still true after SCRUM-387, and worth saying why since it asked to be
+        told rather than left to drift.
+
+        The utility now trades Pc against delta-v, so in principle the winner is
+        the best BARGAIN rather than the safest option, and the two can differ.
+        They do not here because candidates_v25 reports one entry per direction,
+        each already at its own best magnitude, so the comparison across
+        directions is between equally optimised burns and the safest direction
+        is also the most efficient one at this geometry.
+
+        Where they would diverge is a geometry in which a much larger burn buys
+        a slightly lower Pc. If this ever fails, that is what happened, and it
+        is a fact about the geometry rather than a defect."""
         result = _score()
         best_by_pc = min(result.candidates_v25, key=lambda c: c.pc_post)
         assert result.direction == best_by_pc.direction
@@ -360,7 +407,7 @@ class TestHoldingRelativeVelocityFixed:
             c for c in result.candidates_v25 if c.direction == result.direction
         )
         dv = np.asarray(winner.dv_eci_km_s, dtype=float)
-        dt_s = 600.0
+        dt_s = DT_SHORT_S
 
         r_post = R_REL - cw_phi_rv(_A_KM, dt_s) @ dv
         v_rel_post = V_REL_HEAD_ON - _cw_phi_vv(_A_KM, dt_s) @ dv
@@ -374,10 +421,20 @@ class TestHoldingRelativeVelocityFixed:
         )
 
         assert held_fixed == pytest.approx(result.pc_post, rel=1e-12)
-        assert held_fixed == pytest.approx(propagated, rel=1.0e-6), (
+
+        # Tolerance argued rather than fitted. SCRUM-387 raised the recommended
+        # burn on this fixture and the neglected term grows with delta-v, so the
+        # original 1e-6 was a property of the old geometry rather than of the
+        # approximation. The question a tolerance here has to answer is whether
+        # the error could move a decision. Pc thresholds sit at 1e-4 and 1e-5,
+        # an order of magnitude apart, and every Pc in this system spans decades.
+        # A relative error of 0.1 percent cannot carry an event across either
+        # threshold from any starting point. Measured here it is about 1.4e-05,
+        # so there are two orders of margin against the bound being asserted.
+        assert held_fixed == pytest.approx(propagated, rel=1.0e-3), (
             "the encounter-plane rotation neglected by compute_pc_post has "
-            "grown large enough to matter; if the delta-v ceiling has risen, "
-            "Phi_vv belongs in the production path"
+            "grown large enough to move a threshold decision; if the delta-v "
+            "ceiling has risen, Phi_vv belongs in the production path"
         )
 
 

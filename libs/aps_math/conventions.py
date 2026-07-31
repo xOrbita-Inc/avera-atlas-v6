@@ -145,6 +145,33 @@ DEFAULT_ASSET_UNCERTAINTY_M: float = 1000.0
 
 
 # ---------------------------------------------------------------------------
+# Maneuver magnitude search
+# ---------------------------------------------------------------------------
+
+# Number of delta-v magnitudes evaluated per candidate direction, SCRUM-387.
+#
+# Before 387 the planner evaluated exactly one magnitude, the effective delta-v
+# limit, so the recommended burn was the ceiling by construction and no interior
+# optimum could be found even once the utility admitted one.
+#
+# The grid is GEOMETRIC, not linear. Measured on the RED-001 geometry the
+# optimal burn runs from 0.007 m/s at a four-hour lead down to 0.0004 m/s at
+# seventy-two hours, against a policy ceiling of order 1 m/s. That is four
+# decades. A linear grid would put every sample in the top decade and resolve
+# nothing where the answer actually lives.
+#
+# 24 points across four decades is six per decade, or about one every 1.5x in
+# delta-v. Pc varies smoothly with delta-v, so the utility near its maximum is
+# flat and a coarser spacing costs little accuracy. Cost is linear in this
+# number, 6 directions times this many Pc evaluations per event.
+#
+# This is a numerical convention rather than an operator choice, per ADR-010.
+# An operator who wants to spend less fuel lowers max_dv_per_event_ms; they do
+# not tune the resolution of the search.
+DV_SEARCH_POINTS: int = 24
+
+
+# ---------------------------------------------------------------------------
 # Screening
 # ---------------------------------------------------------------------------
 
@@ -164,5 +191,6 @@ __all__ = [
     "DEFAULT_SECONDARY_CROSS_TRACK_FACTOR",
     "DEFAULT_PRIMARY_CROSS_TRACK_FACTOR",
     "DEFAULT_ASSET_UNCERTAINTY_M",
+    "DV_SEARCH_POINTS",
     "SCREENING_THRESHOLD_KM",
 ]

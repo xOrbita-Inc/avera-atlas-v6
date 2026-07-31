@@ -2,7 +2,7 @@
   {
     "conjunction_id": "RED-001",
     "risk_category": "RED",
-    "Pc": 0.00018,
+    "Pc": 0.0003001,
     "scenario": "High risk conjunction \u2014 planner should recommend a strong maneuver",
     "satellite": {
       "sat_id": "SAT-001",
@@ -22,9 +22,9 @@
     "conjunction": {
       "obj_id": "OBJ-RED-001",
       "r_rel_km": [
-        0.12,
-        -0.08,
-        0.03
+        0.118032,
+        -0.078688,
+        0.029508
       ],
       "p_rel_km2": [
         0.002,
@@ -38,19 +38,25 @@
         0.003
       ],
       "t_ca_utc": "2026-03-02T15:30:00Z",
-      "pc_precomputed": 0.00018
+      "pc_precomputed": null,
+      "v_rel_km_s": [
+        -0.0,
+        -15.336,
+        -0.0
+      ]
     },
     "policy": {
       "lambda_v": 0.01,
       "lambda_L": 0.005,
       "dv_mag_limit_m_s": 1.0,
       "a_ref_km": 6878.0
-    }
+    },
+    "pc_basis": "computed from r_rel_km, v_rel_km_s and p_rel_km2 by aps_math.compute_pc at a 15 m combined hard-body radius (SCRUM-387 AC2)"
   },
   {
     "conjunction_id": "AMBER-001",
     "risk_category": "AMBER",
-    "Pc": 3e-05,
+    "Pc": 3.001e-05,
     "scenario": "Moderate risk \u2014 planner balances fuel cost vs risk reduction",
     "satellite": {
       "sat_id": "SAT-001",
@@ -70,9 +76,9 @@
     "conjunction": {
       "obj_id": "OBJ-AMBER-001",
       "r_rel_km": [
-        0.35,
-        -0.2,
-        0.15
+        0.211645,
+        -0.12094,
+        0.090705
       ],
       "p_rel_km2": [
         0.005,
@@ -86,19 +92,25 @@
         0.006
       ],
       "t_ca_utc": "2026-03-02T15:20:00Z",
-      "pc_precomputed": 3e-05
+      "pc_precomputed": null,
+      "v_rel_km_s": [
+        -0.0,
+        -15.336,
+        -0.0
+      ]
     },
     "policy": {
       "lambda_v": 0.02,
       "lambda_L": 0.01,
       "dv_mag_limit_m_s": 1.0,
       "a_ref_km": 6878.0
-    }
+    },
+    "pc_basis": "computed from r_rel_km, v_rel_km_s and p_rel_km2 by aps_math.compute_pc at a 15 m combined hard-body radius (SCRUM-387 AC2)"
   },
   {
     "conjunction_id": "GREEN-001",
     "risk_category": "GREEN",
-    "Pc": 4e-06,
+    "Pc": 3.999e-06,
     "scenario": "Low risk \u2014 burn recommended but utility gain is marginal",
     "satellite": {
       "sat_id": "SAT-001",
@@ -118,9 +130,9 @@
     "conjunction": {
       "obj_id": "OBJ-GREEN-001",
       "r_rel_km": [
-        0.5,
-        1.2,
-        0.4
+        0.738,
+        1.7712,
+        0.5904
       ],
       "p_rel_km2": [
         0.5,
@@ -134,19 +146,25 @@
         0.5
       ],
       "t_ca_utc": "2026-03-02T15:10:00Z",
-      "pc_precomputed": 4e-06
+      "pc_precomputed": null,
+      "v_rel_km_s": [
+        -0.0,
+        -15.336,
+        -0.0
+      ]
     },
     "policy": {
       "lambda_v": 0.02,
       "lambda_L": 0.01,
       "dv_mag_limit_m_s": 1.0,
       "a_ref_km": 6878.0
-    }
+    },
+    "pc_basis": "computed from r_rel_km, v_rel_km_s and p_rel_km2 by aps_math.compute_pc at a 15 m combined hard-body radius (SCRUM-387 AC2)"
   },
   {
     "conjunction_id": "EFFICIENCY-001",
     "risk_category": "RED",
-    "Pc": 0.00012,
+    "Pc": 0.0001501,
     "scenario": "Favorable geometry \u2014 small burn produces large safety improvement",
     "satellite": {
       "sat_id": "SAT-001",
@@ -166,9 +184,9 @@
     "conjunction": {
       "obj_id": "OBJ-EFFICIENCY-001",
       "r_rel_km": [
-        0.22,
-        0.05,
-        0.02
+        0.176,
+        0.04,
+        0.016
       ],
       "p_rel_km2": [
         0.003,
@@ -182,13 +200,19 @@
         0.004
       ],
       "t_ca_utc": "2026-03-02T15:30:00Z",
-      "pc_precomputed": 0.00012
+      "pc_precomputed": null,
+      "v_rel_km_s": [
+        -0.0,
+        -15.336,
+        -0.0
+      ]
     },
     "policy": {
       "lambda_v": 0.015,
       "lambda_L": 0.007,
       "dv_mag_limit_m_s": 0.6,
       "a_ref_km": 6878.0
-    }
+    },
+    "pc_basis": "computed from r_rel_km, v_rel_km_s and p_rel_km2 by aps_math.compute_pc at a 15 m combined hard-body radius (SCRUM-387 AC2)"
   }
 ]

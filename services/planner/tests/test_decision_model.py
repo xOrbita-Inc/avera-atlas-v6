@@ -70,18 +70,44 @@ class TestRed001:
 # ---------------------------------------------------------------------------
 
 class TestAmber001:
-    def test_direction(self, events):
-        """SCRUM-386: prograde, not radial. See TestRed001.test_direction."""
-        result = _eval(events, "AMBER-001")
-        assert result["recommendation"]["direction"] == "prograde"
+    """SCRUM-387 inverted these three.
 
-    def test_dv_magnitude(self, events):
-        result = _eval(events, "AMBER-001")
-        assert abs(result["recommendation"]["dv_magnitude_m_s"] - 1.0) < 0.001
+    AMBER-001's scenario string has always said monitor, and its Pc of 3e-05
+    sits between pc_monitor_threshold and pc_maneuver_threshold, which is the
+    definition of watch-and-do-nothing. The tests asserted a full 1.0 m/s
+    prograde burn anyway.
 
-    def test_utility_positive(self, events):
+    That was not a mistake anyone made in isolation. Under the old utility every
+    event maneuvered to the delta-v ceiling regardless of risk, because the
+    benefit term grew quadratically in delta-v against a linear cost, so the
+    assertions were written to match what the code did. The ticket's own table
+    recorded the disagreement between the events' stated risk categories and the
+    Pc policy before any of this was fixed.
+
+    Now that the utility trades in probability, an event below the maneuver
+    threshold cannot justify spending the budget, and AMBER-001 does what its
+    own scenario string says.
+    """
+
+    def test_no_burn_because_the_pc_is_below_the_maneuver_threshold(self, events):
         result = _eval(events, "AMBER-001")
-        assert result["recommendation"]["utility"] > 0
+        assert result["recommendation"]["direction"] == "no-burn"
+
+    def test_dv_magnitude_is_zero(self, events):
+        result = _eval(events, "AMBER-001")
+        assert result["recommendation"]["dv_magnitude_m_s"] == 0.0
+
+    def test_utility_is_zero(self, events):
+        """The no-burn baseline. A positive utility here would mean some burn
+        was worth flying for an event the policy says only needs watching."""
+        result = _eval(events, "AMBER-001")
+        assert result["recommendation"]["utility"] == 0.0
+
+    def test_the_pc_sits_between_the_two_thresholds(self, events):
+        """Guards the premise. If the regenerated geometry ever drifts out of
+        the monitor band, the three assertions above stop describing AMBER and
+        start describing whatever it became."""
+        assert 1.0e-5 <= events["AMBER-001"]["Pc"] < 1.0e-4
 
     def test_response_structure(self, events):
         result = _eval(events, "AMBER-001")
@@ -93,33 +119,26 @@ class TestAmber001:
 # GREEN-001: low risk, no-burn wins
 # ---------------------------------------------------------------------------
 
-_GREEN_XFAIL = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "SCRUM-386 exposed that the scoring weights were calibrated against a "
-        "broken delta_r scale. With cw_phi_rv returning Phi_rr, confidence gain "
-        "for these events was around 0.001 to 0.03, comparable to "
-        "lambda_v * dv. Corrected, the same events produce gains in the "
-        "hundreds, so the cost terms no longer bite and no-burn never wins. "
-        "GREEN-001 is the designed no-burn case, so it is the natural "
-        "acceptance test for the weight recalibration story. Left xfail "
-        "deliberately rather than deleted, so the gap is visible on every run."
-    ),
-)
-
-
-class TestGreen001:
-    @_GREEN_XFAIL
-    def test_direction(self, events):
-        result = _eval(events, "GREEN-001")
+# SCRUM-387 removed the GREEN-001 xfail marks.
+#
+# They were added by SCRUM-386, which corrected cw_phi_rv and in doing so
+# revealed that the scoring weights had been calibrated against a delta_r scale
+# that was wrong by orders of magnitude. With the correct scale the confidence
+# gain ran into the hundreds, the cost terms stopped biting, and no-burn never
+# won for any event. GREEN-001 is the designed no-burn case, so it was the
+# natural acceptance test for the recalibration, and the marks were left in
+# place deliberately so the gap showed on every run rather than disappearing.
+#
+# The recalibration turned out not to be a recalibration. No weights could fix
+# a benefit term that was unbounded and quadratic in delta-v against a linear
+# cost. SCRUM-387 replaced the functional form instead, and GREEN-001 now
+# recommends no-burn because a Pc of 4e-06 cannot justify spending fuel.
         assert result["recommendation"]["direction"] == "no-burn"
 
-    @_GREEN_XFAIL
     def test_dv_magnitude(self, events):
         result = _eval(events, "GREEN-001")
         assert result["recommendation"]["dv_magnitude_m_s"] == 0.0
 
-    @_GREEN_XFAIL
     def test_utility_zero(self, events):
         result = _eval(events, "GREEN-001")
         assert result["recommendation"]["utility"] == 0.0

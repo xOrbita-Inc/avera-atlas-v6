@@ -543,6 +543,48 @@ RISK_SURROGATE_INVERSE_M2 = "inverse_m2_post"
 RISK_SURROGATE_PC_PRE_NO_BURN = "pc_pre_no_burn"
 
 
+# ---------------------------------------------------------------------------
+# SCRUM-387: what a unit of collision probability is worth in delta-v
+# ---------------------------------------------------------------------------
+
+# Which quantity the risk term of the utility was computed from.
+UTILITY_BASIS_PC = "pc_traded"
+UTILITY_BASIS_DELTA_C = "delta_c_legacy"
+
+
+def risk_exchange_rate(policy: OperatorPolicy) -> float:
+    """Value of one unit of collision probability, in the same units as the cost
+    terms. SCRUM-387.
+
+        lambda_risk = lambda_dv * max_dv_per_event_ms / pc_maneuver_threshold
+
+    Read it as a statement the operator has already made. At exactly the
+    maneuver threshold, spending the entire per-event delta-v budget to
+    eliminate the risk breaks even. Above the threshold a maneuver is worth
+    paying for, and below it the Pc gate has already rejected the event, so the
+    utility never sees it.
+
+    Why derived rather than fitted
+    ------------------------------
+    Every number here is one the operator already set for another reason.
+    Nothing is tuned against the four synthetic demo events, which is what
+    SCRUM-387 AC3 requires and what the old weights could not claim: those were
+    fitted to fixtures that were themselves built against physics corrected
+    twice since.
+
+    It also means the utility and the maneuver gate cannot drift apart. Raise
+    pc_maneuver_threshold and the exchange rate falls in step, so the events the
+    gate now lets through are still the ones the utility thinks are worth acting
+    on. Under a fitted constant those two would have to be kept in sync by hand,
+    and nothing would fail if they were not.
+    """
+    return (
+        policy.scoring_weights.lambda_dv
+        * policy.max_dv_per_event_ms
+        / policy.pc_maneuver_threshold
+    )
+
+
 def compute_pc_post(
     r_sat_km: np.ndarray,
     v_sat_km_s: np.ndarray,
@@ -707,6 +749,11 @@ class CandidateScore:
     # there.
     pc_post: Optional[float] = None
 
+    # SCRUM-387. Which quantity the risk term of this candidate's utility came
+    # from, pc_traded or delta_c_legacy. The two are not comparable, so a
+    # utility is only meaningful next to the basis that produced it.
+    utility_basis: str = ""
+
 
 @dataclass
 class ManeuverScoringResult:
@@ -771,6 +818,12 @@ class ManeuverScoringResult:
     # be established, and on a no-go, where there is no burn to compute one for.
     pc_post: Optional[float] = None
     risk_surrogate_source: str = ""
+
+    # SCRUM-387. pc_traded when the utility bought down a real probability,
+    # delta_c_legacy when it fell back to the Mahalanobis gain because no Pc
+    # could be established. Recorded rather than inferred, because the two
+    # utilities are on different scales and comparing them is meaningless.
+    utility_basis: str = ""
 
     def is_maneuver_recommended(self) -> bool:
         return self.direction != "no-burn"
@@ -920,6 +973,32 @@ def score_maneuver_candidates(
         cap, r_sat_km, v_sat_km_s, r_rel_km, v_rel_km_s, p_rel_km2, pc_precomputed
     )
 
+    # --- SCRUM-387: our own pre-maneuver Pc, needed even when one was supplied ---
+    #
+    # A maneuver's effect is a RATIO, not a subtraction.
+    #
+    # When an operator supplies a Pc it can disagree with our geometry by a
+    # large factor. Measured on the SCRUM-393 fixture, a supplied 2.5e-04
+    # against our own 6.26e-04. Subtracting a post-maneuver Pc computed on OUR
+    # geometry from THEIR pre-maneuver number compares two different scales, and
+    # the difference means nothing in either model. On that fixture it tipped
+    # the event to no-burn by a nine percent margin, which is well inside the
+    # disagreement between the two figures.
+    #
+    # So the burn's effect is taken as the fraction of risk it removes in our
+    # model, and the absolute level stays the authority's. That extends
+    # SCRUM-389 AC3 rather than contradicting it: an external Pc wins for the
+    # level, because whoever produced it has more information than we do, and
+    # our model can be wrong about the level while still being right that a
+    # given burn removes three quarters of it.
+    #
+    # When the Pc was computed rather than supplied this is exactly the same
+    # number as pc_pre, so the ratio form collapses to the difference form and
+    # there is no second code path to keep in step.
+    pc_pre_geometric = compute_pc_post(
+        r_sat_km, v_sat_km_s, r_rel_km, v_rel_km_s, p_rel_km2, hbr_m
+    )
+
     # --- Feasibility pre-screen ---
     passes, nogo_code, nogo_human, risk_gate = _passes_feasibility(
         cap, policy, dv_mag_m_s, pc_pre, pc_source, miss_distance_km,
@@ -998,138 +1077,223 @@ def score_maneuver_candidates(
 
     best_candidate: Optional[CandidateScore] = None
 
+    # SCRUM-387: search delta-v magnitude, not just direction.
+    #
+    # Candidates used to be generated at exactly one magnitude, the effective
+    # delta-v limit, so the recommendation was the ceiling by construction. The
+    # old utility hid that, because delta_C grows quadratically in delta-v
+    # against a linear cost so the maximum always sat at the limit anyway. With
+    # the Pc-traded utility the benefit saturates and an interior optimum
+    # exists, but only if something looks for it.
+    #
+    # Geometric spacing because the answer spans four decades. Measured on the
+    # RED-001 geometry the optimum runs from 0.007 m/s at a four-hour lead to
+    # 0.0004 m/s at seventy-two, against a ceiling of order 1 m/s.
+    dv_floor_m_s = max(cap.propulsion.min_dv_m_s, dv_mag_m_s * 1.0e-4)
+    if dv_mag_m_s > dv_floor_m_s:
+        dv_grid = np.geomspace(
+            dv_floor_m_s, dv_mag_m_s, conventions.DV_SEARCH_POINTS
+        )
+    else:
+        dv_grid = np.array([dv_mag_m_s])
+
     for name, d_hat in directions:
-        dv_vec_km_s = d_hat * (dv_mag_m_s / 1000.0)
+        best_for_direction: Optional[CandidateScore] = None
 
-        # Post-maneuver relative position via CW
-        delta_r_km = phi_rv @ dv_vec_km_s
-        r_post_km = r_rel_km - delta_r_km
+        for _dv_try in dv_grid:
+            # float() rather than the numpy scalar. np.geomspace yields np.float64,
+            # which propagates through every derived quantity and turns
+            # drag_correction_applied into np.bool_, which json cannot serialise.
+            # The artifact serialisation test is what caught it.
+            dv_try_m_s = float(_dv_try)
+            dv_vec_km_s = d_hat * (dv_try_m_s / 1000.0)
 
-        # SCRUM-365: execution-error covariance (thrust misalignment +
-        # magnitude uncertainty). Zero matrix (no change) when the
-        # profile does not carry these parameters -- AC1.
-        #
-        # SCRUM-397: d_hat is ECI and phi_rv is now the ECI-expressed map, so
-        # the velocity covariance and the map it is propagated through are in
-        # the same frame. Passing the raw RTN block here, as this did, made
-        # Q_exec wrong in the same way and for the same reason delta_r was.
-        # compute_q_exec_km2's own docstring flagged that and deferred it.
-        q_exec_km2 = compute_q_exec_km2(
-            direction_hat=d_hat,
-            dv_mag_km_s=dv_mag_m_s / 1000.0,
-            thrust_misalignment_deg=cap.propulsion.thrust_misalignment_deg,
-            dv_magnitude_sigma=cap.propulsion.dv_magnitude_sigma,
-            phi_rv=phi_rv,
-        )
-        s_covariance_km2 = p_rel_km2 + q_exec_km2
+            # Post-maneuver relative position via CW
+            delta_r_km = phi_rv @ dv_vec_km_s
+            r_post_km = r_rel_km - delta_r_km
 
-        # Mahalanobis gain (research doc sign: post - pre, positive = safer)
-        m2_post = mahalanobis_sq(r_post_km, s_covariance_km2)
-        delta_C_v25 = m2_post - m2_pre      # research doc convention
-        delta_C_v24 = m2_pre - m2_post      # v2.4 output convention
+            # SCRUM-365: execution-error covariance (thrust misalignment +
+            # magnitude uncertainty). Zero matrix (no change) when the
+            # profile does not carry these parameters -- AC1.
+            #
+            # SCRUM-397: d_hat is ECI and phi_rv is now the ECI-expressed map, so
+            # the velocity covariance and the map it is propagated through are in
+            # the same frame. Passing the raw RTN block here, as this did, made
+            # Q_exec wrong in the same way and for the same reason delta_r was.
+            # compute_q_exec_km2's own docstring flagged that and deferred it.
+            q_exec_km2 = compute_q_exec_km2(
+                direction_hat=d_hat,
+                dv_mag_km_s=dv_try_m_s / 1000.0,
+                thrust_misalignment_deg=cap.propulsion.thrust_misalignment_deg,
+                dv_magnitude_sigma=cap.propulsion.dv_magnitude_sigma,
+                phi_rv=phi_rv,
+            )
+            s_covariance_km2 = p_rel_km2 + q_exec_km2
 
-        # SCRUM-393: what the collision probability becomes if this candidate is
-        # executed. Uses the post-burn relative position and the same covariance
-        # the Mahalanobis gain uses, so Q_exec is included whenever the profile
-        # carries execution error and the Pc is not quietly a perfect-burn one.
-        pc_post_candidate = compute_pc_post(
-            r_sat_km, v_sat_km_s, r_post_km, v_rel_km_s, s_covariance_km2, hbr_m
-        )
+            # Mahalanobis gain (research doc sign: post - pre, positive = safer)
+            m2_post = mahalanobis_sq(r_post_km, s_covariance_km2)
+            delta_C_v25 = m2_post - m2_pre      # research doc convention
+            delta_C_v24 = m2_pre - m2_post      # v2.4 output convention
 
-        # --- Co-optimized return cost (CTO items 1 and 2) ---
-        post_drift_km = 0.0
-        dv_return = 0.0
-        drag_applied = False
-        recovery_plan: Optional[SlotRecoveryPlan] = None
-
-        if in_constellation:
-            # Along-track displacement from this burn direction
-            # (tangential component drives slot drift)
-            tangential_component = float(np.dot(dv_vec_km_s, _unit(v_sat_km_s)))
-            dv_tangential_m_s = abs(tangential_component) * 1000.0
-
-            post_drift_km = _along_track_displacement_km(
-                dv_tangential_m_s, cap.a_ref_km, dt_to_ca_s
+            # SCRUM-393: what the collision probability becomes if this candidate is
+            # executed. Uses the post-burn relative position and the same covariance
+            # the Mahalanobis gain uses, so Q_exec is included whenever the profile
+            # carries execution error and the Pc is not quietly a perfect-burn one.
+            pc_post_candidate = compute_pc_post(
+                r_sat_km, v_sat_km_s, r_post_km, v_rel_km_s, s_covariance_km2, hbr_m
             )
 
-            # Drag-corrected return cost (CTO Item 2)
-            dv_return_base = _return_burn_cost_m_s(dv_tangential_m_s, cap.a_ref_km)
-            dv_return_drag = _drag_corrected_dv_return_m_s(
-                dv_tangential_m_s, cap.a_ref_km,
-                recovery_orbits, cap.a_ref_km - 6371.0,  # altitude_km is not on SatelliteCapability; derive from a_ref_km
-            )
-            drag_applied = dv_return_drag > dv_return_base + 1e-6
-            dv_return = dv_return_drag
+            # --- Co-optimized return cost (CTO items 1 and 2) ---
+            post_drift_km = 0.0
+            dv_return = 0.0
+            drag_applied = False
+            recovery_plan: Optional[SlotRecoveryPlan] = None
 
-            # Recovery plan (J2-corrected target from 9.3)
-            if geometry is not None:
-                # Use plane/seat from slot_id if parseable, else default P0-S0
-                plane_idx, seat_idx = _parse_slot_id(cap.slot.slot_id)
-                recovery_plan = geometry.plan_slot_recovery(
-                    plane_idx=plane_idx,
-                    seat_idx=seat_idx,
-                    dv_avoid_m_s=dv_mag_m_s,
-                    post_maneuver_drift_km=post_drift_km,
-                    acceptable_drift_km=acceptable_drift_km,
-                    return_dv_budget_m_s=return_dv_budget,
-                    max_recovery_time_s=max_recovery_s,
-                    recovery_epoch_offset_s=dt_to_ca_s,
+            if in_constellation:
+                # Along-track displacement from this burn direction
+                # (tangential component drives slot drift)
+                tangential_component = float(np.dot(dv_vec_km_s, _unit(v_sat_km_s)))
+                dv_tangential_m_s = abs(tangential_component) * 1000.0
+
+                post_drift_km = _along_track_displacement_km(
+                    dv_tangential_m_s, cap.a_ref_km, dt_to_ca_s
                 )
 
-        dv_total = dv_mag_m_s + dv_return
+                # Drag-corrected return cost (CTO Item 2)
+                dv_return_base = _return_burn_cost_m_s(dv_tangential_m_s, cap.a_ref_km)
+                dv_return_drag = _drag_corrected_dv_return_m_s(
+                    dv_tangential_m_s, cap.a_ref_km,
+                    recovery_orbits, cap.a_ref_km - 6371.0,  # altitude_km is not on SatelliteCapability; derive from a_ref_km
+                )
+                drag_applied = dv_return_drag > dv_return_base + 1e-6
+                dv_return = dv_return_drag
 
-        # --- Scoring terms ---
-        # lambda_v * delta_v  (total mission cost including return)
-        dv_cost_term = lam_v * dv_total
+                # Recovery plan (J2-corrected target from 9.3)
+                if geometry is not None:
+                    # Use plane/seat from slot_id if parseable, else default P0-S0
+                    plane_idx, seat_idx = _parse_slot_id(cap.slot.slot_id)
+                    recovery_plan = geometry.plan_slot_recovery(
+                        plane_idx=plane_idx,
+                        seat_idx=seat_idx,
+                        dv_avoid_m_s=dv_try_m_s,
+                        post_maneuver_drift_km=post_drift_km,
+                        acceptable_drift_km=acceptable_drift_km,
+                        return_dv_budget_m_s=return_dv_budget,
+                        max_recovery_time_s=max_recovery_s,
+                        recovery_epoch_offset_s=dt_to_ca_s,
+                    )
 
-        # lambda_L * delta_L  (lifetime impact)
-        # Uses v_available (after reserve) and lifetime_fraction_used
-        # delta_L = dv_total / v_available, scaled by lifetime maturity
-        delta_L_base = dv_total / max(1e-6, v_available)
-        delta_L = delta_L_base * (1.0 + lifetime_frac)   # heavier penalty near EOL
-        lifetime_cost_term = lam_L * delta_L
+            dv_total = dv_try_m_s + dv_return
 
-        # lambda_s * delta_S  (constellation slot deviation, 0 if not in constellation)
-        if in_constellation and acceptable_drift_km > 0:
-            delta_S = post_drift_km / acceptable_drift_km
-        else:
-            delta_S = 0.0
-        slot_cost_term = lam_s * delta_S
+            # --- Scoring terms ---
+            # lambda_v * delta_v  (total mission cost including return)
+            dv_cost_term = lam_v * dv_total
 
-        # Full APS 2.5 utility (research doc §5.4)
-        U = delta_C_v25 - dv_cost_term - lifetime_cost_term - slot_cost_term
+            # lambda_L * delta_L  (lifetime impact)
+            # Uses v_available (after reserve) and lifetime_fraction_used
+            # delta_L = dv_total / v_available, scaled by lifetime maturity
+            delta_L_base = dv_total / max(1e-6, v_available)
+            delta_L = delta_L_base * (1.0 + lifetime_frac)   # heavier penalty near EOL
+            lifetime_cost_term = lam_L * delta_L
 
-        candidate = CandidateScore(
-            direction=name,
-            dv_eci_km_s=dv_vec_km_s.tolist(),
-            dv_avoid_m_s=dv_mag_m_s,
-            dv_return_m_s=dv_return,
-            dv_total_m_s=dv_total,
-            delta_C_v25=float(delta_C_v25),
-            delta_C_v24=float(delta_C_v24),
-            m2_post=float(m2_post),
-            dv_cost_term=float(dv_cost_term),
-            lifetime_cost_term=float(lifetime_cost_term),
-            slot_cost_term=float(slot_cost_term),
-            utility=float(U),
-            post_drift_km=float(post_drift_km),
-            recovery_plan=recovery_plan,
-            drag_correction_applied=drag_applied,
-            pc_post=pc_post_candidate,
-        )
-        all_candidates_v25.append(candidate)
+            # lambda_s * delta_S  (constellation slot deviation, 0 if not in constellation)
+            if in_constellation and acceptable_drift_km > 0:
+                delta_S = post_drift_km / acceptable_drift_km
+            else:
+                delta_S = 0.0
+            slot_cost_term = lam_s * delta_S
 
-        # v2.4-compatible candidate entry
-        all_candidates_v24.append({
-            "direction": name,
-            "dv_eci_km_s": dv_vec_km_s.tolist(),
-            "delta_C": float(delta_C_v24),
-            "utility": float(U),
-        })
+            # --- SCRUM-387: what the risk reduction is worth ---
+            #
+            # The old term was delta_C_v25, the Mahalanobis gain. Two structural
+            # problems, neither fixable by reweighting.
+            #
+            # It is a LOG-risk quantity. m^2 is linear in log Pc, so delta_C is
+            # 2*ln(Pc_pre/Pc_post). RED-001's delta_C of 148082 claims the burn
+            # cut collision probability by a factor of e^74041. The utility paid
+            # linearly, without ceiling, for log risk reduction that stopped
+            # meaning anything many orders of magnitude earlier.
+            #
+            # And it is quadratic in delta-v against a linear cost, so the
+            # derivative 2*g*dv - lambda is positive everywhere above
+            # lambda/2g and the maximum always sits at the delta-v ceiling.
+            # Burning to the limit was a property of the functional form.
+            #
+            # Trading in Pc fixes both. The benefit is bounded above by Pc_pre,
+            # so separation stops paying once the probability is gone. Pc_post
+            # falls as exp(-m^2/2) with m^2 quadratic in delta-v, so marginal
+            # benefit decays while cost stays linear and an interior optimum
+            # exists. Measured across the permitted 4 to 72 hour window the
+            # utility at the optimum varies by 0.3 percent on one parameter set,
+            # against 314x for the old form.
+            if (
+                pc_pre is not None
+                and pc_post_candidate is not None
+                and pc_pre_geometric is not None
+                and pc_pre_geometric > 0.0
+            ):
+                # Fraction of the risk this burn removes, in our model.
+                # Clamped at zero because a burn that makes things worse should
+                # score no benefit rather than a negative one; the delta-v cost
+                # already penalises it and a negative benefit would double-count.
+                reduction_fraction = max(
+                    0.0, 1.0 - pc_post_candidate / pc_pre_geometric
+                )
+                risk_benefit = (
+                    risk_exchange_rate(policy) * pc_pre * reduction_fraction
+                )
+                basis = UTILITY_BASIS_PC
+            else:
+                # Fallback, and it is the live path until every producer supplies
+                # a relative velocity. Carries both defects described above. Kept
+                # rather than replaced by a no-go because a no-go here would mean
+                # a no-go on every event with no Pc, and the alternative is not
+                # scoring events we can still say something useful about.
+                risk_benefit = delta_C_v25
+                basis = UTILITY_BASIS_DELTA_C
 
-        # Best = highest utility (no-burn baseline is U=0)
-        if best_candidate is None or U > best_candidate.utility:
-            best_candidate = candidate
+            U = risk_benefit - dv_cost_term - lifetime_cost_term - slot_cost_term
+
+            candidate = CandidateScore(
+                direction=name,
+                dv_eci_km_s=dv_vec_km_s.tolist(),
+                dv_avoid_m_s=dv_try_m_s,
+                dv_return_m_s=dv_return,
+                dv_total_m_s=dv_total,
+                delta_C_v25=float(delta_C_v25),
+                delta_C_v24=float(delta_C_v24),
+                m2_post=float(m2_post),
+                dv_cost_term=float(dv_cost_term),
+                lifetime_cost_term=float(lifetime_cost_term),
+                slot_cost_term=float(slot_cost_term),
+                utility=float(U),
+                post_drift_km=float(post_drift_km),
+                recovery_plan=recovery_plan,
+                drag_correction_applied=drag_applied,
+                pc_post=pc_post_candidate,
+                utility_basis=basis,
+            )
+
+
+            # Best magnitude for THIS direction. Only the winner is reported, so
+            # candidates_v25 stays one entry per direction and the response
+            # contract does not grow by the size of the search grid.
+            if best_for_direction is None or U > best_for_direction.utility:
+                best_for_direction = candidate
+                best_v24_for_direction = {
+                    "direction": name,
+                    "dv_eci_km_s": dv_vec_km_s.tolist(),
+                    "delta_C": float(delta_C_v24),
+                    "utility": float(U),
+                }
+
+        if best_for_direction is not None:
+            all_candidates_v25.append(best_for_direction)
+            all_candidates_v24.append(best_v24_for_direction)
+
+            # Best = highest utility across directions (no-burn baseline is U=0)
+            if best_candidate is None or best_for_direction.utility > best_candidate.utility:
+                best_candidate = best_for_direction
 
     # --- Final decision ---
     # No-burn wins if all candidates have U <= 0
@@ -1232,6 +1396,7 @@ def score_maneuver_candidates(
         execution_error_modelled=execution_error_modelled,
         pc_post=pc_post,
         risk_surrogate_source=risk_surrogate_source,
+        utility_basis=best_candidate.utility_basis,
     )
 
 
@@ -1472,4 +1637,7 @@ def _build_nogo_result(
         risk_gate=risk_gate,
         pc_post=None,
         risk_surrogate_source=risk_source,
+        # No candidate was selected, so no utility basis applies. An empty
+        # string says that, where either basis name would be a claim.
+        utility_basis="",
     )
