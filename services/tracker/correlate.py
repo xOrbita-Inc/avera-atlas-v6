@@ -80,7 +80,6 @@ class CorrelatedObservation:
     Angular observation with correlation metadata.
     """
     obs_id: UUID
-    detection_id: UUID
     sensor_id: str
     timestamp: datetime
     
@@ -96,14 +95,24 @@ class CorrelatedObservation:
     observer_position_eci: np.ndarray
     observer_velocity_eci: np.ndarray
     
-    # Detection metadata
-    confidence: float
-    object_class: str
+    # Detection metadata. Required by the detector-fed /detections path,
+    # absent for contract observations ingested via /v1/observations.
+    # Do not substitute defaults here (SCRUM-373): these are required by
+    # this dataclass, not by the correlation algorithm itself.
+    detection_id: Optional[UUID] = None
+    confidence: Optional[float] = None
+    object_class: Optional[str] = None
+
+    # Provenance: which door this record came through. Required going
+    # forward per SCRUM-373/SCRUM-395 postmortem -- do not leave this as
+    # the "unknown" default for any new call site.
+    ingest_path: str = "unknown"
     
     def to_dict(self) -> dict:
         return {
             "obs_id": str(self.obs_id),
-            "detection_id": str(self.detection_id),
+            "ingest_path": self.ingest_path,
+            "detection_id": str(self.detection_id) if self.detection_id is not None else None,
             "sensor_id": self.sensor_id,
             "timestamp": self.timestamp.isoformat(),
             "ra_deg": math.degrees(self.ra),
@@ -131,6 +140,7 @@ class CorrelatedObservation:
             observer_velocity_eci=obs.observer_velocity_eci,
             confidence=obs.confidence,
             object_class=obs.object_class,
+            ingest_path="detections",
         )
 
 
@@ -489,6 +499,7 @@ if __name__ == "__main__":
             observer_velocity_eci=np.array([0, 7668, 0]),
             confidence=0.9,
             object_class="Debris",
+            ingest_path="demo",
         )
         
         uct, is_new = engine.correlate(obs)
@@ -529,6 +540,7 @@ if __name__ == "__main__":
             observer_velocity_eci=np.array([0, 7668, 0]),
             confidence=0.85,
             object_class="RocketBody",
+            ingest_path="demo",
         )
         
         uct, is_new = engine.correlate(obs)

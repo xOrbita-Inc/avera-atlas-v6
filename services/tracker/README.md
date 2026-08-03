@@ -12,6 +12,15 @@ ingest → detector → [TRACKER] → propagator → viz → ui
 
 It solves the critical problem of converting 2D SWIR camera detections into 3D orbital states suitable for conjunction assessment.
 
+## Observation Contract Status (SCRUM-373)
+
+`/v1/observations` and `/v1/iod`, per `openapi/tracker.yaml`, are the one
+live observation contract for this service. `/detections` and
+`/detections/single` are deprecated: kept working while the detector
+service migrates, not to be used for new integrations. Ingested records
+carry an `ingest_path` tag (`v1_observations` vs `detections`) so
+deprecated-path usage is measurable, not just documented as deprecated.
+
 ## The Problem
 
 SWIR cameras are passive 2D sensors. They output pixel coordinates, not 3D positions. With CubeSat-hosted sensors, we have a moving observer tracking a moving target. To determine where a debris object actually is in 3D space, we need:
@@ -30,7 +39,7 @@ SWIR cameras are passive 2D sensors. They output pixel coordinates, not 3D posit
 | Uncorrelated Buffer | Hold detections awaiting sufficient obs for IOD |
 | Initial Orbit Determination | Compute 3D state from angles-only observations |
 | Track Manager | Lifecycle management and state persistence |
-| State Estimation | EKF updates for confirmed tracks |
+| State Estimation | Not yet implemented. Planned: EKF updates for confirmed tracks (see "Next Steps") |
 | Propagator Export | Write states_multi.npz for downstream services |
 
 ## Track Lifecycle
@@ -70,9 +79,13 @@ Detection received
 - `GET /health` - Basic health check
 - `GET /status` - Detailed service status
 
-### Detection Ingestion
-- `POST /detections` - Ingest batch of detections
-- `POST /detections/single` - Ingest single detection
+### Observations (SCRUM-373 -- the one live observation contract)
+- `POST /v1/observations` - Ingest sensor-facing observations per `openapi/tracker.yaml`. Full pipeline processing: correlated into the same track-building pipeline as (deprecated) `/detections`, not just stored.
+- `POST /v1/iod` - Trigger initial orbit determination per `openapi/tracker.yaml`, using previously-ingested `observation_ids` or inline observations.
+
+### Detection Ingestion (DEPRECATED, SCRUM-373)
+- `POST /detections` - **Deprecated.** Kept working while the detector service still calls it directly (`TRACKER_DETECTIONS_URL`). Relies on tracker's own pixel-to-angle transform and mock platform state generation, which the published contract's SCRUM-292 sensor-knowledge isolation does not allow. Do not use for new integrations; use `/v1/observations` instead. Relocating this logic into the detector service is tracked as separate follow-on work.
+- `POST /detections/single` - **Deprecated**, same status as above.
 
 ### Track Management
 - `GET /tracks` - List all tracks (with filters)

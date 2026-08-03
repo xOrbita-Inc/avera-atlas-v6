@@ -30,6 +30,12 @@ from schemas import (
     SensorStatusOutput,
     ServiceStatus,
     ErrorResponse,
+    TrackerErrorResponse,
+    ObservationRecord,
+    ObservationIngestRequest,
+    ObservationIngestResponse,
+    IodTriggerRequest,
+    IodTriggerResponse,
     TrackStatusEnum,
 )
 from models import SensorDetection, PlatformState, SensorConfig
@@ -77,6 +83,11 @@ class TrackerState:
         
         # Active tracks (track_id -> track data)
         self.tracks: dict[str, dict] = {}
+
+        # Raw observations ingested via /v1/observations (SCRUM-373),
+        # keyed by the contract's observation_id. Needed so /v1/iod can
+        # later look up previously-ingested observations by ID.
+        self.observations: dict[str, dict] = {}
         
         # Track ID counter for friendly naming
         self.track_counter = 0
@@ -230,7 +241,16 @@ AVERA-ATLAS pipeline. It performs:
 - **Cross-sensor correlation** for multi-observer fusion
 - **Initial Orbit Determination (IOD)** from angles-only observations
 - **Track lifecycle management** (UNCORRELATED → TENTATIVE → CONFIRMED → COASTING)
-- **State estimation** using Extended Kalman Filter
+- **State estimation**: not yet implemented. EKF-based state estimation is planned future work (see README's "Next Steps"), not currently in this service. No Kalman filter exists in this codebase today.
+
+## Observation Contract Status (SCRUM-373)
+
+`/v1/observations` and `/v1/iod`, per `openapi/tracker.yaml`, are the one
+live observation contract for this service. `/detections` and
+`/detections/single` are DEPRECATED: kept working while the detector
+service migrates, not to be extended or used for new integrations.
+Records carry an `ingest_path` tag (`v1_observations` vs `detections`) so
+deprecated-path usage is measurable.
 
 ## Pipeline Position
 
@@ -298,11 +318,23 @@ async def service_status():
 # Detection Ingestion Endpoints
 # =============================================================================
 
-@app.post("/detections", tags=["Detections"])
+@app.post("/detections", tags=["Detections"], deprecated=True)
 async def ingest_detections(batch: DetectionBatchInput):
     """
     Ingest a batch of detections from YOLOv8 detector(s).
-    
+
+    DEPRECATED (SCRUM-373): /v1/observations is the one live observation
+    contract per openapi/tracker.yaml. This endpoint is kept working,
+    untouched, while the detector service still calls it directly
+    (TRACKER_DETECTIONS_URL). Explicit retirement decision, not folding:
+    this path relies on tracker's own pixel-to-angle transform and mock
+    platform state generation, which SCRUM-292 sensor-knowledge isolation
+    does not allow the published contract to depend on. Relocating that
+    logic into the detector service (and repointing the URL) is tracked
+    as separate follow-on work, out of scope for this ticket. Records
+    through this path are tagged ingest_path="detections" so traffic
+    still using it is measurable, not just documented as deprecated.
+
     This is the primary input endpoint. Detections are:
     1. Validated and transformed to angular coordinates
     2. Correlated to existing UCTs or create new ones
@@ -404,11 +436,225 @@ async def ingest_detections(batch: DetectionBatchInput):
     return results
 
 
-@app.post("/detections/single", tags=["Detections"])
+@app.post("/detections/single", tags=["Detections"], deprecated=True)
 async def ingest_single_detection(detection: DetectionInput):
-    """Ingest a single detection (convenience endpoint)."""
+    """
+    Ingest a single detection (convenience endpoint).
+
+    DEPRECATED (SCRUM-373): see ingest_detections above. Same status.
+    """
     batch = DetectionBatchInput(detections=[detection])
     return await ingest_detections(batch)
+
+
+# =============================================================================
+# Published Contract Endpoints (openapi/tracker.yaml) -- SCRUM-373
+# =============================================================================
+
+@app.post(
+    "/v1/observations",
+    tags=["Observations"],
+    response_model=ObservationIngestResponse,
+    responses={400: {"model": TrackerErrorResponse}},
+)
+async def ingest_v1_observations(request: ObservationIngestRequest):
+    """
+    Ingest sensor-facing observations per the published contract.
+
+    Full pipeline processing (per John/Minh, SCRUM-373): observations are
+    correlated into the same track-building pipeline that /detections
+    uses, not just stored.
+
+    Fields ra_rad/dec_rad/ra_sigma_rad/dec_sigma_rad/observer_eci_m/
+    observer_eci_m_s are optional at the schema level (multi-sensor
+    support) but required by CorrelatedObservation. A record missing any
+    of these is stored (observation persistence) but NOT fed into
+    correlation. Nothing is defaulted here -- a defaulted sigma of 0.0
+    would tell the correlator/IOD the measurement is perfectly certain,
+    which is false and would bias results invisibly (the SCRUM-395
+    failure mode). Records with detected=false are stored but skipped for
+    the same reason: nothing was detected, nothing to correlate.
+    """
+    if request.payload_ref is not None and not request.observations:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "payload_ref ingest is not yet implemented on this endpoint; "
+                "use inline 'observations' for now."
+            ),
+        )
+
+    accepted_ids: list[str] = []
+
+    for obs in request.observations or []:
+        # Persist the raw record regardless of correlation eligibility.
+        # Tracker owns observation persistence per the contract.
+        state.observations[obs.observation_id] = obs.model_dump()
+        accepted_ids.append(obs.observation_id)
+
+        if not obs.detected:
+            continue  # Nothing detected, nothing to correlate.
+
+        required_for_correlation = (
+            obs.ra_rad, obs.dec_rad,
+            obs.ra_sigma_rad, obs.dec_sigma_rad,
+            obs.observer_eci_m, obs.observer_eci_m_s,
+        )
+        if any(field is None for field in required_for_correlation):
+            logger.warning(
+                f"Observation {obs.observation_id}: detected=True but missing "
+                f"required measurement/observer fields for correlation. "
+                f"Stored, not correlated."
+            )
+            continue
+
+        try:
+            corr_obs = CorrelatedObservation(
+                obs_id=uuid4(),
+                sensor_id=obs.sensor_id,
+                timestamp=obs.timestamp_utc,
+                ra=obs.ra_rad,
+                dec=obs.dec_rad,
+                ra_sigma=obs.ra_sigma_rad,
+                dec_sigma=obs.dec_sigma_rad,
+                observer_position_eci=np.array(obs.observer_eci_m),
+                observer_velocity_eci=np.array(obs.observer_eci_m_s),
+                # "Unknown" is the true classification for a contract
+                # observation (no object_class field exists upstream), set
+                # at construction per John's call, rather than leaving None
+                # and patching the majority-vote logic in add_observation().
+                # detection_id/confidence stay unset: no honest default
+                # exists for those the way "Unknown" is honest here.
+                object_class="Unknown",
+                ingest_path="v1_observations",
+            )
+            state.correlation_engine.correlate(corr_obs)
+        except Exception as e:
+            logger.error(f"Error correlating observation {obs.observation_id}: {e}")
+
+    return ObservationIngestResponse(
+        accepted=True,
+        observation_count=len(accepted_ids),
+        observation_ids=accepted_ids,
+    )
+
+
+@app.post(
+    "/v1/iod",
+    tags=["Observations"],
+    response_model=IodTriggerResponse,
+    responses={400: {"model": TrackerErrorResponse}},
+)
+async def trigger_v1_iod(request: IodTriggerRequest):
+    """
+    Trigger initial orbit determination per the published contract.
+
+    Resolves observation_ids against records previously ingested via
+    /v1/observations, combines with any inline observations, then runs
+    the same IODSolver used by the existing /uncorrelated/{uct_id}/
+    attempt_iod endpoint.
+
+    Nothing is defaulted: an observation_id not found in the store, or a
+    record missing required measurement/observer fields, rejects the
+    whole job with a clear error rather than silently proceeding on a
+    partial or invented input set (the SCRUM-395 lesson).
+    """
+    if request.solver is not None:
+        logger.warning(
+            f"IOD trigger requested solver hint '{request.solver}', but "
+            f"IODSolver.solve() has no method-override parameter; hint is "
+            f"not currently honored (flagged to team, SCRUM-373)."
+        )
+
+    records: list[ObservationRecord] = []
+
+    missing_ids = []
+    for obs_id in request.observation_ids or []:
+        raw = state.observations.get(obs_id)
+        if raw is None:
+            missing_ids.append(obs_id)
+            continue
+        records.append(ObservationRecord(**raw))
+
+    if missing_ids:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown observation_id(s), not previously ingested: {missing_ids}",
+        )
+
+    records.extend(request.observations or [])
+
+    iod_observations: list[IODObservation] = []
+    rejected: list[str] = []
+
+    for rec in records:
+        required = (
+            rec.ra_rad, rec.dec_rad,
+            rec.ra_sigma_rad, rec.dec_sigma_rad,
+            rec.observer_eci_m, rec.observer_eci_m_s,
+        )
+        if any(field is None for field in required):
+            rejected.append(rec.observation_id)
+            continue
+
+        iod_observations.append(IODObservation(
+            timestamp=rec.timestamp_utc,
+            ra=rec.ra_rad,
+            dec=rec.dec_rad,
+            ra_sigma=rec.ra_sigma_rad,
+            dec_sigma=rec.dec_sigma_rad,
+            observer_position_km=np.array(rec.observer_eci_m) / 1000.0,
+            observer_velocity_km_s=np.array(rec.observer_eci_m_s) / 1000.0,
+            range_km=(rec.range_m / 1000.0) if rec.range_m is not None else None,
+            range_sigma_km=(rec.range_sigma_m / 1000.0) if rec.range_sigma_m is not None else None,
+        ))
+
+    if rejected:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Observation(s) missing required measurement/observer "
+                f"fields for IOD, not defaulted: {rejected}"
+            ),
+        )
+
+    track_id = uuid4()
+    solution = state.iod_solver.solve(iod_observations, track_id)
+
+    if not solution.success:
+        return IodTriggerResponse(
+            accepted=False,
+            iod_job_id=str(track_id),
+            status=f"failed: {solution.error_message}",
+        )
+
+    track_name = state.get_next_track_name("Unknown")
+    track_data = {
+        "track_id": str(track_id),
+        "track_name": track_name,
+        "object_id": track_name,
+        "status": "TENTATIVE",
+        "object_class": "Unknown",
+        "epoch": solution.epoch.isoformat(),
+        "r_eci_km": solution.position_km.tolist(),
+        "v_eci_km_s": solution.velocity_km_s.tolist(),
+        "confidence": 0.8,
+        "semi_major_axis_km": solution.semi_major_axis_km,
+        "eccentricity": solution.eccentricity,
+        "inclination_deg": solution.inclination_deg,
+        "rms_residual_arcsec": solution.rms_residual_arcsec,
+        "observations_used": solution.observations_used,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    state.tracks[str(track_id)] = track_data
+
+    logger.info(f"v1/iod succeeded: {track_name} (track_id={track_id})")
+
+    return IodTriggerResponse(
+        accepted=True,
+        iod_job_id=str(track_id),
+        status="succeeded",
+    )
 
 
 # =============================================================================
@@ -891,7 +1137,8 @@ async def generate_demo_detections(
                     observer_position_eci=angular_obs.observer_position_eci,
                     observer_velocity_eci=angular_obs.observer_velocity_eci,
                     confidence=detection.confidence,
-                    object_class=detection.object_class
+                    object_class=detection.object_class,
+                    ingest_path="demo",
                 )
                 
                 uct, is_new = state.correlation_engine.correlate(corr_obs)
