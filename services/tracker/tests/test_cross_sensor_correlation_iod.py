@@ -19,6 +19,13 @@ from iod import IODObservation, IODSolver
 EPOCH = datetime(2026, 1, 1, tzinfo=timezone.utc)
 MU_EARTH_KM3_S2 = 398600.4418
 
+# These observations are noiseless and generated from exact two-body circular
+# truth. The tolerances are intentionally much wider than floating-point and
+# finite-difference error, but still require a useful initial orbit rather than
+# accepting a solver result that is hundreds or thousands of kilometres wrong.
+POSITION_ERROR_TOLERANCE_KM = 10.0
+VELOCITY_ERROR_TOLERANCE_KM_S = 0.01
+
 
 def _unit(vector: np.ndarray) -> np.ndarray:
     vector = np.asarray(vector, dtype=np.float64)
@@ -53,6 +60,64 @@ def _circular_state(
     )
 
     return position, velocity
+
+
+def _circular_state_at_elapsed_time(
+    *,
+    initial_position_km: np.ndarray,
+    elapsed_seconds: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    initial_position_km = np.asarray(initial_position_km, dtype=np.float64)
+    radius_km = float(np.linalg.norm(initial_position_km))
+    phase_rad = float(math.atan2(initial_position_km[1], initial_position_km[0]))
+    mean_motion_rad_s = float(
+        math.sqrt(MU_EARTH_KM3_S2 / radius_km**3)
+    )
+
+    return _circular_state(
+        radius_km=radius_km,
+        phase_rad=phase_rad + mean_motion_rad_s * elapsed_seconds,
+    )
+
+
+def _assert_solution_matches_truth(
+    *,
+    solution,
+    truth_position_km: np.ndarray,
+    truth_velocity_km_s: np.ndarray,
+) -> None:
+    assert solution.success is True, (
+        f"IOD did not return a successful state: {solution.error_message}; "
+        f"attempted_methods={solution.attempted_methods}"
+    )
+    assert solution.position_km is not None
+    assert solution.velocity_km_s is not None
+
+    position_error_km = float(
+        np.linalg.norm(
+            np.asarray(solution.position_km, dtype=np.float64)
+            - np.asarray(truth_position_km, dtype=np.float64)
+        )
+    )
+    velocity_error_km_s = float(
+        np.linalg.norm(
+            np.asarray(solution.velocity_km_s, dtype=np.float64)
+            - np.asarray(truth_velocity_km_s, dtype=np.float64)
+        )
+    )
+
+    assert position_error_km <= POSITION_ERROR_TOLERANCE_KM, (
+        f"IOD position error {position_error_km:.3f} km exceeds "
+        f"{POSITION_ERROR_TOLERANCE_KM:.3f} km; "
+        f"velocity error={velocity_error_km_s:.6f} km/s; "
+        f"method={solution.method_used}"
+    )
+    assert velocity_error_km_s <= VELOCITY_ERROR_TOLERANCE_KM_S, (
+        f"IOD velocity error {velocity_error_km_s:.6f} km/s exceeds "
+        f"{VELOCITY_ERROR_TOLERANCE_KM_S:.6f} km/s; "
+        f"position error={position_error_km:.3f} km; "
+        f"method={solution.method_used}"
+    )
 
 
 def _ra_dec_from_los(los_km: np.ndarray) -> tuple[float, float]:
@@ -209,59 +274,77 @@ def test_cross_sensor_correlation_keeps_separated_targets_apart() -> None:
 
 
 def test_iod_solver_selects_range_angles_when_all_observations_are_ranged() -> None:
-    host_r, host_v = _circular_state(phase_rad=0.0)
-    debris_r0 = host_r + np.array(
+    host_r0, _ = _circular_state(phase_rad=0.0)
+    debris_r0 = host_r0 + np.array(
         [0.0, 20.0, 0.0],
         dtype=np.float64,
     )
-    debris_v = host_v + np.array(
-        [0.0, 0.05, 0.0],
-        dtype=np.float64,
-    )
 
-    observations = [
-        _make_iod_observation(
-            timestamp=EPOCH + timedelta(seconds=t_seconds),
-            observer_position_km=host_r + host_v * t_seconds,
-            observer_velocity_km_s=host_v,
-            target_position_km=debris_r0 + debris_v * t_seconds,
-            include_range=True,
+    observations = []
+    for t_seconds in [0.0, 10.0, 20.0]:
+        host_r, host_v = _circular_state_at_elapsed_time(
+            initial_position_km=host_r0,
+            elapsed_seconds=t_seconds,
         )
-        for t_seconds in [0.0, 10.0, 20.0]
-    ]
+        debris_r, _ = _circular_state_at_elapsed_time(
+            initial_position_km=debris_r0,
+            elapsed_seconds=t_seconds,
+        )
+        observations.append(
+            _make_iod_observation(
+                timestamp=EPOCH + timedelta(seconds=t_seconds),
+                observer_position_km=host_r,
+                observer_velocity_km_s=host_v,
+                target_position_km=debris_r,
+                include_range=True,
+            )
+        )
 
     solution = IODSolver().solve(
         observations=observations,
         track_id=uuid4(),
     )
 
-    assert solution.success is True
     assert solution.method_used == "range+angles"
     assert solution.attempted_methods is not None
     assert solution.attempted_methods[0]["method"] == "range+angles"
 
-
+    truth_elapsed_seconds = (solution.epoch - EPOCH).total_seconds()
+    truth_r, truth_v = _circular_state_at_elapsed_time(
+        initial_position_km=debris_r0,
+        elapsed_seconds=truth_elapsed_seconds,
+    )
+    _assert_solution_matches_truth(
+        solution=solution,
+        truth_position_km=truth_r,
+        truth_velocity_km_s=truth_v,
+    )
 def test_iod_solver_uses_angles_only_dispatch_when_ranges_are_absent() -> None:
-    host_r, host_v = _circular_state(phase_rad=0.0)
-    debris_r0 = host_r + np.array(
+    host_r0, _ = _circular_state(phase_rad=0.0)
+    debris_r0 = host_r0 + np.array(
         [0.0, 900.0, 0.0],
         dtype=np.float64,
     )
-    debris_v = host_v + np.array(
-        [0.0, 0.05, 0.0],
-        dtype=np.float64,
-    )
 
-    observations = [
-        _make_iod_observation(
-            timestamp=EPOCH + timedelta(seconds=t_seconds),
-            observer_position_km=host_r + host_v * t_seconds,
-            observer_velocity_km_s=host_v,
-            target_position_km=debris_r0 + debris_v * t_seconds,
-            include_range=False,
+    observations = []
+    for t_seconds in [0.0, 300.0, 600.0]:
+        host_r, host_v = _circular_state_at_elapsed_time(
+            initial_position_km=host_r0,
+            elapsed_seconds=t_seconds,
         )
-        for t_seconds in [0.0, 300.0, 600.0]
-    ]
+        debris_r, _ = _circular_state_at_elapsed_time(
+            initial_position_km=debris_r0,
+            elapsed_seconds=t_seconds,
+        )
+        observations.append(
+            _make_iod_observation(
+                timestamp=EPOCH + timedelta(seconds=t_seconds),
+                observer_position_km=host_r,
+                observer_velocity_km_s=host_v,
+                target_position_km=debris_r,
+                include_range=False,
+            )
+        )
 
     solution = IODSolver().solve(
         observations=observations,
@@ -276,3 +359,14 @@ def test_iod_solver_uses_angles_only_dispatch_when_ranges_are_absent() -> None:
     assert "range+angles" not in attempted_methods
     assert "range-search" in attempted_methods
     assert solution.method_used != "range+angles"
+
+    truth_elapsed_seconds = (solution.epoch - EPOCH).total_seconds()
+    truth_r, truth_v = _circular_state_at_elapsed_time(
+        initial_position_km=debris_r0,
+        elapsed_seconds=truth_elapsed_seconds,
+    )
+    _assert_solution_matches_truth(
+        solution=solution,
+        truth_position_km=truth_r,
+        truth_velocity_km_s=truth_v,
+    )
