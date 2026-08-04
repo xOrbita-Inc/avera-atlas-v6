@@ -557,12 +557,23 @@ async def trigger_v1_iod(request: IodTriggerRequest):
     record missing required measurement/observer fields, rejects the
     whole job with a clear error rather than silently proceeding on a
     partial or invented input set (the SCRUM-395 lesson).
+
+    `solver` is rejected outright if provided, rather than silently
+    ignored (John's AC5 review): IODSolver.solve() has no method-override
+    parameter, so accepting the field while not honoring it is exactly
+    the shape of defect this sprint has been full of. There is a safety
+    reason too -- SCRUM-338 found the angles-only chain returns a
+    solution ~11% wrong in scale on noiseless data, so offering it by
+    name would invite a caller to select a method known to be broken.
     """
     if request.solver is not None:
-        logger.warning(
-            f"IOD trigger requested solver hint '{request.solver}', but "
-            f"IODSolver.solve() has no method-override parameter; hint is "
-            f"not currently honored (flagged to team, SCRUM-373)."
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"'solver' hint ('{request.solver}') is not supported: "
+                f"IODSolver.solve() has no method-override parameter and "
+                f"auto-selects internally. Omit 'solver' from the request."
+            ),
         )
 
     records: list[ObservationRecord] = []

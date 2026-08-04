@@ -177,22 +177,32 @@ class TestIodTrigger:
         resp = client.post("/v1/iod", json={"observation_ids": ["does-not-exist"]})
         assert resp.status_code == 400
 
-    def test_solver_hint_accepted_but_not_honored(self, client, caplog):
-        """IODSolver.solve() has no method-override parameter. A solver
-        hint must not silently do nothing -- confirm the warning is
-        actually logged, not just that the request succeeds."""
+    def test_solver_hint_rejected(self, client):
+        """John's AC5 review: a solver hint is rejected with 400, not
+        silently ignored. IODSolver.solve() has no method-override
+        parameter, and angles-only is known (SCRUM-338) to be ~11% wrong
+        in scale on noiseless data -- offering it by name is a hazard,
+        not just a contract nicety."""
         obs_list = [make_observation(i) for i in range(5)]
         client.post("/v1/observations", json={"observations": obs_list})
-        with caplog.at_level("WARNING"):
-            resp = client.post(
-                "/v1/iod",
-                json={
-                    "observation_ids": [o["observation_id"] for o in obs_list],
-                    "solver": "angles-only",
-                },
-            )
+        resp = client.post(
+            "/v1/iod",
+            json={
+                "observation_ids": [o["observation_id"] for o in obs_list],
+                "solver": "angles-only",
+            },
+        )
+        assert resp.status_code == 400
+
+    def test_no_solver_hint_still_succeeds(self, client):
+        """Omitting solver entirely must still work normally."""
+        obs_list = [make_observation(i) for i in range(5)]
+        client.post("/v1/observations", json={"observations": obs_list})
+        resp = client.post(
+            "/v1/iod",
+            json={"observation_ids": [o["observation_id"] for o in obs_list]},
+        )
         assert resp.status_code == 200
-        assert any("not currently honored" in rec.message for rec in caplog.records)
 
 
 class TestDetectionsDeprecation:
@@ -218,3 +228,39 @@ class TestDetectionsDeprecation:
     def test_v1_observations_not_marked_deprecated(self, client):
         schema = app.openapi()
         assert schema["paths"]["/v1/observations"]["post"].get("deprecated", False) is False
+
+
+class TestContractConformance:
+    """John's AC5 review against tracker.yaml: additionalProperties: false
+    and enum restrictions must actually be enforced in code, not just
+    claimed in a docstring."""
+
+    def test_tracker_error_response_forbids_extra_fields(self):
+        from schemas import TrackerErrorResponse
+        with pytest.raises(Exception):
+            TrackerErrorResponse(error="test", detail="should be rejected")
+
+    def test_observation_ingest_response_forbids_extra_fields(self):
+        from schemas import ObservationIngestResponse
+        with pytest.raises(Exception):
+            ObservationIngestResponse(
+                accepted=True, observation_count=0, observation_ids=[],
+                extra_field="should be rejected",
+            )
+
+    def test_iod_trigger_response_forbids_extra_fields(self):
+        from schemas import IodTriggerResponse
+        with pytest.raises(Exception):
+            IodTriggerResponse(
+                accepted=True, iod_job_id="job-1",
+                extra_field="should be rejected",
+            )
+
+    def test_file_payload_reference_format_restricted_to_enum(self):
+        from schemas import FilePayloadReference
+        # Valid values per tracker.yaml lines 162-167.
+        FilePayloadReference(path="a/b", format="json")
+        FilePayloadReference(path="a/b", format="jsonl")
+        # tracker.yaml restricts format to json/jsonl; csv must be rejected.
+        with pytest.raises(Exception):
+            FilePayloadReference(path="a/b", format="csv")

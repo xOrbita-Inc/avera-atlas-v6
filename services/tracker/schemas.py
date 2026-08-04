@@ -306,6 +306,7 @@ class TrackerErrorResponse(BaseModel):
     error: str = Field(..., description="Human-readable error message.")
 
     class Config:
+        extra = "forbid"
         json_schema_extra = {
             "example": {
                 "error": "Invalid observation ingest request."
@@ -328,7 +329,7 @@ class FilePayloadReference(BaseModel):
     pattern). Do not use base64 payloads.
     """
     path: str = Field(..., description="Path or URI to the payload artifact.")
-    format: str = Field(..., description="Published payload encoding.")
+    format: Literal["json", "jsonl"] = Field(..., description="Published payload encoding.")
     sha256: Optional[str] = Field(None, description="Optional SHA-256 digest for payload integrity checks.")
 
     class Config:
@@ -424,6 +425,9 @@ class ObservationIngestResponse(BaseModel):
     observation_count: int = Field(..., ge=0)
     observation_ids: list[str]
 
+    class Config:
+        extra = "forbid"
+
 
 class IodTriggerRequest(BaseModel):
     """
@@ -434,11 +438,14 @@ class IodTriggerRequest(BaseModel):
     /v1/observations), or pass inline observations conforming to
     ObservationRecord.
 
-    `solver` is accepted for contract conformance but is NOT currently
-    honored: IODSolver.solve() auto-selects range+angles vs angles-only
-    internally based on which observations carry range data, and has no
-    method-override parameter. See main.py's trigger_v1_iod. Flagged to
-    the team rather than silently ignored or faked.
+    `solver` is rejected with a 400 if provided (John's AC5 review), not
+    silently accepted-and-ignored: IODSolver.solve() auto-selects
+    range+angles vs angles-only internally based on which observations
+    carry range data, and has no method-override parameter. There is
+    also a safety reason -- SCRUM-338 found the angles-only chain returns
+    a solution ~11% wrong in scale on noiseless data, so offering it by
+    name would invite a caller to select a method known to be broken.
+    See main.py's trigger_v1_iod.
     """
     observation_ids: Optional[list[str]] = None
     observations: Optional[list[ObservationRecord]] = None
@@ -458,13 +465,15 @@ class IodTriggerResponse(BaseModel):
     """
     Response for an IOD trigger request.
 
-    Note: this implementation runs the solve synchronously within the
-    request (see main.py), it does not queue an async job. `status`
-    reflects the actual outcome ("succeeded"/"failed: ...") rather than
-    the contract example's "queued", since claiming a job is queued when
-    it has already run and completed would be misleading. Flagged to the
-    team as a possible divergence from the contract's implied async model.
+    This implementation runs the solve synchronously within the request
+    (see main.py), it does not queue an async job. `status` reflects the
+    actual outcome ("succeeded"/"failed: ...") once the response returns.
+    tracker.yaml's status description and example were updated to match
+    this (John's AC5 review), so this is no longer a contract divergence.
     """
     accepted: bool
     iod_job_id: str
     status: Optional[str] = None
+
+    class Config:
+        extra = "forbid"
