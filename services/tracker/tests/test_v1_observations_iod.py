@@ -86,7 +86,7 @@ class TestObservationsIngestFullPipeline:
 
     def test_valid_inline_record_accepted(self, client):
         resp = client.post("/v1/observations", json={"observations": [make_observation(1)]})
-        assert resp.status_code in (200, 202)
+        assert resp.status_code == 200
         data = resp.json()
         assert data["accepted"] is True
         assert data["observation_count"] == 1
@@ -146,14 +146,14 @@ class TestObservationsIngestMissingFields:
         incomplete_obs = make_observation(1, include_measurement=False)
         incomplete_obs["detected"] = True
         resp = client.post("/v1/observations", json={"observations": [incomplete_obs]})
-        assert resp.status_code in (200, 202)
+        assert resp.status_code == 200
         assert "obs-test-001" in state.observations
         assert len(state.correlation_engine.ucts) == 0
 
     def test_detected_false_skips_correlation(self, client):
         undetected_obs = make_observation(1, detected=False)
         resp = client.post("/v1/observations", json={"observations": [undetected_obs]})
-        assert resp.status_code in (200, 202)
+        assert resp.status_code == 200
         assert "obs-test-001" in state.observations
         assert len(state.correlation_engine.ucts) == 0
 

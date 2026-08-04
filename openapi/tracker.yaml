@@ -76,8 +76,10 @@ paths:
             schema:
               $ref: "#/components/schemas/ObservationIngestRequest"
       responses:
-        "202":
-          description: Observation records accepted for tracker ingest.
+        "200":
+          description: Observation records ingested by tracker. This service
+            runs synchronously, so a successful ingest returns the actual
+            result directly rather than 202 Accepted's async-pending idiom.
           content:
             application/json:
               schema:
@@ -107,8 +109,11 @@ paths:
             schema:
               $ref: "#/components/schemas/IodTriggerRequest"
       responses:
-        "202":
-          description: IOD job accepted.
+        "200":
+          description: IOD job completed. This service runs the solve
+            synchronously within the request rather than queuing an async
+            job, so a successful trigger returns the actual outcome
+            directly rather than 202 Accepted's async-pending idiom.
           content:
             application/json:
               schema:
