@@ -95,13 +95,21 @@ class CorrelatedObservation:
     observer_position_eci: np.ndarray
     observer_velocity_eci: np.ndarray
     
-    # Detection metadata. Required by the detector-fed /detections path,
-    # absent for contract observations ingested via /v1/observations.
-    # Do not substitute defaults here (SCRUM-373): these are required by
-    # this dataclass, not by the correlation algorithm itself.
+    # Detection metadata. detection_id/confidence: required by the
+    # detector-fed /detections path, absent for contract observations
+    # ingested via /v1/observations. Do not substitute defaults here
+    # (SCRUM-373): these are required by this dataclass, not by the
+    # correlation algorithm itself.
     detection_id: Optional[UUID] = None
     confidence: Optional[float] = None
-    object_class: Optional[str] = None
+
+    # object_class: unlike detection_id/confidence, "Unknown" IS the true
+    # answer for a contract observation (no object_class field exists
+    # upstream in ObservationRecord), not a patch over a null. Defaulted
+    # here on the dataclass, not at individual call sites (John's review,
+    # SCRUM-373): a call site that omits this field cannot reintroduce a
+    # None flowing into add_observation()'s majority vote.
+    object_class: str = "Unknown"
 
     # Provenance: which door this record came through. Required going
     # forward per SCRUM-373/SCRUM-395 postmortem -- do not leave this as

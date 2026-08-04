@@ -519,13 +519,12 @@ async def ingest_v1_observations(request: ObservationIngestRequest):
                 dec_sigma=obs.dec_sigma_rad,
                 observer_position_eci=np.array(obs.observer_eci_m),
                 observer_velocity_eci=np.array(obs.observer_eci_m_s),
-                # "Unknown" is the true classification for a contract
-                # observation (no object_class field exists upstream), set
-                # at construction per John's call, rather than leaving None
-                # and patching the majority-vote logic in add_observation().
+                # object_class not set here: CorrelatedObservation defaults
+                # it to "Unknown" on the dataclass itself (John's review,
+                # SCRUM-373), so this call site can't omit it and silently
+                # reintroduce None into add_observation()'s majority vote.
                 # detection_id/confidence stay unset: no honest default
                 # exists for those the way "Unknown" is honest here.
-                object_class="Unknown",
                 ingest_path="v1_observations",
             )
             state.correlation_engine.correlate(corr_obs)
