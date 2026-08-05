@@ -32,6 +32,12 @@ RE_EARTH = 6378.137  # Earth equatorial radius (km)
 J2000_EPOCH = datetime(2000, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
 MAX_ACCEPTED_RMS_RESIDUAL_ARCSEC = 900.0
 MAX_ACCEPTED_TOTAL_RESIDUAL_ARCSEC = 1800.0
+RANGE_SEARCH_RANK_DEFICIENT_PREFIX = (
+    "Range-search IOD rejected rank-deficient line-of-sight geometry"
+)
+RANGE_SEARCH_WEAK_OBSERVABILITY_PREFIX = (
+    "Range-search IOD rejected weakly observable range geometry"
+)
 
 
 # =============================================================================
@@ -756,31 +762,50 @@ def range_search_iod(
     n_search: int = 150,
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], str]:
     """
-    Range search IOD for space-based observers.
+    Range-search IOD for space-based observers.
 
-    Searches over possible slant ranges to find a consistent orbital solution.
-    This version uses a finer initial grid plus two local zoom passes around
-    the best rho2 value. The physics is unchanged from the original range
-    search; only the search resolution is improved.
+    The coarse grid supplies an initial range triplet. A NumPy-only damped
+    least-squares step then refines rho1, rho2, and rho3 continuously against
+    the propagated endpoint line-of-sight residuals. This avoids locking the
+    endpoint ranges to the coarse 0.05 factor spacing.
+
+    Exactly rank-deficient LOS geometry is rejected because the current
+    three-observation formulation cannot identify a unique range scale in
+    that case.
 
     Args:
-        obs1, obs2, obs3: Three observations
-        mu: Gravitational parameter (km^3/s^2)
-        range_min, range_max: Search bounds for slant range (km)
-        n_search: Number of coarse search points for rho2
+        obs1, obs2, obs3: Three observations.
+        mu: Gravitational parameter (km^3/s^2).
+        range_min, range_max: Slant-range bounds (km).
+        n_search: Number of coarse search points for rho2.
 
     Returns:
-        (position_km, velocity_km_s, status_message) at obs2 epoch
+        (position_km, velocity_km_s, status_message) at obs2 epoch.
     """
-    R1 = obs1.observer_position_km
-    R2 = obs2.observer_position_km
-    R3 = obs3.observer_position_km
+    R1 = np.asarray(obs1.observer_position_km, dtype=float)
+    R2 = np.asarray(obs2.observer_position_km, dtype=float)
+    R3 = np.asarray(obs3.observer_position_km, dtype=float)
 
     L1 = obs1.line_of_sight
     L2 = obs2.line_of_sight
     L3 = obs3.line_of_sight
 
-    # Time intervals measured from obs1.
+    # The exact SCRUM-401 reproduction has linearly dependent LOS vectors and
+    # admits multiple zero-residual orbital scales. NumPy's matrix_rank uses a
+    # machine-precision tolerance; this is a numerical degeneracy check, not a
+    # mission-calibrated confidence threshold.
+    los_matrix = np.column_stack((L1, L2, L3))
+    los_rank = int(np.linalg.matrix_rank(los_matrix))
+    if los_rank < 3:
+        singular_values = np.linalg.svd(los_matrix, compute_uv=False)
+        singular_values_text = ", ".join(
+            f"{value:.3e}" for value in singular_values
+        )
+        return None, None, (
+            f"{RANGE_SEARCH_RANK_DEFICIENT_PREFIX} "
+            f"(rank={los_rank}, singular_values=[{singular_values_text}])"
+        )
+
     t1 = 0.0
     t2 = time_difference_seconds(obs1.timestamp, obs2.timestamp)
     t3 = time_difference_seconds(obs1.timestamp, obs3.timestamp)
@@ -788,113 +813,340 @@ def range_search_iod(
     if t3 < 1.0:
         return None, None, "Observations too close in time"
 
-    factor_pts = 31
-    zoom_passes = 2
+    # The factor grid is only an initializer; the returned ranges are refined
+    # continuously below and are not restricted to these factor values.
+    factor_pts = 11
+    arcsec_per_rad = 206265.0
+
+    def evaluate_ranges(
+        ranges_km: np.ndarray,
+    ) -> Optional[tuple[np.ndarray, np.ndarray, np.ndarray, float]]:
+        """Return state, vector residual, and scalar angular residual."""
+        if ranges_km.shape != (3,) or not np.all(np.isfinite(ranges_km)):
+            return None
+
+        rho1, rho2, rho3 = (float(value) for value in ranges_km)
+        if (
+            rho1 < range_min
+            or rho1 > range_max
+            or rho2 < range_min
+            or rho2 > range_max
+            or rho3 < range_min
+            or rho3 > range_max
+        ):
+            return None
+
+        r1 = R1 + rho1 * L1
+        r2 = R2 + rho2 * L2
+        r3 = R3 + rho3 * L3
+
+        r1_mag = norm(r1)
+        r2_mag = norm(r2)
+        r3_mag = norm(r3)
+        if min(r1_mag, r2_mag, r3_mag) < RE_EARTH + 100.0:
+            return None
+
+        v2 = herrick_gibbs_velocity(r1, r2, r3, t1, t2, t3, mu)
+        if not np.all(np.isfinite(v2)):
+            return None
+
+        v2_mag = norm(v2)
+        if v2_mag < 2.0 or v2_mag > 12.0:
+            return None
+
+        energy = v2_mag**2 / 2.0 - mu / r2_mag
+        if energy >= 0.0:
+            return None
+
+        semi_major_axis_km = -mu / (2.0 * energy)
+        if semi_major_axis_km < RE_EARTH + 100.0 or semi_major_axis_km > 100000.0:
+            return None
+
+        try:
+            r1_prop, _ = kepler_propagate(r2, v2, t1 - t2, mu)
+            r3_prop, _ = kepler_propagate(r2, v2, t3 - t2, mu)
+        except (OverflowError, ValueError, FloatingPointError):
+            return None
+
+        if not np.all(np.isfinite(r1_prop)) or not np.all(np.isfinite(r3_prop)):
+            return None
+
+        los1_pred = unit(r1_prop - R1)
+        los3_pred = unit(r3_prop - R3)
+
+        # Cartesian unit-vector differences provide a smooth residual vector
+        # for finite-difference least squares. Multiplication by arcsec/radian
+        # keeps the values in an interpretable numerical scale.
+        residual_vector = arcsec_per_rad * np.concatenate(
+            (los1_pred - L1, los3_pred - L3)
+        )
+
+        angular_error_1 = math.acos(
+            np.clip(np.dot(los1_pred, L1), -1.0, 1.0)
+        )
+        angular_error_3 = math.acos(
+            np.clip(np.dot(los3_pred, L3), -1.0, 1.0)
+        )
+        total_residual_arcsec = (
+            angular_error_1 + angular_error_3
+        ) * arcsec_per_rad
+
+        return r2, v2, residual_vector, total_residual_arcsec
 
     def search_window(
         rho2_min: float,
         rho2_max: float,
         rho2_points: int,
-    ) -> tuple[Optional[tuple[np.ndarray, np.ndarray]], float, Optional[float]]:
+    ) -> tuple[
+        Optional[tuple[np.ndarray, np.ndarray]],
+        float,
+        Optional[np.ndarray],
+    ]:
         best_solution: Optional[tuple[np.ndarray, np.ndarray]] = None
         best_residual = float("inf")
-        best_rho2: Optional[float] = None
+        best_ranges: Optional[np.ndarray] = None
+
+        rho1_factors = np.linspace(0.5, 2.0, factor_pts)
+        rho3_factors = np.linspace(0.5, 2.0, factor_pts)
 
         for rho2 in np.linspace(rho2_min, rho2_max, rho2_points):
-            r2 = R2 + rho2 * L2
-            r2_mag = norm(r2)
-
-            if r2_mag < RE_EARTH + 100:
-                continue
-
-            for rho1_factor in np.linspace(0.5, 2.0, factor_pts):
-                rho1 = rho2 * rho1_factor
-                r1 = R1 + rho1 * L1
-                r1_mag = norm(r1)
-
-                if r1_mag < RE_EARTH + 100:
+            for rho1_factor in rho1_factors:
+                rho1 = float(rho2 * rho1_factor)
+                if rho1 < range_min or rho1 > range_max:
                     continue
 
-                for rho3_factor in np.linspace(0.5, 2.0, factor_pts):
-                    rho3 = rho2 * rho3_factor
-                    r3 = R3 + rho3 * L3
-                    r3_mag = norm(r3)
-
-                    if r3_mag < RE_EARTH + 100:
+                for rho3_factor in rho3_factors:
+                    rho3 = float(rho2 * rho3_factor)
+                    if rho3 < range_min or rho3 > range_max:
                         continue
 
-                    v2 = herrick_gibbs_velocity(r1, r2, r3, t1, t2, t3, mu)
-                    v2_mag = norm(v2)
-
-                    if v2_mag < 2.0 or v2_mag > 12.0:
+                    ranges = np.array([rho1, rho2, rho3], dtype=float)
+                    evaluated = evaluate_ranges(ranges)
+                    if evaluated is None:
                         continue
 
-                    energy = v2_mag**2 / 2.0 - mu / r2_mag
-
-                    # Bound orbit only.
-                    if energy >= 0:
-                        continue
-
-                    a = -mu / (2.0 * energy)
-
-                    if a < RE_EARTH + 100 or a > 100000:
-                        continue
-
-                    try:
-                        r1_prop, _ = kepler_propagate(r2, v2, t1 - t2, mu)
-                        r3_prop, _ = kepler_propagate(r2, v2, t3 - t2, mu)
-                    except (OverflowError, ValueError, FloatingPointError):
-                        continue
-
-                    if not np.all(np.isfinite(r1_prop)) or not np.all(np.isfinite(r3_prop)):
-                        continue
-
-                    los1_pred = unit(r1_prop - R1)
-                    los3_pred = unit(r3_prop - R3)
-
-                    ang_err1 = math.acos(np.clip(np.dot(los1_pred, L1), -1.0, 1.0))
-                    ang_err3 = math.acos(np.clip(np.dot(los3_pred, L3), -1.0, 1.0))
-
-                    total_residual = (ang_err1 + ang_err3) * 206265.0
-
+                    r2, v2, _, total_residual = evaluated
                     if total_residual < best_residual:
                         best_residual = total_residual
                         best_solution = (r2.copy(), v2.copy())
-                        best_rho2 = float(rho2)
+                        best_ranges = ranges
 
-        return best_solution, best_residual, best_rho2
+        return best_solution, best_residual, best_ranges
 
-    best_solution, best_residual, best_rho2 = search_window(
+    def finite_difference_jacobian(
+        ranges_km: np.ndarray,
+        base_residual: np.ndarray,
+    ) -> Optional[np.ndarray]:
+        jacobian = np.zeros((base_residual.size, 3), dtype=float)
+
+        for column in range(3):
+            step_km = max(1.0e-3, abs(float(ranges_km[column])) * 1.0e-6)
+
+            plus = ranges_km.copy()
+            minus = ranges_km.copy()
+            plus[column] = min(range_max, plus[column] + step_km)
+            minus[column] = max(range_min, minus[column] - step_km)
+
+            plus_eval = evaluate_ranges(plus) if plus[column] != ranges_km[column] else None
+            minus_eval = evaluate_ranges(minus) if minus[column] != ranges_km[column] else None
+
+            if plus_eval is not None and minus_eval is not None:
+                denominator = plus[column] - minus[column]
+                jacobian[:, column] = (
+                    plus_eval[2] - minus_eval[2]
+                ) / denominator
+            elif plus_eval is not None:
+                denominator = plus[column] - ranges_km[column]
+                jacobian[:, column] = (
+                    plus_eval[2] - base_residual
+                ) / denominator
+            elif minus_eval is not None:
+                denominator = ranges_km[column] - minus[column]
+                jacobian[:, column] = (
+                    base_residual - minus_eval[2]
+                ) / denominator
+            else:
+                return None
+
+        if not np.all(np.isfinite(jacobian)):
+            return None
+        return jacobian
+
+    def refine_ranges(
+        initial_ranges_km: np.ndarray,
+        max_iterations: int = 60,
+    ) -> tuple[
+        Optional[tuple[np.ndarray, np.ndarray]],
+        float,
+        np.ndarray,
+        int,
+    ]:
+        """Damped Gauss-Newton refinement using NumPy only."""
+        ranges = np.clip(
+            np.asarray(initial_ranges_km, dtype=float),
+            range_min,
+            range_max,
+        )
+        evaluated = evaluate_ranges(ranges)
+        if evaluated is None:
+            return None, float("inf"), ranges, 0
+
+        damping = 1.0e-3
+        accepted_iterations = 0
+
+        for iteration in range(1, max_iterations + 1):
+            r2, v2, residual, total_residual = evaluated
+            cost = 0.5 * float(np.dot(residual, residual))
+
+            jacobian = finite_difference_jacobian(ranges, residual)
+            if jacobian is None:
+                break
+
+            # Solve in relative-range coordinates so rho values at different
+            # scales receive comparable steps.
+            parameter_scale = np.maximum(np.abs(ranges), 100.0)
+            scaled_jacobian = jacobian * parameter_scale[np.newaxis, :]
+            gradient = scaled_jacobian.T @ residual
+            normal_matrix = scaled_jacobian.T @ scaled_jacobian
+
+            accepted_step = False
+            for _ in range(12):
+                damped_matrix = normal_matrix + damping * np.eye(3)
+                try:
+                    scaled_step = np.linalg.solve(damped_matrix, -gradient)
+                except np.linalg.LinAlgError:
+                    scaled_step, *_ = np.linalg.lstsq(
+                        damped_matrix,
+                        -gradient,
+                        rcond=None,
+                    )
+
+                if not np.all(np.isfinite(scaled_step)):
+                    damping *= 10.0
+                    continue
+
+                scaled_step_norm = float(np.linalg.norm(scaled_step))
+                if scaled_step_norm > 0.5:
+                    scaled_step *= 0.5 / scaled_step_norm
+
+                trial_ranges = np.clip(
+                    ranges + parameter_scale * scaled_step,
+                    range_min,
+                    range_max,
+                )
+
+                if np.array_equal(trial_ranges, ranges):
+                    damping *= 10.0
+                    continue
+
+                trial_evaluated = evaluate_ranges(trial_ranges)
+                if trial_evaluated is None:
+                    damping *= 10.0
+                    continue
+
+                trial_residual = trial_evaluated[2]
+                trial_cost = 0.5 * float(
+                    np.dot(trial_residual, trial_residual)
+                )
+
+                if trial_cost < cost:
+                    ranges = trial_ranges
+                    evaluated = trial_evaluated
+                    damping = max(damping / 3.0, 1.0e-12)
+                    accepted_iterations = iteration
+                    accepted_step = True
+                    break
+
+                damping *= 10.0
+
+            if not accepted_step:
+                break
+
+            relative_step = float(
+                np.linalg.norm(parameter_scale * scaled_step)
+                / max(np.linalg.norm(ranges), 1.0)
+            )
+            relative_cost_reduction = (cost - trial_cost) / max(cost, 1.0)
+
+            if relative_step < 1.0e-10 or relative_cost_reduction < 1.0e-12:
+                break
+
+        final_r2, final_v2, _, final_total_residual = evaluated
+        return (
+            (final_r2, final_v2),
+            final_total_residual,
+            ranges,
+            accepted_iterations,
+        )
+
+    best_solution, best_residual, best_ranges = search_window(
         range_min,
         range_max,
         n_search,
     )
 
-    if best_solution is None or best_rho2 is None:
+    if best_solution is None or best_ranges is None:
         return None, None, "No valid solution found in range search"
 
-    span = (range_max - range_min) / max(n_search, 1)
+    refined_solution, refined_residual, refined_ranges, iterations = refine_ranges(
+        best_ranges
+    )
 
-    for _ in range(zoom_passes):
-        local_min = max(range_min, best_rho2 - 2.0 * span)
-        local_max = min(range_max, best_rho2 + 2.0 * span)
+    if refined_solution is not None and refined_residual < best_residual:
+        best_solution = refined_solution
+        best_residual = refined_residual
+        best_ranges = refined_ranges
 
-        zoom_solution, zoom_residual, zoom_rho2 = search_window(
-            local_min,
-            local_max,
-            80,
+    final_evaluated = evaluate_ranges(best_ranges)
+    if final_evaluated is None:
+        return None, None, "Continuous range refinement produced an invalid state"
+
+    final_jacobian = finite_difference_jacobian(
+        best_ranges,
+        final_evaluated[2],
+    )
+    if final_jacobian is None:
+        return None, None, (
+            f"{RANGE_SEARCH_WEAK_OBSERVABILITY_PREFIX}: "
+            "unable to evaluate the range-residual Jacobian"
         )
 
-        if (
-            zoom_solution is not None
-            and zoom_rho2 is not None
-            and zoom_residual < best_residual
-        ):
-            best_solution = zoom_solution
-            best_residual = zoom_residual
-            best_rho2 = zoom_rho2
+    jacobian_singular_values = np.linalg.svd(
+        final_jacobian,
+        compute_uv=False,
+    )
+    weakest_sensitivity_arcsec_per_km = float(
+        jacobian_singular_values[-1]
+    )
+    observation_sigma_arcsec = max(
+        float(obs1.ra_sigma),
+        float(obs1.dec_sigma),
+        float(obs2.ra_sigma),
+        float(obs2.dec_sigma),
+        float(obs3.ra_sigma),
+        float(obs3.dec_sigma),
+    ) * arcsec_per_rad
+    search_span_km = range_max - range_min
+    weakest_mode_sigma_km = (
+        observation_sigma_arcsec / weakest_sensitivity_arcsec_per_km
+        if weakest_sensitivity_arcsec_per_km > 0.0
+        else float("inf")
+    )
 
-        span = (local_max - local_min) / 80.0
+    # This is a structural observability check, not a mission confidence
+    # threshold: reject only when the linearized one-sigma weakest range mode
+    # is no more localized than the entire configured search interval.
+    if (
+        not np.isfinite(weakest_mode_sigma_km)
+        or weakest_mode_sigma_km >= search_span_km
+    ):
+        return None, None, (
+            f"{RANGE_SEARCH_WEAK_OBSERVABILITY_PREFIX} "
+            f"(weakest_mode_sigma={weakest_mode_sigma_km:.3g} km, "
+            f"search_span={search_span_km:.3g} km, "
+            f"jacobian_singular_values="
+            f"[{', '.join(f'{value:.3e}' for value in jacobian_singular_values)}])"
+        )
 
     if best_residual > MAX_ACCEPTED_TOTAL_RESIDUAL_ARCSEC:
         return None, None, (
@@ -906,9 +1158,11 @@ def range_search_iod(
     return (
         best_solution[0],
         best_solution[1],
-        f"Success refined range-search (residual: {best_residual:.1f} arcsec)",
+        "Success continuous range-search refinement "
+        f"(rho=[{best_ranges[0]:.3f}, {best_ranges[1]:.3f}, "
+        f"{best_ranges[2]:.3f}] km, residual={best_residual:.3f} arcsec, "
+        f"iterations={iterations})",
     )
-
 
 def double_r_iod(
     obs1: IODObservation,
@@ -1780,10 +2034,30 @@ class IODSolver:
                             })
 
             attempted_methods.append(attempt_record)
+            return attempt_record
 
         # Active committed optical IOD path.
         # range-search is currently the validated workhorse across LEO and HEO cases.
-        try_method("range-search", range_search_iod)
+        range_search_attempt = try_method("range-search", range_search_iod)
+
+        # A range-search observability failure is terminal. Do not replace it
+        # with the demo range fallback, which would manufacture a state without
+        # restoring the missing range information.
+        if str(range_search_attempt["status"]).startswith(
+            (
+                RANGE_SEARCH_RANK_DEFICIENT_PREFIX,
+                RANGE_SEARCH_WEAK_OBSERVABILITY_PREFIX,
+            )
+        ):
+            return IODSolution(
+                success=False,
+                track_id=track_id,
+                epoch=obs2.timestamp,
+                error_message=range_search_attempt["status"],
+                observations_used=3,
+                attempted_methods=attempted_methods,
+            )
+
         # gauss_iod, double_r_iod, and gooding_iod remain available as experimental
         # helpers, but are not active candidates until they pass multi-orbit validation.
 
