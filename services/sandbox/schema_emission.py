@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 import json
+import os
 
+import httpx
 import numpy as np
 
 from services.sandbox.observation_bundle import ObservationBundle
@@ -15,6 +17,18 @@ SCHEMA_VERSION = 1
 OBS_TYPE_ANGLES = "angles"
 OBS_QUALITY_NOMINAL = "nominal"
 TRACKER_RANGE_SIGMA_M = 50.0
+
+# Tracker connection (SCRUM-373 AC2). Matches services/detector/main.py's
+# TRACKER_HOST/TRACKER_PORT pattern for consistency. Default port 8000
+# confirmed against the Dockerfile (EXPOSE 8000), docker-compose.yaml
+# (8002:8000, container side 8000), and k8s/04-tracker.yaml
+# (containerPort/targetPort 8000) -- three independent sources agree.
+# Do not use openapi/tracker.yaml's documented server list (port 8070);
+# that does not match any real deployment config and is a separate,
+# already-flagged documentation gap, not the live port.
+TRACKER_HOST = os.getenv("TRACKER_HOST", "tracker")
+TRACKER_PORT = os.getenv("TRACKER_PORT", "8000")
+TRACKER_OBSERVATIONS_URL = f"http://{TRACKER_HOST}:{TRACKER_PORT}/v1/observations"
 
 
 @dataclass(frozen=True)
@@ -290,12 +304,83 @@ def bundle_to_tracker_ingest_request(
     }
 
 
+class TrackerIngestError(RuntimeError):
+    """
+    Raised when the sandbox fails to reach, or is rejected by, the live
+    tracker /v1/observations endpoint (SCRUM-373 AC2).
+    """
+
+
+@dataclass(frozen=True)
+class TrackerIngestResult:
+    accepted: bool
+    observation_count: int
+    observation_ids: tuple[str, ...]
+    status_code: int
+
+
+def push_observations_to_tracker(
+    bundle: ObservationBundle,
+    *,
+    source: str = "sandbox",
+    timeout_s: float = 5.0,
+) -> TrackerIngestResult:
+    """
+    Feed observations through the live tracker interface (SCRUM-373 AC2),
+    replacing file emission as the primary path. Reuses
+    bundle_to_tracker_ingest_request, the same contract-conforming
+    request body write_tracker_observations_json already wrote to disk,
+    so this is a transport change, not a new conversion.
+
+    Synchronous (httpx.Client, not AsyncClient): sensor_knowledge.py has
+    no event loop -- it's called from batch/offline sandbox tooling, not
+    a live async service, so detector/main.py's async fire-and-forget
+    pattern is not a fit here. Nothing is silently swallowed: connection
+    failures and non-200 responses both raise TrackerIngestError rather
+    than being logged and ignored, since a silent failure here would mean
+    a scenario run "succeeds" while producing no tracker data at all.
+    """
+    request_body = bundle_to_tracker_ingest_request(bundle, source=source)
+
+    try:
+        with httpx.Client(timeout=timeout_s) as client:
+            resp = client.post(TRACKER_OBSERVATIONS_URL, json=request_body)
+    except httpx.RequestError as e:
+        raise TrackerIngestError(
+            f"Failed to reach tracker at {TRACKER_OBSERVATIONS_URL}: {e}"
+        ) from e
+
+    if resp.status_code != 200:
+        raise TrackerIngestError(
+            f"Tracker rejected observation ingest "
+            f"({resp.status_code}) at {TRACKER_OBSERVATIONS_URL}: {resp.text}"
+        )
+
+    body = resp.json()
+    return TrackerIngestResult(
+        accepted=body["accepted"],
+        observation_count=body["observation_count"],
+        observation_ids=tuple(body["observation_ids"]),
+        status_code=resp.status_code,
+    )
+
+
 def write_tracker_observations_json(
     bundle: ObservationBundle,
     output_path: str | Path,
     *,
     source: str = "sandbox",
 ) -> TrackerObservationContractArtifact:
+    """
+    Write a contract-conforming observation ingest request to a JSON file.
+
+    DEPRECATED as the primary path (SCRUM-373 AC2): push_observations_to_
+    tracker feeds observations through the live /v1/observations
+    interface directly, which is now the primary path. This function is
+    kept working, unchanged, for offline debugging/dry-run use (e.g.
+    inspecting the exact request body without a running tracker), not
+    for production ingest.
+    """
     request_body = bundle_to_tracker_ingest_request(bundle, source=source)
 
     output_path = Path(output_path)

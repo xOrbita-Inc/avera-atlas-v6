@@ -41,9 +41,9 @@ info:
     and optional contextual metadata.
 
 servers:
-  - url: http://localhost:8070
+  - url: http://localhost:8000
     description: Local tracker service
-  - url: http://tracker:8070
+  - url: http://tracker:8000
     description: Docker-network tracker service
 
 paths:
