@@ -21,6 +21,7 @@ Approach:
 import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Optional, Tuple, List
 from uuid import UUID, uuid4
 import numpy as np
@@ -30,6 +31,8 @@ MU_EARTH = 3.986004418e14  # Earth gravitational parameter (m³/s²)
 MU_EARTH_KM = 3.986004418e5  # (km³/s²)
 RE_EARTH = 6378.137  # Earth equatorial radius (km)
 J2000_EPOCH = datetime(2000, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+# SCRUM-333 locked confidence floor. Changes require escalation to Minh.
+CONFIDENT_MAX_RMS_RESIDUAL_ARCSEC = 300.0
 MAX_ACCEPTED_RMS_RESIDUAL_ARCSEC = 900.0
 MAX_ACCEPTED_TOTAL_RESIDUAL_ARCSEC = 1800.0
 RANGE_SEARCH_RANK_DEFICIENT_PREFIX = (
@@ -43,6 +46,34 @@ RANGE_SEARCH_WEAK_OBSERVABILITY_PREFIX = (
 # =============================================================================
 # Data Structures
 # =============================================================================
+
+class IODConfidenceVerdict(str, Enum):
+    """MAF v2.0 section 7 fit-quality verdict."""
+
+    CONFIDENT = "CONFIDENT"
+    DEGRADED = "DEGRADED"
+    REJECTED = "REJECTED"
+
+
+def classify_iod_confidence(
+    rms_residual_arcsec: Optional[float],
+) -> IODConfidenceVerdict:
+    """Classify the locked SCRUM-333/SCRUM-376 RMS confidence bands."""
+    if (
+        rms_residual_arcsec is None
+        or not np.isfinite(rms_residual_arcsec)
+        or rms_residual_arcsec < 0.0
+    ):
+        return IODConfidenceVerdict.REJECTED
+
+    if rms_residual_arcsec <= CONFIDENT_MAX_RMS_RESIDUAL_ARCSEC:
+        return IODConfidenceVerdict.CONFIDENT
+
+    if rms_residual_arcsec <= MAX_ACCEPTED_RMS_RESIDUAL_ARCSEC:
+        return IODConfidenceVerdict.DEGRADED
+
+    return IODConfidenceVerdict.REJECTED
+
 
 @dataclass
 class IODObservation:
@@ -94,6 +125,7 @@ class IODSolution:
     
     # Quality metrics
     rms_residual_arcsec: Optional[float] = None
+    confidence_verdict: Optional[IODConfidenceVerdict] = None
     observations_used: int = 0
     iterations: int = 0
     method_used: Optional[str] = None
@@ -101,18 +133,41 @@ class IODSolution:
     
     # Error information
     error_message: Optional[str] = None
-    
+
+    @property
+    def proceeds_to_validity(self) -> bool:
+        """Whether the fit-quality gate permits evaluation by the validity gate."""
+        return (
+            self.success
+            and self.confidence_verdict == IODConfidenceVerdict.CONFIDENT
+        )
+
+    @property
+    def confidence_gate_blocks_autonomous_action(self) -> bool:
+        """Whether this confidence gate blocks autonomous action."""
+        return not self.proceeds_to_validity
+
     def to_dict(self) -> dict:
         result = {
             "success": self.success,
             "track_id": str(self.track_id),
             "epoch": self.epoch.isoformat(),
+            "rms_residual_arcsec": self.rms_residual_arcsec,
+            "confidence_verdict": (
+                self.confidence_verdict.value
+                if self.confidence_verdict is not None
+                else None
+            ),
+            "proceeds_to_validity": self.proceeds_to_validity,
+            "confidence_gate_blocks_autonomous_action": (
+                self.confidence_gate_blocks_autonomous_action
+            ),
             "observations_used": self.observations_used,
             "iterations": self.iterations,
             "method_used": self.method_used,
             "attempted_methods": self.attempted_methods or [],
         }
-        
+
         if self.success:
             result.update({
                 "position_km": self.position_km.tolist() if self.position_km is not None else None,
@@ -123,7 +178,6 @@ class IODSolution:
                 "raan_deg": self.raan_deg,
                 "arg_perigee_deg": self.arg_perigee_deg,
                 "true_anomaly_deg": self.true_anomaly_deg,
-                "rms_residual_arcsec": self.rms_residual_arcsec,
             })
         else:
             result["error_message"] = self.error_message
@@ -1502,15 +1556,41 @@ def range_angles_iod(
     epoch = ranged_obs[mid_idx].timestamp
     r_mid = positions[mid_idx]
 
-    # Use a finite-difference velocity over the full arc for stability.
-    t_first = ranged_obs[0].timestamp
-    t_last = ranged_obs[-1].timestamp
-    dt = time_difference_seconds(t_first, t_last)
+    # Estimate velocity at the same epoch as r_mid. The previous endpoint
+    # secant is centred near the temporal midpoint of the full arc, which can
+    # differ materially from the selected middle-observation epoch when the
+    # spacing is uneven (for example 0.0, 0.1, 10.0 seconds).
+    t_first = 0.0
+    t_mid = time_difference_seconds(
+        ranged_obs[0].timestamp,
+        ranged_obs[mid_idx].timestamp,
+    )
+    t_last = time_difference_seconds(
+        ranged_obs[0].timestamp,
+        ranged_obs[-1].timestamp,
+    )
 
-    if abs(dt) < 1e-9:
-        return None, None, None, "Range+angles observations have insufficient time separation"
+    if (
+        abs(t_mid - t_first) < 1e-9
+        or abs(t_last - t_mid) < 1e-9
+        or abs(t_last - t_first) < 1e-9
+    ):
+        return (
+            None,
+            None,
+            None,
+            "Range+angles observations have insufficient time separation",
+        )
 
-    v_mid = (positions[-1] - positions[0]) / dt
+    v_mid = herrick_gibbs_velocity(
+        positions[0],
+        r_mid,
+        positions[-1],
+        t_first,
+        t_mid,
+        t_last,
+        mu,
+    )
 
     r_mag = norm(r_mid)
     v_mag = norm(v_mid)
@@ -1904,13 +1984,52 @@ class IODSolver:
                 self.mu,
             )
 
+            confidence_verdict = classify_iod_confidence(rms_arcsec)
+            confidence_rejected = (
+                confidence_verdict == IODConfidenceVerdict.REJECTED
+            )
             attempted_methods[0].update({
+                "success": not confidence_rejected,
                 "rms_residual_arcsec": rms_arcsec,
+                "confidence_verdict": confidence_verdict.value,
+                "proceeds_to_validity": (
+                    confidence_verdict == IODConfidenceVerdict.CONFIDENT
+                ),
+                "confidence_gate_blocks_autonomous_action": (
+                    confidence_verdict != IODConfidenceVerdict.CONFIDENT
+                ),
                 "semi_major_axis_km": elements["semi_major_axis_km"],
                 "eccentricity": elements["eccentricity"],
                 "perigee_km": elements["perigee_km"],
                 "apogee_km": elements["apogee_km"],
             })
+
+            if confidence_rejected:
+                attempted_methods[0]["status"] = (
+                    f"{radar_status}; rejected: RMS residual too high "
+                    f"({rms_arcsec:.1f} arcsec > "
+                    f"{MAX_ACCEPTED_RMS_RESIDUAL_ARCSEC:.1f} arcsec)"
+                )
+                return IODSolution(
+                    success=False,
+                    track_id=track_id,
+                    epoch=radar_epoch,
+                    rms_residual_arcsec=rms_arcsec,
+                    confidence_verdict=confidence_verdict,
+                    observations_used=len(obs_sorted),
+                    iterations=1,
+                    method_used="range+angles",
+                    attempted_methods=attempted_methods,
+                    error_message=attempted_methods[0]["status"],
+                )
+
+            if confidence_verdict == IODConfidenceVerdict.DEGRADED:
+                attempted_methods[0]["status"] = (
+                    f"{radar_status}; degraded: RMS residual "
+                    f"{rms_arcsec:.1f} arcsec exceeds the "
+                    f"{CONFIDENT_MAX_RMS_RESIDUAL_ARCSEC:.1f} arcsec "
+                    "confidence floor"
+                )
 
             return IODSolution(
                 success=True,
@@ -1925,6 +2044,7 @@ class IODSolver:
                 arg_perigee_deg=elements["arg_perigee_deg"],
                 true_anomaly_deg=elements["true_anomaly_deg"],
                 rms_residual_arcsec=rms_arcsec,
+                confidence_verdict=confidence_verdict,
                 observations_used=len(obs_sorted),
                 iterations=1,
                 method_used="range+angles",
@@ -2006,23 +2126,49 @@ class IODSolver:
                             obs_sorted, r2_try, v2_try, obs2.timestamp
                         )
 
-                        if rms_try > MAX_ACCEPTED_RMS_RESIDUAL_ARCSEC:
+                        confidence_verdict = classify_iod_confidence(rms_try)
+                        physical_penalty = score_try - rms_try
+
+                        attempt_record["score"] = score_try
+                        attempt_record["base_score"] = rms_try
+                        attempt_record["physical_penalty"] = physical_penalty
+                        attempt_record["rms_residual_arcsec"] = rms_try
+                        attempt_record["confidence_verdict"] = (
+                            confidence_verdict.value
+                        )
+                        attempt_record["proceeds_to_validity"] = (
+                            confidence_verdict
+                            == IODConfidenceVerdict.CONFIDENT
+                        )
+                        attempt_record[
+                            "confidence_gate_blocks_autonomous_action"
+                        ] = (
+                            confidence_verdict
+                            != IODConfidenceVerdict.CONFIDENT
+                        )
+                        attempt_record["semi_major_axis_km"] = elements_try["semi_major_axis_km"]
+                        attempt_record["eccentricity"] = elements_try["eccentricity"]
+                        attempt_record["perigee_km"] = elements_try["perigee_km"]
+                        attempt_record["apogee_km"] = elements_try["apogee_km"]
+
+                        if confidence_verdict == IODConfidenceVerdict.REJECTED:
                             attempt_record["success"] = False
                             attempt_record["status"] = (
                                 f"{status_try}; rejected: RMS residual too high "
-                                f"({rms_try:.1f} arcsec > {MAX_ACCEPTED_RMS_RESIDUAL_ARCSEC:.1f} arcsec)"
+                                f"({rms_try:.1f} arcsec > "
+                                f"{MAX_ACCEPTED_RMS_RESIDUAL_ARCSEC:.1f} arcsec)"
                             )
                         else:
-                            physical_penalty = score_try - rms_try
-
-                            attempt_record["score"] = score_try
-                            attempt_record["base_score"] = rms_try
-                            attempt_record["physical_penalty"] = physical_penalty
-                            attempt_record["rms_residual_arcsec"] = rms_try
-                            attempt_record["semi_major_axis_km"] = elements_try["semi_major_axis_km"]
-                            attempt_record["eccentricity"] = elements_try["eccentricity"]
-                            attempt_record["perigee_km"] = elements_try["perigee_km"]
-                            attempt_record["apogee_km"] = elements_try["apogee_km"]
+                            if (
+                                confidence_verdict
+                                == IODConfidenceVerdict.DEGRADED
+                            ):
+                                attempt_record["status"] = (
+                                    f"{status_try}; degraded: RMS residual "
+                                    f"{rms_try:.1f} arcsec exceeds the "
+                                    f"{CONFIDENT_MAX_RMS_RESIDUAL_ARCSEC:.1f} "
+                                    "arcsec confidence floor"
+                                )
 
                             candidates.append({
                                 "method": method_name,
@@ -2030,6 +2176,7 @@ class IODSolver:
                                 "v2": v2_try,
                                 "score": score_try,
                                 "rms_arcsec": rms_try,
+                                "confidence_verdict": confidence_verdict,
                                 "elements": elements_try,
                             })
 
@@ -2122,27 +2269,91 @@ class IODSolver:
                         )
                         physical_penalty = score_try - rms_try
 
+                        confidence_verdict = classify_iod_confidence(rms_try)
+
                         fallback_record["score"] = score_try
                         fallback_record["base_score"] = rms_try
                         fallback_record["physical_penalty"] = physical_penalty
                         fallback_record["rms_residual_arcsec"] = rms_try
+                        fallback_record["confidence_verdict"] = (
+                            confidence_verdict.value
+                        )
+                        fallback_record["proceeds_to_validity"] = (
+                            confidence_verdict
+                            == IODConfidenceVerdict.CONFIDENT
+                        )
+                        fallback_record[
+                            "confidence_gate_blocks_autonomous_action"
+                        ] = (
+                            confidence_verdict
+                            != IODConfidenceVerdict.CONFIDENT
+                        )
                         fallback_record["semi_major_axis_km"] = elements_try["semi_major_axis_km"]
                         fallback_record["eccentricity"] = elements_try["eccentricity"]
                         fallback_record["perigee_km"] = elements_try["perigee_km"]
                         fallback_record["apogee_km"] = elements_try["apogee_km"]
 
-                        candidates.append({
-                            "method": "estimate_orbit_from_directions",
-                            "r2": r2,
-                            "v2": v2,
-                            "score": score_try,
-                            "rms_arcsec": rms_try,
-                            "elements": elements_try,
-                        })
+                        if confidence_verdict == IODConfidenceVerdict.REJECTED:
+                            fallback_record["success"] = False
+                            fallback_record["status"] = (
+                                f"{status}; rejected: RMS residual too high "
+                                f"({rms_try:.1f} arcsec > "
+                                f"{MAX_ACCEPTED_RMS_RESIDUAL_ARCSEC:.1f} arcsec)"
+                            )
+                        else:
+                            if (
+                                confidence_verdict
+                                == IODConfidenceVerdict.DEGRADED
+                            ):
+                                fallback_record["status"] = (
+                                    f"{status}; degraded: RMS residual "
+                                    f"{rms_try:.1f} arcsec exceeds the "
+                                    f"{CONFIDENT_MAX_RMS_RESIDUAL_ARCSEC:.1f} "
+                                    "arcsec confidence floor"
+                                )
+
+                            candidates.append({
+                                "method": "estimate_orbit_from_directions",
+                                "r2": r2,
+                                "v2": v2,
+                                "score": score_try,
+                                "rms_arcsec": rms_try,
+                                "confidence_verdict": confidence_verdict,
+                                "elements": elements_try,
+                            })
 
             attempted_methods.append(fallback_record)
 
         if not candidates:
+            confidence_rejections = [
+                record
+                for record in attempted_methods
+                if (
+                    record.get("confidence_verdict")
+                    == IODConfidenceVerdict.REJECTED.value
+                    and record.get("rms_residual_arcsec") is not None
+                    and np.isfinite(record["rms_residual_arcsec"])
+                )
+            ]
+            if confidence_rejections:
+                best_rejection = min(
+                    confidence_rejections,
+                    key=lambda record: record["rms_residual_arcsec"],
+                )
+                return IODSolution(
+                    success=False,
+                    track_id=track_id,
+                    epoch=obs2.timestamp,
+                    rms_residual_arcsec=best_rejection[
+                        "rms_residual_arcsec"
+                    ],
+                    confidence_verdict=IODConfidenceVerdict.REJECTED,
+                    error_message=best_rejection["status"],
+                    observations_used=3,
+                    method_used=best_rejection["method"],
+                    attempted_methods=attempted_methods,
+                )
+
             return IODSolution(
                 success=False,
                 track_id=track_id,
@@ -2158,6 +2369,7 @@ class IODSolver:
         method_used = best["method"]
         elements = best["elements"]
         rms_arcsec = best["rms_arcsec"]
+        confidence_verdict = best["confidence_verdict"]
         
         # Check velocity reasonableness
         v2_mag = norm(v2)
@@ -2219,6 +2431,7 @@ class IODSolver:
             arg_perigee_deg=elements["arg_perigee_deg"],
             true_anomaly_deg=elements["true_anomaly_deg"],
             rms_residual_arcsec=rms_arcsec,
+            confidence_verdict=confidence_verdict,
             observations_used=len(obs_sorted),
             iterations=1,
             method_used=method_used,

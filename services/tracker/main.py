@@ -716,6 +716,7 @@ async def attempt_iod(uct_id: str):
             "error": solution.error_message,
             "observation_count": uct.observation_count,
             "arc_length_deg": uct.arc_length_deg,
+            "solution": solution.to_dict(),
         }
     
     # Success! Create track from solution
@@ -738,6 +739,15 @@ async def attempt_iod(uct_id: str):
         "arg_perigee_deg": solution.arg_perigee_deg,
         "true_anomaly_deg": solution.true_anomaly_deg,
         "rms_residual_arcsec": solution.rms_residual_arcsec,
+        "iod_confidence_verdict": (
+            solution.confidence_verdict.value
+            if solution.confidence_verdict is not None
+            else None
+        ),
+        "iod_proceeds_to_validity": solution.proceeds_to_validity,
+        "iod_confidence_gate_blocks_autonomous_action": (
+            solution.confidence_gate_blocks_autonomous_action
+        ),
         "observations_used": solution.observations_used,
         "sensors": list(uct.sensor_ids),
         "created_at": datetime.now(timezone.utc).isoformat(),
