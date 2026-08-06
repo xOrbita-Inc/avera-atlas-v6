@@ -7,7 +7,6 @@ from pathlib import Path
 from uuid import uuid4
 
 import numpy as np
-import pytest
 
 TRACKER_ROOT = Path(__file__).resolve().parents[1]
 if str(TRACKER_ROOT) not in sys.path:
@@ -79,6 +78,23 @@ def _circular_state_at_elapsed_time(
         radius_km=radius_km,
         phase_rad=phase_rad + mean_motion_rad_s * elapsed_seconds,
     )
+
+
+def _rotate_about_x(
+    vector: np.ndarray,
+    inclination_rad: float,
+) -> np.ndarray:
+    cosine = math.cos(inclination_rad)
+    sine = math.sin(inclination_rad)
+    rotation = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, cosine, -sine],
+            [0.0, sine, cosine],
+        ],
+        dtype=np.float64,
+    )
+    return rotation @ np.asarray(vector, dtype=np.float64)
 
 
 def _assert_solution_matches_truth(
@@ -321,13 +337,6 @@ def test_iod_solver_selects_range_angles_when_all_observations_are_ranged() -> N
         truth_velocity_km_s=truth_v,
     )
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "SCRUM-401: angles-only range-search reports success with an "
-        "approximately 11% orbital scale error"
-    ),
-)
 def test_iod_solver_uses_angles_only_dispatch_when_ranges_are_absent() -> None:
     host_r0, _ = _circular_state(phase_rad=0.0)
     debris_r0 = host_r0 + np.array(
@@ -374,8 +383,124 @@ def test_iod_solver_uses_angles_only_dispatch_when_ranges_are_absent() -> None:
         initial_position_km=debris_r0,
         elapsed_seconds=truth_elapsed_seconds,
     )
+
+    # SCRUM-401 permits either a truth-accurate state or an honest rejection.
+    # This fixture is constructed with all three LOS vectors in the equatorial
+    # plane, and therefore has rank-deficient angles-only geometry.
+    if solution.success:
+        _assert_solution_matches_truth(
+            solution=solution,
+            truth_position_km=truth_r,
+            truth_velocity_km_s=truth_v,
+        )
+    else:
+        assert solution.error_message is not None
+        assert "rank-deficient line-of-sight geometry" in solution.error_message
+        assert "estimate_orbit_from_directions" not in attempted_methods
+
+def test_angles_only_range_search_refines_observable_three_range_solution() -> None:
+    host_r0, _ = _circular_state(phase_rad=0.0)
+    debris_r0 = host_r0 + np.array(
+        [0.0, 900.0, 0.0],
+        dtype=np.float64,
+    )
+    inclination_rad = math.radians(1.0)
+
+    observations = []
+    truth_states = []
+    for t_seconds in [0.0, 300.0, 600.0]:
+        host_r, host_v = _circular_state_at_elapsed_time(
+            initial_position_km=host_r0,
+            elapsed_seconds=t_seconds,
+        )
+        debris_r_equatorial, debris_v_equatorial = (
+            _circular_state_at_elapsed_time(
+                initial_position_km=debris_r0,
+                elapsed_seconds=t_seconds,
+            )
+        )
+        debris_r = _rotate_about_x(
+            debris_r_equatorial,
+            inclination_rad,
+        )
+        debris_v = _rotate_about_x(
+            debris_v_equatorial,
+            inclination_rad,
+        )
+        truth_states.append((debris_r, debris_v))
+        observations.append(
+            _make_iod_observation(
+                timestamp=EPOCH + timedelta(seconds=t_seconds),
+                observer_position_km=host_r,
+                observer_velocity_km_s=host_v,
+                target_position_km=debris_r,
+                include_range=False,
+            )
+        )
+
+    solution = IODSolver().solve(
+        observations=observations,
+        track_id=uuid4(),
+    )
+
+    attempted_methods = [
+        attempt["method"]
+        for attempt in (solution.attempted_methods or [])
+    ]
+    assert attempted_methods[0] == "range-search"
+    assert solution.method_used == "range-search"
+
+    truth_r, truth_v = truth_states[1]
     _assert_solution_matches_truth(
         solution=solution,
         truth_position_km=truth_r,
         truth_velocity_km_s=truth_v,
     )
+
+
+
+def test_angles_only_range_search_rejects_near_coplanar_weak_observability() -> None:
+    host_r0, _ = _circular_state(phase_rad=0.0)
+    debris_r0 = host_r0 + np.array(
+        [0.0, 900.0, 0.0],
+        dtype=np.float64,
+    )
+
+    observations = []
+    for t_seconds in [0.0, 300.0, 600.0]:
+        host_r, host_v = _circular_state_at_elapsed_time(
+            initial_position_km=host_r0,
+            elapsed_seconds=t_seconds,
+        )
+        debris_r, _ = _circular_state_at_elapsed_time(
+            initial_position_km=debris_r0,
+            elapsed_seconds=t_seconds,
+        )
+        observations.append(
+            _make_iod_observation(
+                timestamp=EPOCH + timedelta(seconds=t_seconds),
+                observer_position_km=host_r,
+                observer_velocity_km_s=host_v,
+                target_position_km=debris_r,
+                include_range=False,
+            )
+        )
+
+    # Construct a technically full-rank but still near-coplanar case by
+    # perturbing the middle declination by one stated measurement sigma.
+    observations[1].dec += observations[1].dec_sigma
+
+    solution = IODSolver().solve(
+        observations=observations,
+        track_id=uuid4(),
+    )
+
+    attempted_methods = [
+        attempt["method"]
+        for attempt in (solution.attempted_methods or [])
+    ]
+    assert solution.success is False
+    assert solution.error_message is not None
+    assert "weakly observable range geometry" in solution.error_message
+    assert "range-search" in attempted_methods
+    assert "estimate_orbit_from_directions" not in attempted_methods
