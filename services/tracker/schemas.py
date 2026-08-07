@@ -6,8 +6,8 @@ These define the OpenAPI contract for the tracker service.
 """
 
 from datetime import datetime
-from typing import Optional
-from pydantic import BaseModel, Field
+from typing import Optional, Literal
+from pydantic import BaseModel, Field, model_validator
 from enum import Enum
 
 
@@ -293,3 +293,187 @@ class ErrorResponse(BaseModel):
     error: str
     detail: str
     timestamp: datetime
+
+
+class TrackerErrorResponse(BaseModel):
+    """
+    Contract-conforming error response for /v1/observations and /v1/iod.
+
+    Matches tracker.yaml's ErrorResponse schema exactly. That schema sets
+    additionalProperties: false, so no other fields (e.g. detail, timestamp,
+    request_id) may be added here without a corresponding contract change.
+    """
+    error: str = Field(..., description="Human-readable error message.")
+
+    class Config:
+        extra = "forbid"
+        json_schema_extra = {
+            "example": {
+                "error": "Invalid observation ingest request."
+            }
+        }
+
+
+# =============================================================================
+# Published Contract Schemas (openapi/tracker.yaml) -- SCRUM-373
+#
+# These mirror the tracker.yaml contract field-for-field, including
+# additionalProperties: false (extra = "forbid"). Do not add fields here
+# that are not in the published contract; that defeats the point of this
+# ticket, which is to make the contract the actual served interface.
+# =============================================================================
+
+class FilePayloadReference(BaseModel):
+    """
+    Path reference for a large observation payload (AVERA Data Reader
+    pattern). Do not use base64 payloads.
+    """
+    path: str = Field(..., description="Path or URI to the payload artifact.")
+    format: Literal["json", "jsonl"] = Field(..., description="Published payload encoding.")
+    sha256: Optional[str] = Field(None, description="Optional SHA-256 digest for payload integrity checks.")
+
+    class Config:
+        extra = "forbid"
+
+
+class ObservationRecord(BaseModel):
+    """
+    Sensor-facing observation record for tracker observation ingest and IOD
+    triggering. Sensor-facing only: must not carry truth state, future
+    debris state, simulation objects, snapshots, or other god-view fields
+    (SCRUM-292 sensor-knowledge isolation).
+
+    Units are SI throughout: range in meters, observer ECI state in meters
+    and meters/second, angles in radians. timestamp_utc is the canonical
+    temporal field; t_seconds is sandbox-relative convenience only.
+
+    Measurement fields are optional at the schema level to support multiple
+    sensor types. The tracker (not this schema) is responsible for requiring
+    ra_rad/dec_rad/observer state before treating a record as usable for
+    correlation or IOD -- see main.py's ingest_observations.
+    """
+    observation_id: str
+    sensor_id: str
+    target_id: str
+    timestamp_utc: datetime
+    detected: bool
+
+    t_seconds: Optional[float] = None
+    reason: Optional[str] = None
+
+    ra_rad: Optional[float] = None
+    dec_rad: Optional[float] = None
+    ra_sigma_rad: Optional[float] = None
+    dec_sigma_rad: Optional[float] = None
+    ra_rate_rad_s: Optional[float] = None
+    dec_rate_rad_s: Optional[float] = None
+
+    range_m: Optional[float] = None
+    range_sigma_m: Optional[float] = None
+    range_rate_m_s: Optional[float] = None
+
+    observer_eci_m: Optional[list[float]] = Field(None, min_length=3, max_length=3)
+    observer_eci_m_s: Optional[list[float]] = Field(None, min_length=3, max_length=3)
+
+    off_boresight_deg: Optional[float] = None
+    sunlit: Optional[bool] = None
+    earth_limb_blocked: Optional[bool] = None
+    sensor_mode: Optional[str] = None
+    source: Optional[str] = None
+
+    class Config:
+        extra = "forbid"
+        json_schema_extra = {
+            "example": {
+                "observation_id": "obs-host_001-debris_001-000000000000-000000",
+                "sensor_id": "host_001",
+                "target_id": "debris_001",
+                "timestamp_utc": "2026-01-01T00:00:00Z",
+                "detected": True,
+                "ra_rad": 2.897,
+                "dec_rad": 0.279,
+                "observer_eci_m": [6778000.0, 0.0, 0.0],
+                "observer_eci_m_s": [0.0, 7668.0, 0.0],
+                "sensor_mode": "optical_angles",
+                "source": "sandbox",
+            }
+        }
+
+
+class ObservationIngestRequest(BaseModel):
+    """
+    Observation ingest request. Use `observations` for the normal inline
+    JSON path. Use `payload_ref` only for genuinely large artifacts passed
+    by path reference.
+    """
+    observations: Optional[list[ObservationRecord]] = None
+    payload_ref: Optional[FilePayloadReference] = None
+
+    class Config:
+        extra = "forbid"
+
+    @model_validator(mode="after")
+    def check_one_of(self):
+        if not self.observations and not self.payload_ref:
+            raise ValueError("Either 'observations' or 'payload_ref' is required.")
+        return self
+
+
+class ObservationIngestResponse(BaseModel):
+    """Response for a successful /v1/observations ingest call."""
+    accepted: bool
+    observation_count: int = Field(..., ge=0)
+    observation_ids: list[str]
+
+    class Config:
+        extra = "forbid"
+
+
+class IodTriggerRequest(BaseModel):
+    """
+    Request to trigger initial orbit determination.
+
+    Callers may reference observations already ingested by tracker
+    (observation_ids, looked up against the store populated by
+    /v1/observations), or pass inline observations conforming to
+    ObservationRecord.
+
+    `solver` is rejected with a 400 if provided (John's AC5 review), not
+    silently accepted-and-ignored: IODSolver.solve() auto-selects
+    range+angles vs angles-only internally based on which observations
+    carry range data, and has no method-override parameter. There is
+    also a safety reason -- SCRUM-338 found the angles-only chain returns
+    a solution ~11% wrong in scale on noiseless data, so offering it by
+    name would invite a caller to select a method known to be broken.
+    See main.py's trigger_v1_iod.
+    """
+    observation_ids: Optional[list[str]] = None
+    observations: Optional[list[ObservationRecord]] = None
+    solver: Optional[Literal["range+angles", "angles-only"]] = None
+
+    class Config:
+        extra = "forbid"
+
+    @model_validator(mode="after")
+    def check_one_of(self):
+        if not self.observation_ids and not self.observations:
+            raise ValueError("Either 'observation_ids' or 'observations' is required.")
+        return self
+
+
+class IodTriggerResponse(BaseModel):
+    """
+    Response for an IOD trigger request.
+
+    This implementation runs the solve synchronously within the request
+    (see main.py), it does not queue an async job. `status` reflects the
+    actual outcome ("succeeded"/"failed: ...") once the response returns.
+    tracker.yaml's status description and example were updated to match
+    this (John's AC5 review), so this is no longer a contract divergence.
+    """
+    accepted: bool
+    iod_job_id: str
+    status: Optional[str] = None
+
+    class Config:
+        extra = "forbid"

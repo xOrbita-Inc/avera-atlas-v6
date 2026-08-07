@@ -432,6 +432,14 @@ docker build -f services/sandbox/Dockerfile -t avera-sandbox-scrum-294 .
 docker run --rm avera-sandbox-scrum-294
 ```
 
+Note (SCRUM-373 AC2): `tests/test_feed_integration.py` stands up the real
+tracker app to verify the live feed end to end, so it needs tracker's own
+dependencies (fastapi, pydantic, uvicorn) importable, not just sandbox's.
+The sandbox container above only installs pytest/numpy/httpx and cannot
+run that test; it runs as part of the full repository gate (`python -m
+pytest` from repo root), where every service's dependencies are already
+available in one environment.
+
 Latest validation:
 
 ```text

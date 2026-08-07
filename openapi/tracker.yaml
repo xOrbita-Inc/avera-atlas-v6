@@ -41,9 +41,9 @@ info:
     and optional contextual metadata.
 
 servers:
-  - url: http://localhost:8070
+  - url: http://localhost:8000
     description: Local tracker service
-  - url: http://tracker:8070
+  - url: http://tracker:8000
     description: Docker-network tracker service
 
 paths:
@@ -76,8 +76,10 @@ paths:
             schema:
               $ref: "#/components/schemas/ObservationIngestRequest"
       responses:
-        "202":
-          description: Observation records accepted for tracker ingest.
+        "200":
+          description: Observation records ingested by tracker. This service
+            runs synchronously, so a successful ingest returns the actual
+            result directly rather than 202 Accepted's async-pending idiom.
           content:
             application/json:
               schema:
@@ -107,8 +109,11 @@ paths:
             schema:
               $ref: "#/components/schemas/IodTriggerRequest"
       responses:
-        "202":
-          description: IOD job accepted.
+        "200":
+          description: IOD job completed. This service runs the solve
+            synchronously within the request rather than queuing an async
+            job, so a successful trigger returns the actual outcome
+            directly rather than 202 Accepted's async-pending idiom.
           content:
             application/json:
               schema:
@@ -133,7 +138,9 @@ components:
       properties:
         observations:
           type: array
-          description: Inline observation records.
+          description: Inline observation records. An empty array is a no-op
+            request and is rejected; at least one observation is required.
+          minItems: 1
           items:
             $ref: "#/components/schemas/ObservationRecord"
         payload_ref:
@@ -342,12 +349,18 @@ components:
       properties:
         observation_ids:
           type: array
-          description: Observation IDs already ingested into tracker.
+          description: Observation IDs already ingested into tracker. An
+            empty array is a no-op request and is rejected; at least one ID
+            is required.
+          minItems: 1
           items:
             type: string
         observations:
           type: array
-          description: Inline observations to ingest and use for this IOD job.
+          description: Inline observations to ingest and use for this IOD
+            job. An empty array is a no-op request and is rejected; at
+            least one observation is required.
+          minItems: 1
           items:
             $ref: "#/components/schemas/ObservationRecord"
         solver:
@@ -379,8 +392,14 @@ components:
         status:
           type: string
           nullable: true
-          description: Optional job status.
-          example: queued
+          description: |
+            Outcome status. This service runs IOD synchronously within the
+            request rather than queuing an async job, so status reflects
+            the actual outcome ("succeeded" or "failed: <reason>") once
+            the response is returned, not a pending/queued state. accepted
+            and iod_job_id are still present so an async mode remains
+            possible without a breaking change later.
+          example: succeeded
       additionalProperties: false
 
     HealthResponse:
