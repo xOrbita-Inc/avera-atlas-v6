@@ -11,6 +11,11 @@ against the closed form, and asserts the two properties that make the
 substitution impossible to repeat: the units, and the fact that it is not
 Phi_rr.
 
+SCRUM-378: cw_phi_rv is now a thin wrapper around aps_math.frames.cw_phi_full.
+MU_EARTH moved with it, so this file imports MU_EARTH from aps_math.frames
+instead of avoid.decision_model. Every assertion below is unchanged; only
+the import line moved.
+
 Run with (from repo root -- conftest.py handles PYTHONPATH):
     python -m pytest services/planner/tests/test_cw_phi_rv.py -v
 """
@@ -22,7 +27,8 @@ import math
 import numpy as np
 import pytest
 
-from avoid.decision_model import MU_EARTH, cw_phi_rv
+from aps_math.frames import MU_EARTH
+from avoid.decision_model import cw_phi_rv
 
 
 A_KM = 6378.137 + 550.0      # 550 km circular LEO

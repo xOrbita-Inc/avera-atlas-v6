@@ -34,9 +34,119 @@ matching cw_phi_rv and the CDM covariance layout.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
-__all__ = ["rtn_to_eci_rotation", "rotate_cw_block"]
+__all__ = [
+    "MU_EARTH",
+    "cw_phi_full",
+    "rtn_to_eci_rotation",
+    "rotate_cw_block",
+]
+
+# WGS84 Earth gravitational parameter, km^3/s^2.
+#
+# SCRUM-378: consolidated here from services/planner/avoid/decision_model.py,
+# which defined its own copy used only inside cw_phi_rv. decision_model.py
+# now imports this one rather than carrying a second definition; see
+# cw_phi_full's docstring for the consolidation this is part of.
+MU_EARTH: float = 398600.4418
+
+
+def cw_phi_full(a_km: float, dt_s: float) -> np.ndarray:
+    """
+    Full 6x6 Clohessy-Wiltshire state transition matrix Phi(tau, t0) for a
+    circular reference orbit. RTN ordering, state = [r_R, r_T, r_N, v_R,
+    v_T, v_N].
+
+    SCRUM-378. Built for the observability Gramian, which needs the state
+    transition of the full 6-state, not just the delta-v-to-delta-r mapping
+    a single block provides.
+
+    services/planner/avoid/decision_model.py::cw_phi_rv is now a thin
+    wrapper returning this function's rv block: one closed-form
+    implementation, not two copies of safety-relevant numerics. Same
+    consolidation as the frames unification in SCRUM-397 and pc_utils in
+    SCRUM-388 -- an independent copy guarded by a test is still the
+    two-copies failure this package exists to prevent.
+    services/planner/tests/test_cw_phi_rv.py is unchanged apart from
+    importing MU_EARTH from here instead of decision_model.py, and
+    continues to guard the rv block's behaviour directly against an
+    independent closed form.
+
+    Closed form (Clohessy-Wiltshire, RTN ordering, n = orbital mean motion,
+    omega = sqrt(mu / a^3)). Reference: Clohessy & Wiltshire (1960);
+    Vallado, Fundamentals of Astrodynamics and Applications, Sec 6.7.
+
+        Phi_rr = [[ 4 - 3cos(nt),      0,  0        ],
+                  [ 6(sin(nt) - nt),   1,  0        ],
+                  [ 0,                 0,  cos(nt)  ]]
+
+        Phi_rv = [[  sin(nt)/n,        2(1 - cos(nt))/n,      0          ],
+                  [ -2(1 - cos(nt))/n, (4 sin(nt) - 3nt)/n,   0          ],
+                  [  0,                0,                     sin(nt)/n  ]]
+
+        Phi_vr = [[  3n sin(nt),         0,  0            ],
+                  [ -6n(1 - cos(nt)),    0,  0            ],
+                  [  0,                  0,  -n sin(nt)   ]]
+
+        Phi_vv = [[ cos(nt),     2 sin(nt),      0       ],
+                  [ -2 sin(nt),  4 cos(nt) - 3,  0       ],
+                  [ 0,           0,              cos(nt) ]]
+
+    Returns the 6x6 matrix in RTN. As with any CW block, rotate to ECI once
+    via rotate_cw_block rather than rotating pieces separately and
+    recombining -- see that function's own docstring for why.
+    """
+    if a_km <= 0:
+        raise ValueError("a_km must be > 0")
+    omega = math.sqrt(MU_EARTH / (a_km ** 3))
+    c = math.cos(omega * dt_s)
+    s = math.sin(omega * dt_s)
+
+    phi_rr = np.array(
+        [
+            [4.0 - 3.0 * c, 0.0, 0.0],
+            [6.0 * (s - omega * dt_s), 1.0, 0.0],
+            [0.0, 0.0, c],
+        ],
+        dtype=float,
+    )
+
+    phi_rv = np.array(
+        [
+            [s / omega, 2.0 * (1.0 - c) / omega, 0.0],
+            [-2.0 * (1.0 - c) / omega, (4.0 * s - 3.0 * omega * dt_s) / omega, 0.0],
+            [0.0, 0.0, s / omega],
+        ],
+        dtype=float,
+    )
+
+    phi_vr = np.array(
+        [
+            [3.0 * omega * s, 0.0, 0.0],
+            [-6.0 * omega * (1.0 - c), 0.0, 0.0],
+            [0.0, 0.0, -omega * s],
+        ],
+        dtype=float,
+    )
+
+    phi_vv = np.array(
+        [
+            [c, 2.0 * s, 0.0],
+            [-2.0 * s, 4.0 * c - 3.0, 0.0],
+            [0.0, 0.0, c],
+        ],
+        dtype=float,
+    )
+
+    phi = np.zeros((6, 6), dtype=float)
+    phi[0:3, 0:3] = phi_rr
+    phi[0:3, 3:6] = phi_rv
+    phi[3:6, 0:3] = phi_vr
+    phi[3:6, 3:6] = phi_vv
+    return phi
 
 
 def rtn_to_eci_rotation(r_km: np.ndarray, v_km_s: np.ndarray) -> np.ndarray:
