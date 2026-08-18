@@ -36,6 +36,7 @@ from common.operator_policy import OperatorPolicy, ScoringWeights
 from common.maneuver_scorer import score_maneuver_candidates
 from avoid.decision_model import compute_q_exec_km2, cw_phi_rv
 from common.constellation_geometry import _mean_motion_to_sma_km
+from aps_math import frames
 
 
 # ---------------------------------------------------------------------------
@@ -241,15 +242,34 @@ class TestExecutionErrorScoringIntegration:
         """Regression guard: with no execution-error parameters, m2_post
         must be numerically identical to a plain Mahalanobis calculation
         against the raw p_rel_km2 alone (Q_exec truly zero, not just
-        small) -- confirms AC1 exactly, not approximately."""
-        from avoid.decision_model import mahalanobis_sq, cw_phi_rv as cw
+        small) -- confirms AC1 exactly, not approximately.
+
+        SCRUM-409: the reference r_post must be recomputed with the same
+        two-epoch rotation the production scorer now applies (burn-epoch
+        rotation for the input, TCA-epoch rotation for the output), not
+        the raw RTN block applied to an ECI vector with no rotation at
+        all -- that mismatch, not a Q_exec problem, is what broke this
+        test after the SCRUM-409 fix landed. This test's job is AC1
+        (does Q_exec zero out exactly), not physical correctness of
+        r_post itself, so matching production's own formula here is the
+        right oracle, not true two-body truth -- see
+        test_frames.py for the test that checks correctness against
+        physics.
+        """
+        from avoid.decision_model import mahalanobis_sq
         cap = self._make_cap()
         result = self._score(cap, policy)
 
         # Recompute the expected value directly, independent of the
         # scorer's internals, using the same real burn direction/dt it
-        # would have chosen (the result tells us which one won).
-        phi_rv = cw(cap.a_ref_km, 4 * 3600.0)  # 4 hr: T_BURN to T_CA
+        # would have chosen (the result tells us which one won), and the
+        # same two-epoch rotation maneuver_scorer.py itself now applies.
+        dt_to_ca_s = 4 * 3600.0  # T_BURN to T_CA
+        rot_burn = frames.rtn_to_eci_rotation(self.R_SAT, self.V_SAT)
+        rot_tca = frames.advance_rtn_to_eci_rotation(rot_burn, cap.a_ref_km, dt_to_ca_s)
+        phi_rv_rtn = cw_phi_rv(cap.a_ref_km, dt_to_ca_s)
+        phi_rv = frames.rotate_cw_block_two_epoch(phi_rv_rtn, rot_tca, rot_burn)
+
         dv_vec = np.array(result.dv_eci_km_s)
         delta_r = phi_rv @ dv_vec
         r_post = self.R_REL - delta_r

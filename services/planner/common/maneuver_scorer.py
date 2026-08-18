@@ -1057,17 +1057,38 @@ def score_maneuver_candidates(
     # same on every circular orbit, because a prograde burn does the same thing
     # wherever you are. The unrotated one varied with inertial position.
     #
-    # Conjugating the block by the rotation once here gives a map that takes ECI
-    # in and returns ECI out, so every use below is frame-correct without
-    # rotating in and out at each one. Half-applied rotations are the failure
-    # mode this is guarding against, so there is one place to get it right.
-    #
     # For an axis-aligned geometry, r along +x and v along +y, the rotation is
-    # exactly the identity and phi_rv_eci equals the raw block. Every scoring
-    # test used such a geometry, which is why this was green.
-    rtn_to_eci = frames.rtn_to_eci_rotation(r_sat_km, v_sat_km_s)
+    # exactly the identity. Every scoring test used such a geometry, which is
+    # why 397's fix looked complete.
+    #
+    # SCRUM-409. It was not. Conjugating with a SINGLE rotation, as 397 did,
+    # is correct only when the block's input and output are expressed in the
+    # same LVLH frame. Phi_rv's input (a burn-epoch delta-v) and output (a
+    # TCA-epoch delta-r) are not: the LVLH frame has physically rotated with
+    # the orbit in between, by n * dt_to_ca_s radians. At the 4-hour lead in
+    # SCRUM-386's own worked example that is 2.5 orbits, roughly half a
+    # revolution of drift between the two frames, and the single-rotation
+    # result came out on the order of 100% wrong, in some geometries pointing
+    # nearly opposite the true displacement. The identity-rotation blind spot
+    # that hid 397's bug hid this one too: an identity rotation applied twice
+    # is indistinguishable from the same identity applied once.
+    #
+    # The fix uses two rotations, not one: the burn-epoch rotation for the
+    # input (exact there, since delta-r = 0 at the burn instant makes the
+    # single-epoch conversion trivially correct on that side only), and the
+    # TCA-epoch rotation, advanced analytically from the burn-epoch one under
+    # the same circular-orbit assumption cw_phi_rv already makes, for the
+    # output. See frames.rotate_cw_block_two_epoch and
+    # frames.advance_rtn_to_eci_rotation for the derivation and the
+    # verification against true two-body motion.
+    rtn_to_eci_burn = frames.rtn_to_eci_rotation(r_sat_km, v_sat_km_s)
+    rtn_to_eci_tca = frames.advance_rtn_to_eci_rotation(
+        rtn_to_eci_burn, cap.a_ref_km, dt_to_ca_s
+    )
     phi_rv_rtn = cw_phi_rv(cap.a_ref_km, dt_to_ca_s)
-    phi_rv = frames.rotate_cw_block(phi_rv_rtn, rtn_to_eci)
+    phi_rv = frames.rotate_cw_block_two_epoch(
+        phi_rv_rtn, rtn_to_eci_tca, rtn_to_eci_burn
+    )
 
     # --- Scoring weights ---
     weights = policy.scoring_weights

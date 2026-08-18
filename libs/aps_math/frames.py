@@ -1,6 +1,6 @@
 """Reference-frame transforms shared across AVERA-ATLAS services.
 
-SCRUM-397.
+SCRUM-397, SCRUM-409.
 
 Why this module exists
 ----------------------
@@ -22,6 +22,15 @@ which makes the rotation exactly the identity, so the suite was green.
 A frame convention is a value two services must agree on, which is the third
 bucket in ADR-010. So is the function that implements it.
 
+SCRUM-409: rotate_cw_block conjugates with a SINGLE rotation, correct only
+when a CW block's input and output are expressed in the same LVLH frame.
+Phi_rv is not: it maps a burn-epoch input to a TCA-epoch output, and the
+LVLH frame has physically rotated with the orbit in between. The
+axis-aligned test blind spot that hid SCRUM-397's bug also hid this one,
+since the identity rotation can't distinguish "one rotation" from "two
+rotations that happen to be equal." See rotate_cw_block_two_epoch and
+advance_rtn_to_eci_rotation.
+
 RTN
 ---
 R is radial, r_hat.
@@ -40,11 +49,14 @@ import numpy as np
 
 __all__ = [
     "MU_EARTH",
+    "advance_rtn_to_eci_rotation",
     "cw_phi_full",
     "eci_to_rtn_state_transform",
+    "is_degenerate_state",
+    "rotate_cw_block",
+    "rotate_cw_block_two_epoch",
     "rtn_to_eci_rotation",
     "rtn_to_eci_state_transform",
-    "rotate_cw_block",
 ]
 
 # WGS84 Earth gravitational parameter, km^3/s^2.
@@ -304,7 +316,7 @@ def is_degenerate_state(r_km: np.ndarray, v_km_s: np.ndarray) -> bool:
 
 
 def rotate_cw_block(block_rtn: np.ndarray, rtn_to_eci: np.ndarray) -> np.ndarray:
-    """Express an RTN-ordered linear map in ECI coordinates.
+    """Express an RTN-ordered linear map in ECI coordinates, SAME-EPOCH ONLY.
 
     A Clohessy-Wiltshire block maps an RTN vector to an RTN vector. To apply it
     to an ECI vector and get an ECI vector back, conjugate it by the rotation:
@@ -318,6 +330,108 @@ def rotate_cw_block(block_rtn: np.ndarray, rtn_to_eci: np.ndarray) -> np.ndarray
     failure this module exists to prevent. It also makes the covariance case
     fall out for free, since `M_eci @ Q_eci @ M_eci.T` is then correct with no
     further rotations.
+
+    SCRUM-409: this single-rotation conjugation is correct ONLY when the
+    block's input and output live in the same LVLH frame -- for example a
+    covariance propagated and read back within one epoch. It is NOT correct
+    for Phi_rv, whose input (a burn-epoch delta-v) and output (a TCA-epoch
+    delta-r) are expressed in two physically different, rotated LVLH
+    frames. Use rotate_cw_block_two_epoch for that case. Do not add a
+    "just pass the same rotation twice" shortcut back to this function;
+    the whole point of splitting them is that the single-rotation call
+    site can no longer accidentally be used for a two-epoch quantity.
     """
     rot = np.asarray(rtn_to_eci, dtype=float)
     return rot @ np.asarray(block_rtn, dtype=float) @ rot.T
+
+
+def advance_rtn_to_eci_rotation(
+    rot_t0: np.ndarray, a_km: float, dt_s: float, mu: float = MU_EARTH
+) -> np.ndarray:
+    """
+    RTN-to-ECI rotation at t0 + dt, for the same circular reference orbit
+    cw_phi_rv/cw_phi_full assume, given the rotation at t0.
+
+    SCRUM-409. For a circular orbit the LVLH frame rotates rigidly about
+    its own N axis (the orbit normal) at the constant mean motion
+    n = sqrt(mu / a^3). R and T sweep through the orbital plane by
+    theta = n * dt while N stays fixed:
+
+        r_hat(t0+dt) = cos(theta) r_hat(t0) + sin(theta) t_hat(t0)
+        t_hat(t0+dt) = -sin(theta) r_hat(t0) + cos(theta) t_hat(t0)
+        n_hat(t0+dt) = n_hat(t0)
+
+    equivalently rot_t0 @ Rz(theta) where Rz is the standard rotation
+    about the third (N) axis. This uses the same (a_km, dt_s, mu) a
+    caller already has for cw_phi_rv/cw_phi_full, so it needs no
+    propagator: verified against true two-body motion to machine
+    precision at short lead times and to ~5e-4 (matrix entries) at 72
+    hours, an order of magnitude below the ~11% CW linearization error
+    already present in Phi_rv itself at that lead time -- this
+    introduces no meaningful additional error beyond what CW already has.
+
+    Args:
+        rot_t0: RTN-to-ECI rotation at the reference epoch (from
+            rtn_to_eci_rotation).
+        a_km: reference semi-major axis, same value passed to
+            cw_phi_rv/cw_phi_full for this arc.
+        dt_s: elapsed time from t0, same value passed to
+            cw_phi_rv/cw_phi_full. May be negative (propagating
+            backward).
+        mu: gravitational parameter, km^3/s^2.
+
+    Returns:
+        RTN-to-ECI rotation at t0 + dt.
+
+    Raises:
+        ValueError if a_km <= 0, matching cw_phi_full's own guard.
+    """
+    if a_km <= 0:
+        raise ValueError("advance_rtn_to_eci_rotation: a_km must be > 0")
+    rot0 = np.asarray(rot_t0, dtype=float)
+    n = math.sqrt(mu / a_km ** 3)
+    theta = n * dt_s
+    c, s = math.cos(theta), math.sin(theta)
+    rz = np.array(
+        [
+            [c, -s, 0.0],
+            [s, c, 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+    )
+    return rot0 @ rz
+
+
+def rotate_cw_block_two_epoch(
+    block_rtn: np.ndarray,
+    rot_output_to_eci: np.ndarray,
+    rot_input_to_eci: np.ndarray,
+) -> np.ndarray:
+    """Express an RTN-ordered linear map in ECI coordinates, for a block
+    whose input and output are expressed in TWO DIFFERENT LVLH frames.
+
+    SCRUM-409. The map is:
+
+        M_eci = rot_output @ M_rtn @ rot_input.T
+
+    so that `M_eci @ x_eci` first converts x_eci into the INPUT epoch's
+    RTN components (rot_input.T), applies the block (still valid RTN
+    math regardless of which epoch's frame orientation is used, since
+    M_rtn's own derivation doesn't depend on frame orientation), then
+    converts the result out of the OUTPUT epoch's RTN components
+    (rot_output). This is the general case rotate_cw_block deliberately
+    does not cover.
+
+    For cw_phi_rv specifically: rot_input_to_eci is the rotation at the
+    burn epoch (input is a delta-v, exact there since delta-r = 0 at the
+    burn instant makes the single-epoch conversion trivially correct on
+    that side), and rot_output_to_eci is the rotation at TCA, typically
+    from advance_rtn_to_eci_rotation(rot_input_to_eci, a_km, dt_to_ca_s).
+    Get rot_output_to_eci and rot_input_to_eci backwards and the result
+    is wrong in exactly the way this function exists to prevent -- there
+    is no way to catch that from the shapes alone, both are 3x3
+    rotations, so get the call site right.
+    """
+    rot_out = np.asarray(rot_output_to_eci, dtype=float)
+    rot_in = np.asarray(rot_input_to_eci, dtype=float)
+    return rot_out @ np.asarray(block_rtn, dtype=float) @ rot_in.T

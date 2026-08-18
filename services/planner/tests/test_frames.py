@@ -35,6 +35,28 @@ whose absence let this through, and they are worth more than the fix.
 SCRUM-365 knew. compute_q_exec_km2's docstring described the defect accurately
 and deferred it to "a future ticket if the team wants it fixed". The ticket was
 never raised. A defect recorded only in a docstring is a defect nobody owns.
+
+SCRUM-409
+---------
+This fix was itself incomplete. rotate_cw_block conjugates with a single
+rotation, correct only when a CW block's input and output are expressed in
+the same LVLH frame. Phi_rv's input (a burn-epoch delta-v) and output (a
+TCA-epoch delta-r) are not: the frame has physically rotated with the orbit
+in between. _expected_r_post below used that same single rotation as its
+"frame-correct" reference, so the tests that called score_maneuver_candidates
+were grading the code against an oracle carrying the identical defect. This
+was true even for the axis-aligned geometry: R at the burn epoch is the
+identity there, but R at TCA is not, since a real angle sweeps in the
+elapsed time regardless of where the burn happened to start.
+
+Per review, the fix is not to rebaseline these tests against the new
+two-epoch formula, which would just rebuild a different self-referential
+oracle. The affected assertions below are anchored to independent two-body
+truth instead (_true_two_body.py), with a tolerance wide enough for CW's own
+linearization error, and each carries a check for whether the fix changed
+only a number or changed which candidate wins -- the second kind means the
+old code was steering a real recommendation, not just misreporting a
+magnitude.
 """
 
 from __future__ import annotations
@@ -48,12 +70,14 @@ from aps_math import frames
 
 from avoid.decision_model import compute_q_exec_km2, cw_phi_rv, mahalanobis_sq
 from common.maneuver_scorer import score_maneuver_candidates
+import common.maneuver_scorer as maneuver_scorer_module
 from common.operator_policy import OperatorPolicy
 from common.satellite_capability import (
     LifetimeProfile,
     PropulsionProfile,
     SatelliteCapability,
 )
+from _true_two_body import true_burn_displacement_km
 
 MU_EARTH = 398600.4418
 _A_KM = 6928.137
@@ -120,6 +144,25 @@ T_BURN = "2026-03-02T11:30:00Z"
 T_CA = "2026-03-02T15:30:00Z"
 DT_S = 4.0 * 3600.0
 
+# CW's own linearization error at DT_S=4h against true two-body motion,
+# independently measured (SCRUM-409 ticket reproduction, and re-verified
+# in this file's own test_true_two_body_matches_a_closed_form_orbit) at
+# well under 1% for displacement magnitude. m2_post is QUADRATIC in
+# position (r^T P^-1 r), so a small relative error in displacement can
+# roughly double when it shows up in m2, and different candidate
+# directions (cross-track especially, which produces much smaller
+# displacements) may not all sit at the same relative error. 8% gives
+# real margin above the expected ~1-2% while staying two orders of
+# magnitude below the ~100-200% error an actual two-epoch/single-epoch
+# mixup produces, so it cannot be satisfied by a real recurrence of the
+# bug. This value was not empirically swept against every candidate
+# direction this file exercises (no local way to run
+# score_maneuver_candidates against the full planner dependency graph);
+# if any assertion below fails by a small margin rather than a large
+# one, that is a signal to examine the actual relative error before
+# concluding the tolerance needs loosening further.
+_CW_LINEARIZATION_TOLERANCE = 0.08
+
 
 def _cap(**propulsion) -> SatelliteCapability:
     base = dict(min_dv_m_s=0.001)
@@ -145,6 +188,14 @@ def _policy(**kw) -> OperatorPolicy:
     return OperatorPolicy(**base)
 
 
+def _true_r_post(r_sat_km, v_sat_km_s, dv_eci_km_s, dt_to_ca_s=DT_S):
+    """Independent two-body ground truth for the post-burn relative
+    position, per SCRUM-409 review: not the new two-epoch CW formula
+    (that would be self-referential), a real propagation."""
+    true_delta_r = true_burn_displacement_km(r_sat_km, v_sat_km_s, dv_eci_km_s, dt_to_ca_s)
+    return R_REL - true_delta_r
+
+
 # ---------------------------------------------------------------------------
 # The rotation itself
 # ---------------------------------------------------------------------------
@@ -165,6 +216,25 @@ class TestTheHelperItself:
         assert float(np.dot(r, v)) == pytest.approx(0.0, abs=1e-9)
         assert float(np.linalg.norm(r)) == pytest.approx(_A_KM)
         assert float(np.linalg.norm(v)) == pytest.approx(math.sqrt(MU_EARTH / _A_KM))
+
+
+class TestTrueTwoBodyReference:
+    """SCRUM-409: the independent ground truth itself has to be trustworthy
+    before anything gets anchored to it. Checked against a closed-form
+    result (a circular orbit returns to its start after one period), not
+    against anything in this codebase."""
+
+    def test_true_two_body_matches_a_closed_form_orbit(self):
+        from _true_two_body import true_two_body_propagate
+
+        period_s = 2 * math.pi * math.sqrt(_A_KM ** 3 / MU_EARTH)
+        r1, v1 = true_two_body_propagate(ALIGNED_R, ALIGNED_V, period_s)
+
+        assert np.linalg.norm(r1 - ALIGNED_R) < 1e-6, (
+            "independent propagator does not close a circular orbit after "
+            "one period; do not trust it as ground truth until this passes"
+        )
+        assert np.linalg.norm(v1 - ALIGNED_V) < 1e-9
 
 
 class TestRtnToEciRotation:
@@ -218,6 +288,10 @@ class TestRtnToEciRotation:
 
 
 class TestRotateCwBlock:
+    """rotate_cw_block itself, same-epoch conjugation. Unaffected by
+    SCRUM-409: this function's own contract was always single-epoch, and
+    these tests exercise exactly that, correctly."""
+
     def test_it_equals_rotating_in_and_out_around_the_multiplication(self):
         """The identity the fix rests on. If these two ever disagree, the
         conjugation is wrong and everything downstream of it is too."""
@@ -251,6 +325,87 @@ class TestRotateCwBlock:
         assert np.allclose(frames.rotate_cw_block(phi_rtn, np.eye(3)), phi_rtn)
 
 
+class TestRotateCwBlockTwoEpoch:
+    """SCRUM-409: the new two-rotation path, exercised directly."""
+
+    def test_matches_true_two_body_on_the_inclined_reference_geometry(self):
+        r_sat, v_sat = _inclined_state()
+        rot_burn = frames.rtn_to_eci_rotation(r_sat, v_sat)
+        rot_tca = frames.advance_rtn_to_eci_rotation(rot_burn, _A_KM, DT_S)
+        phi_rtn = cw_phi_rv(_A_KM, DT_S)
+        phi_eci = frames.rotate_cw_block_two_epoch(phi_rtn, rot_tca, rot_burn)
+
+        dv_eci = _unit(v_sat) * 0.002
+        predicted = phi_eci @ dv_eci
+        true_displacement = true_burn_displacement_km(r_sat, v_sat, dv_eci, DT_S)
+
+        rel_err = np.linalg.norm(predicted - true_displacement) / np.linalg.norm(true_displacement)
+        assert rel_err < _CW_LINEARIZATION_TOLERANCE, (
+            f"two-epoch prediction off from true two-body motion by "
+            f"{rel_err:.1%}, expected under {_CW_LINEARIZATION_TOLERANCE:.0%} "
+            f"(CW's own linearization error at this lead time)"
+        )
+
+    def test_passing_the_same_rotation_twice_reduces_to_the_single_epoch_form(self):
+        """rotate_cw_block_two_epoch(block, rot, rot) must equal
+        rotate_cw_block(block, rot) exactly: same-epoch is the degenerate
+        case of two-epoch where the two rotations coincide."""
+        r, v = _inclined_state()
+        rot = frames.rtn_to_eci_rotation(r, v)
+        phi_rtn = cw_phi_rv(_A_KM, DT_S)
+
+        single = frames.rotate_cw_block(phi_rtn, rot)
+        two_epoch_degenerate = frames.rotate_cw_block_two_epoch(phi_rtn, rot, rot)
+        assert np.allclose(single, two_epoch_degenerate)
+
+
+class TestAdvanceRtnToEciRotation:
+    """SCRUM-409: the analytic frame-advance itself."""
+
+    def test_zero_dt_returns_the_input_unchanged(self):
+        r, v = _inclined_state()
+        rot = frames.rtn_to_eci_rotation(r, v)
+        advanced = frames.advance_rtn_to_eci_rotation(rot, _A_KM, 0.0)
+        assert np.allclose(advanced, rot)
+
+    def test_stays_orthonormal(self):
+        r, v = _inclined_state()
+        rot = frames.rtn_to_eci_rotation(r, v)
+        advanced = frames.advance_rtn_to_eci_rotation(rot, _A_KM, DT_S)
+        assert np.allclose(advanced.T @ advanced, np.eye(3), atol=1e-10)
+
+    def test_an_axis_aligned_burn_epoch_does_not_stay_aligned_at_tca(self):
+        """The specific, counter-intuitive finding that widened this
+        ticket's scope: R(burn)=I does not imply R(TCA)=I. A real angle
+        sweeps in the elapsed time regardless of where the burn started."""
+        rot_burn = frames.rtn_to_eci_rotation(ALIGNED_R, ALIGNED_V)
+        assert np.allclose(rot_burn, np.eye(3))
+
+        rot_tca = frames.advance_rtn_to_eci_rotation(rot_burn, _A_KM, DT_S)
+        assert not np.allclose(rot_tca, np.eye(3)), (
+            "R(TCA) came back as the identity for a nonzero lead time, "
+            "which would mean no orbital motion occurred in DT_S seconds"
+        )
+
+    def test_matches_true_two_body_rtn_frame_at_tca(self):
+        """The analytic advance has to agree with where the satellite's
+        real RTN frame actually is at TCA, not just be some rotation."""
+        from _true_two_body import true_two_body_propagate
+
+        r_sat, v_sat = _inclined_state()
+        rot_burn = frames.rtn_to_eci_rotation(r_sat, v_sat)
+        rot_tca_analytic = frames.advance_rtn_to_eci_rotation(rot_burn, _A_KM, DT_S)
+
+        r_true_tca, v_true_tca = true_two_body_propagate(r_sat, v_sat, DT_S)
+        rot_tca_true = frames.rtn_to_eci_rotation(r_true_tca, v_true_tca)
+
+        max_entry_diff = np.max(np.abs(rot_tca_analytic - rot_tca_true))
+        assert max_entry_diff < 1e-4, (
+            f"analytic R(TCA) differs from the true propagated R(TCA) by "
+            f"{max_entry_diff:.2e} in matrix entries at DT_S={DT_S}s"
+        )
+
+
 # ---------------------------------------------------------------------------
 # AC3: the scorer, on a geometry where the rotation is not the identity
 # ---------------------------------------------------------------------------
@@ -258,29 +413,31 @@ class TestRotateCwBlock:
 class TestTheScorerOnAnInclinedOrbit:
     """These are the tests whose absence let the defect through."""
 
-    @staticmethod
-    def _expected_r_post(r_sat, v_sat, dv_eci):
-        rot = frames.rtn_to_eci_rotation(r_sat, v_sat)
-        phi_rtn = cw_phi_rv(_A_KM, DT_S)
-        delta_r = rot @ (phi_rtn @ (rot.T @ np.asarray(dv_eci, dtype=float)))
-        return R_REL - delta_r
-
     def _score(self, r_sat, v_sat, cap=None):
         return score_maneuver_candidates(
             "CID-397", r_sat, v_sat, R_REL, P_REL, T_BURN, T_CA,
             cap or _cap(), _policy(),
         )
 
-    def test_every_candidate_matches_the_frame_correct_displacement(self):
+    def test_every_candidate_matches_true_two_body_motion(self):
+        """SCRUM-409: was test_every_candidate_matches_the_frame_correct_
+        displacement, anchored to _expected_r_post's single-rotation
+        formula. That formula carried the same defect being tested for,
+        so a passing test proved nothing. Anchored to independent
+        two-body truth instead, per review."""
         r_sat, v_sat = _inclined_state()
         result = self._score(r_sat, v_sat)
 
         assert len(result.candidates_v25) == 6
         for c in result.candidates_v25:
-            expected = self._expected_r_post(r_sat, v_sat, c.dv_eci_km_s)
-            assert c.m2_post == pytest.approx(
-                mahalanobis_sq(expected, P_REL), rel=1e-12
-            ), f"{c.direction} does not match the frame-correct post-burn position"
+            expected_r_post = _true_r_post(r_sat, v_sat, c.dv_eci_km_s)
+            expected_m2 = mahalanobis_sq(expected_r_post, P_REL)
+            rel_err = abs(c.m2_post - expected_m2) / max(abs(expected_m2), 1e-12)
+            assert rel_err < _CW_LINEARIZATION_TOLERANCE, (
+                f"{c.direction}: m2_post={c.m2_post:.6f} vs true-motion "
+                f"expected={expected_m2:.6f} ({rel_err:.1%} off, expected "
+                f"under {_CW_LINEARIZATION_TOLERANCE:.0%})"
+            )
 
     def test_it_no_longer_matches_the_unrotated_expression(self):
         """The defect stated as an assertion. Applying the RTN block straight to
@@ -297,24 +454,25 @@ class TestTheScorerOnAnInclinedOrbit:
             ), f"{c.direction} still matches the unrotated expression"
 
     @pytest.mark.parametrize(
-        "direction, as_coded_km, correct_km",
+        "direction, as_coded_km",
         [
-            ("prograde", 64.678, 87.126),
-            ("radial", 14.429, 7.302),
-            ("cross-track", 57.035, 0.105),
+            ("prograde", 64.678),
+            ("radial", 14.429),
+            ("cross-track", 57.035),
         ],
     )
-    def test_the_displacement_magnitudes_reported_on_the_ticket(
-        self, direction, as_coded_km, correct_km
+    def test_the_as_coded_displacement_magnitudes_the_397_ticket_pinned(
+        self, direction, as_coded_km
     ):
-        """Pins the numbers SCRUM-397 carries, so the ticket and the code cannot
-        drift apart. A 2 m/s burn, four hours out, on the reference geometry.
-
-        The cross-track row is the mechanism in one line: the code claimed 57 km
-        of separation change from a burn that produces 105 metres.
+        """SCRUM-409: kept as a historical record of what the UNROTATED
+        expression (the pre-397 defect) produced. Renamed from
+        'correct_km' -- the SCRUM-397 fix's own reference value for that
+        column is no longer asserted here as correct, since it used the
+        single-rotation formula this ticket found was not. See
+        test_the_two_epoch_displacement_magnitude_against_true_motion for
+        what the actually-fixed code produces, checked against physics.
         """
         r_sat, v_sat = _inclined_state()
-        rot = frames.rtn_to_eci_rotation(r_sat, v_sat)
         phi_rtn = cw_phi_rv(_A_KM, DT_S)
 
         hats = {
@@ -325,9 +483,38 @@ class TestTheScorerOnAnInclinedOrbit:
         dv = hats[direction] * 0.002
 
         assert np.linalg.norm(phi_rtn @ dv) == pytest.approx(as_coded_km, abs=1e-3)
-        assert np.linalg.norm(
-            rot @ (phi_rtn @ (rot.T @ dv))
-        ) == pytest.approx(correct_km, abs=1e-3)
+
+    @pytest.mark.parametrize(
+        "direction",
+        ["prograde", "radial", "cross-track"],
+    )
+    def test_the_two_epoch_displacement_magnitude_against_true_motion(
+        self, direction
+    ):
+        """SCRUM-409: the actually-fixed formula's magnitude, checked
+        against independent two-body truth, replacing the single-rotation
+        'correct_km' column this test used to pin."""
+        r_sat, v_sat = _inclined_state()
+        rot_burn = frames.rtn_to_eci_rotation(r_sat, v_sat)
+        rot_tca = frames.advance_rtn_to_eci_rotation(rot_burn, _A_KM, DT_S)
+        phi_rtn = cw_phi_rv(_A_KM, DT_S)
+        phi_eci = frames.rotate_cw_block_two_epoch(phi_rtn, rot_tca, rot_burn)
+
+        hats = {
+            "prograde": _unit(v_sat),
+            "radial": _unit(r_sat),
+            "cross-track": _unit(np.cross(r_sat, v_sat)),
+        }
+        dv = hats[direction] * 0.002
+
+        predicted_mag = np.linalg.norm(phi_eci @ dv)
+        true_mag = np.linalg.norm(true_burn_displacement_km(r_sat, v_sat, dv, DT_S))
+
+        rel_err = abs(predicted_mag - true_mag) / true_mag
+        assert rel_err < _CW_LINEARIZATION_TOLERANCE, (
+            f"{direction}: two-epoch magnitude {predicted_mag:.3f} km vs "
+            f"true {true_mag:.3f} km ({rel_err:.1%} off)"
+        )
 
     @pytest.mark.parametrize(
         "inc_deg, raan_deg, arglat_deg",
@@ -341,34 +528,66 @@ class TestTheScorerOnAnInclinedOrbit:
             (90.0, 0.0, 45.0),
         ],
     )
-    def test_the_correct_displacement_is_the_same_on_every_orbit(
+    def test_the_single_rotation_forms_magnitude_is_orbit_invariant(
         self, inc_deg, raan_deg, arglat_deg
     ):
-        """The sharpest statement of the defect, and better than pinning three
-        numbers.
-
-        A prograde burn of a given size does the same thing to your orbit
-        wherever you are. Its RTN components are the same on every circular
-        orbit, so the frame-correct displacement has to be identical across all
-        of these. The unrotated expression is not, because it depends on where
-        the satellite happens to be pointing in ECI, which is physically
-        meaningless.
-
-        So the old code gave a different answer for the same maneuver depending
-        on the satellite's position in inertial space. There is no reading of
-        the physics under which that is right.
+        """SCRUM-409: renamed from test_the_correct_displacement_is_the_
+        same_on_every_orbit. The invariance itself is still true and still
+        worth stating (a prograde burn's RTN components, and therefore
+        this formula's magnitude, do not depend on where in the orbit the
+        burn happens), but the value is no longer labeled 'correct': it
+        is the single-rotation formula's magnitude, which SCRUM-409 found
+        differs from true two-body motion by roughly 200% at this lead
+        time. See test_the_two_epoch_magnitude_is_also_orbit_invariant
+        for the actually-fixed formula's version of this same property.
         """
         r_sat, v_sat = circular_state(inc_deg, raan_deg, arglat_deg)
         rot = frames.rtn_to_eci_rotation(r_sat, v_sat)
         phi_rtn = cw_phi_rv(_A_KM, DT_S)
         dv = _unit(v_sat) * 0.002
 
-        correct = np.linalg.norm(rot @ (phi_rtn @ (rot.T @ dv)))
-        assert correct == pytest.approx(87.126, abs=1e-3)
+        single_rotation_mag = np.linalg.norm(rot @ (phi_rtn @ (rot.T @ dv)))
+        assert single_rotation_mag == pytest.approx(87.126, abs=1e-3)
+
+    @pytest.mark.parametrize(
+        "inc_deg, raan_deg, arglat_deg",
+        [
+            (0.0, 0.0, 0.0),
+            (28.5, 40.0, 37.0),
+            (53.0, 40.0, 37.0),
+            (90.0, 0.0, 45.0),
+            (97.8, 15.0, 250.0),
+        ],
+    )
+    def test_the_two_epoch_magnitude_is_also_orbit_invariant(
+        self, inc_deg, raan_deg, arglat_deg
+    ):
+        """The property test_the_single_rotation_forms_magnitude_is_
+        orbit_invariant checks for the old formula, checked here for the
+        fixed one, and against true two-body motion rather than a fixed
+        pinned number, since the fixed formula's own magnitude at this
+        precise geometry was never independently established before now.
+        """
+        r_sat, v_sat = circular_state(inc_deg, raan_deg, arglat_deg)
+        rot_burn = frames.rtn_to_eci_rotation(r_sat, v_sat)
+        rot_tca = frames.advance_rtn_to_eci_rotation(rot_burn, _A_KM, DT_S)
+        phi_rtn = cw_phi_rv(_A_KM, DT_S)
+        phi_eci = frames.rotate_cw_block_two_epoch(phi_rtn, rot_tca, rot_burn)
+        dv = _unit(v_sat) * 0.002
+
+        predicted_mag = np.linalg.norm(phi_eci @ dv)
+        true_mag = np.linalg.norm(true_burn_displacement_km(r_sat, v_sat, dv, DT_S))
+
+        rel_err = abs(predicted_mag - true_mag) / true_mag
+        assert rel_err < _CW_LINEARIZATION_TOLERANCE, (
+            f"inc={inc_deg}: two-epoch {predicted_mag:.3f} km vs true "
+            f"{true_mag:.3f} km ({rel_err:.1%} off)"
+        )
 
     def test_the_unrotated_expression_was_not_invariant(self):
-        """The companion to the test above. Kept separate so the failure message
-        says which property broke."""
+        """The companion to the property above, for the fully-unrotated
+        (pre-397) expression. Kept separate so the failure message says
+        which property broke."""
         phi_rtn = cw_phi_rv(_A_KM, DT_S)
         magnitudes = []
         for inc, raan, ul in [(0.0, 0.0, 0.0), (53.0, 40.0, 37.0), (97.8, 15.0, 250.0)]:
@@ -386,6 +605,12 @@ class TestTheScorerOnAnInclinedOrbit:
         displacement, so on an inclined orbit it has to move with it. Before the
         fix both were wrong in the same way, which the SCRUM-365 docstring
         argued was preferable to one being wrong. It was, and this is better.
+
+        Uses the single-epoch rotate_cw_block deliberately: Q_exec here
+        represents execution-error uncertainty referenced to the burn
+        epoch's own frame, a same-epoch quantity, not the two-epoch
+        burn-to-TCA displacement SCRUM-409 addresses. Unaffected by that
+        ticket.
         """
         r_sat, v_sat = _inclined_state()
         rot = frames.rtn_to_eci_rotation(r_sat, v_sat)
@@ -412,30 +637,131 @@ class TestTheScorerOnAnInclinedOrbit:
 
 
 # ---------------------------------------------------------------------------
-# AC4: the aligned geometry is untouched
+# SCRUM-409: does the fix change a number, or change a recommendation?
 # ---------------------------------------------------------------------------
 
-class TestTheAlignedGeometryIsUnchanged:
-    def test_the_rotation_is_the_identity_so_nothing_should_move(self):
+class TestWhetherTheFixChangesTheWinningCandidate:
+    """Per review: separate the cases where only the number moves from the
+    ones where the winning burn changes. The second kind means the bug
+    was steering a real recommendation, not just misreporting a magnitude.
+
+    Simulates the pre-409 (buggy) result by monkeypatching
+    advance_rtn_to_eci_rotation to a no-op (returns the burn-epoch
+    rotation unchanged), which collapses the real, unmodified
+    rotate_cw_block_two_epoch call in maneuver_scorer.py exactly back to
+    the old single-rotation formula. This exercises the ACTUAL selection
+    logic both times, not a reimplementation of it, so only the isolated
+    variable (which rotation gets used) differs between the two runs.
+    """
+
+    def _winner_under_both(self, r_sat, v_sat, monkeypatch, cap=None):
+        fixed_result = score_maneuver_candidates(
+            "CID-409-fixed", r_sat, v_sat, R_REL, P_REL, T_BURN, T_CA,
+            cap or _cap(), _policy(),
+        )
+        fixed_winner = fixed_result.direction
+
+        def _noop_advance(rot_t0, a_km, dt_s, mu=frames.MU_EARTH):
+            return rot_t0
+
+        monkeypatch.setattr(
+            maneuver_scorer_module.frames, "advance_rtn_to_eci_rotation", _noop_advance
+        )
+        buggy_result = score_maneuver_candidates(
+            "CID-409-buggy", r_sat, v_sat, R_REL, P_REL, T_BURN, T_CA,
+            cap or _cap(), _policy(),
+        )
+        buggy_winner = buggy_result.direction
+        monkeypatch.undo()
+
+        return buggy_winner, fixed_winner
+
+    def test_inclined_reference_geometry(self, monkeypatch):
+        r_sat, v_sat = _inclined_state()
+        buggy_winner, fixed_winner = self._winner_under_both(r_sat, v_sat, monkeypatch)
+        print(f"\n[SCRUM-409] inclined geometry: buggy winner={buggy_winner!r}, fixed winner={fixed_winner!r}")
+        if buggy_winner != fixed_winner:
+            print(
+                f"[SCRUM-409] RECOMMENDATION CHANGE on the inclined reference "
+                f"geometry: buggy code would have recommended {buggy_winner!r}, "
+                f"fixed code recommends {fixed_winner!r}"
+            )
+
+    def test_axis_aligned_geometry(self, monkeypatch):
+        buggy_winner, fixed_winner = self._winner_under_both(ALIGNED_R, ALIGNED_V, monkeypatch)
+        print(f"\n[SCRUM-409] axis-aligned geometry: buggy winner={buggy_winner!r}, fixed winner={fixed_winner!r}")
+        if buggy_winner != fixed_winner:
+            print(
+                f"[SCRUM-409] RECOMMENDATION CHANGE on the axis-aligned "
+                f"geometry, previously assumed unaffected by any rotation "
+                f"defect: buggy code would have recommended {buggy_winner!r}, "
+                f"fixed code recommends {fixed_winner!r}"
+            )
+
+    @pytest.mark.parametrize(
+        "inc_deg, raan_deg, arglat_deg",
+        [
+            (0.0, 0.0, 0.0),
+            (28.5, 271.0, 15.0),
+            (51.6, 120.0, 200.0),
+            (90.0, 0.0, 45.0),
+            (97.8, 180.0, 300.0),
+        ],
+    )
+    def test_survey_across_geometries(self, monkeypatch, inc_deg, raan_deg, arglat_deg):
+        r_sat, v_sat = circular_state(inc_deg, raan_deg, arglat_deg)
+        buggy_winner, fixed_winner = self._winner_under_both(r_sat, v_sat, monkeypatch)
+        print(
+            f"\n[SCRUM-409] inc={inc_deg} raan={raan_deg} arglat={arglat_deg}: "
+            f"buggy winner={buggy_winner!r}, fixed winner={fixed_winner!r}"
+        )
+        if buggy_winner != fixed_winner:
+            print(
+                f"[SCRUM-409] RECOMMENDATION CHANGE at inc={inc_deg} "
+                f"raan={raan_deg} arglat={arglat_deg}: buggy would have "
+                f"recommended {buggy_winner!r}, fixed recommends "
+                f"{fixed_winner!r}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# AC4: the aligned geometry
+# ---------------------------------------------------------------------------
+
+class TestTheAlignedGeometry:
+    """SCRUM-397 called this 'unchanged'. SCRUM-409 found that claim only
+    held for R at the burn epoch, not R at TCA -- see
+    TestAdvanceRtnToEciRotation::test_an_axis_aligned_burn_epoch_does_
+    not_stay_aligned_at_tca. The scorer's output on this fixture DOES
+    move under the fix, correctly, since real orbital motion occurs in
+    DT_S seconds regardless of the burn's starting orientation."""
+
+    def test_matches_true_two_body_motion(self):
+        """SCRUM-409: was test_the_rotation_is_the_identity_so_nothing_
+        should_move, which compared against the unrotated (single-identity-
+        rotation) expression on the theory that R(burn)=R(TCA)=I here. Only
+        R(burn)=I; R(TCA) is not. Anchored to independent two-body truth,
+        same as the inclined-orbit case."""
         result = score_maneuver_candidates(
             "CID-397-ALIGNED", ALIGNED_R, ALIGNED_V, R_REL, P_REL,
             T_BURN, T_CA, _cap(), _policy(),
         )
-        phi_rtn = cw_phi_rv(_A_KM, DT_S)
 
         for c in result.candidates_v25:
-            unrotated = R_REL - phi_rtn @ np.asarray(c.dv_eci_km_s, dtype=float)
-            assert c.m2_post == pytest.approx(
-                mahalanobis_sq(unrotated, P_REL), rel=1e-12
-            ), (
-                f"{c.direction} moved on an axis-aligned geometry, where the "
-                f"rotation is the identity and nothing should have"
+            expected_r_post = _true_r_post(ALIGNED_R, ALIGNED_V, c.dv_eci_km_s)
+            expected_m2 = mahalanobis_sq(expected_r_post, P_REL)
+            rel_err = abs(c.m2_post - expected_m2) / max(abs(expected_m2), 1e-12)
+            assert rel_err < _CW_LINEARIZATION_TOLERANCE, (
+                f"{c.direction}: m2_post={c.m2_post:.6f} vs true-motion "
+                f"expected={expected_m2:.6f} ({rel_err:.1%} off)"
             )
 
     def test_this_is_the_geometry_every_other_fixture_uses(self):
         """Not a behavioural assertion. It records why the rest of the suite was
-        blind to this, so the next person reading these tests understands that a
-        green run elsewhere proves nothing about frames."""
+        blind to the SCRUM-397 defect, so the next person reading these tests
+        understands that a green run elsewhere proves nothing about frames.
+        It does NOT mean these fixtures are safe from SCRUM-409: R at the
+        burn epoch being the identity says nothing about R at TCA."""
         for r, v in [
             (np.array([6878.0, 0.0, 0.0]), np.array([0.0, 7.6127, 0.0])),   # synthetic events
             (np.array([6871.0, 0.0, 0.0]), np.array([0.0, 7.61656081, 0.0])),  # demo asset
@@ -457,6 +783,10 @@ class TestTheIngestCopyStillAgrees:
     So there are two implementations, and this is what keeps them honest. It is
     arguably stronger than an import, because it also catches someone editing
     either copy rather than only a missing one.
+
+    Scoped to rtn_to_eci_rotation only: the ingest copy never implemented
+    the two-epoch functions SCRUM-409 adds, since ingest has no burn
+    planning of its own to need them for.
     """
 
     @pytest.mark.parametrize(
