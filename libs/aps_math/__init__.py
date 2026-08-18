@@ -31,16 +31,25 @@ pc_utils      probability of collision, Alfano 2005 and Frisbee
 conventions   shared numerical conventions (ADR-010). Values every service must
               agree on, each carrying why it was chosen and what changing it
               would affect.
-frames        reference-frame transforms (SCRUM-397). RTN to ECI, and expressing
-              an RTN-ordered linear map in ECI.
+frames        reference-frame transforms (SCRUM-397) and the CW state
+              transition matrix (SCRUM-378). RTN to ECI, expressing an
+              RTN-ordered linear map in ECI, and Phi(tau, t0).
+observability measurement Jacobians for the Fisher-information observability
+              gate (SCRUM-378, MAF v2.0 Sec 7).
 """
 
 from . import conventions  # noqa: F401
 from . import frames  # noqa: F401
+from . import observability  # noqa: F401
 from .frames import (  # noqa: F401
+    MU_EARTH,
+    cw_phi_full,
     is_degenerate_state,
     rotate_cw_block,
     rtn_to_eci_rotation,
+)
+from .observability import (  # noqa: F401
+    observation_jacobian,
 )
 from .pc_utils import (  # noqa: F401
     PcResult,
@@ -54,9 +63,13 @@ from .pc_utils import (  # noqa: F401
 __all__ = [
     "conventions",
     "frames",
+    "observability",
+    "MU_EARTH",
+    "cw_phi_full",
     "is_degenerate_state",
     "rotate_cw_block",
     "rtn_to_eci_rotation",
+    "observation_jacobian",
     "PcResult",
     "compute_pc",
     "compute_pc_batch",
