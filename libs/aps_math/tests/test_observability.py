@@ -14,7 +14,7 @@ import math
 import numpy as np
 import pytest
 
-from aps_math.observability import observation_jacobian
+from aps_math.observability import measurement_noise_covariance, observation_jacobian
 
 
 def _forward_model(r_target: np.ndarray, r_observer: np.ndarray, include_range: bool) -> np.ndarray:
@@ -130,3 +130,76 @@ class TestGuards:
             np.array([6800.0, 0.0, 6800.0]), np.array([6778.0, 20.0, 20.0]), include_range=False
         )
         assert np.all(np.isfinite(H))
+
+
+class TestMeasurementNoiseCovariance:
+    """R must stay unit- and shape-consistent with observation_jacobian's
+    output, since the Gramian combines them directly as H^T R^-1 H."""
+
+    def test_angles_only_is_2x2(self):
+        R = measurement_noise_covariance(1e-5, 1e-5)
+        assert R.shape == (2, 2)
+
+    def test_angles_and_range_is_3x3(self):
+        R = measurement_noise_covariance(1e-5, 1e-5, range_sigma_km=0.05)
+        assert R.shape == (3, 3)
+
+    def test_shape_matches_observation_jacobian_rows(self):
+        r_target = np.array([6928.0, 100.0, 200.0])
+        r_observer = np.array([6900.0, 0.0, 0.0])
+
+        H_angles = observation_jacobian(r_target, r_observer, include_range=False)
+        R_angles = measurement_noise_covariance(1e-5, 1e-5)
+        assert H_angles.shape[0] == R_angles.shape[0]
+
+        H_range = observation_jacobian(r_target, r_observer, include_range=True)
+        R_range = measurement_noise_covariance(1e-5, 1e-5, range_sigma_km=0.05)
+        assert H_range.shape[0] == R_range.shape[0]
+
+    def test_is_diagonal_with_variances(self):
+        R = measurement_noise_covariance(2e-5, 3e-5, range_sigma_km=0.1)
+        expected = np.diag([4e-10, 9e-10, 0.01])
+        assert np.allclose(R, expected)
+        # And genuinely diagonal, not just diag-equal by coincidence.
+        off_diag = R - np.diag(np.diag(R))
+        assert np.array_equal(off_diag, np.zeros((3, 3)))
+
+    def test_invertible_and_feeds_the_gramian_term(self):
+        """R must actually be usable as R^-1 inside H^T R^-1 H, the real
+        quantity the Gramian sums over a tracking arc. This is not a
+        shape check alone: it exercises the inversion and the resulting
+        product's symmetry, which a singular or malformed R would break."""
+        r_target = np.array([6928.0, 100.0, 200.0])
+        r_observer = np.array([6900.0, 0.0, 0.0])
+        H = observation_jacobian(r_target, r_observer, include_range=False)
+        R = measurement_noise_covariance(1e-5, 1e-5)
+
+        R_inv = np.linalg.inv(R)
+        term = H.T @ R_inv @ H
+
+        assert term.shape == (6, 6)
+        assert np.allclose(term, term.T)
+
+
+class TestMeasurementNoiseCovarianceGuards:
+    def test_zero_ra_sigma_raises(self):
+        with pytest.raises(ValueError, match="ra_sigma_rad"):
+            measurement_noise_covariance(0.0, 1e-5)
+
+    def test_negative_dec_sigma_raises(self):
+        with pytest.raises(ValueError, match="dec_sigma_rad"):
+            measurement_noise_covariance(1e-5, -1e-5)
+
+    def test_nan_sigma_raises(self):
+        with pytest.raises(ValueError):
+            measurement_noise_covariance(float("nan"), 1e-5)
+
+    def test_zero_range_sigma_raises(self):
+        with pytest.raises(ValueError, match="range_sigma_km"):
+            measurement_noise_covariance(1e-5, 1e-5, range_sigma_km=0.0)
+
+    def test_range_sigma_none_is_valid_and_angles_only(self):
+        """None is the documented way to request angles-only; must not
+        raise."""
+        R = measurement_noise_covariance(1e-5, 1e-5, range_sigma_km=None)
+        assert R.shape == (2, 2)

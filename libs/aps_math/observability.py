@@ -21,7 +21,7 @@ import math
 
 import numpy as np
 
-__all__ = ["observation_jacobian"]
+__all__ = ["measurement_noise_covariance", "observation_jacobian"]
 
 
 def observation_jacobian(
@@ -128,3 +128,60 @@ def observation_jacobian(
 
     n_rows = h_pos.shape[0]
     return np.hstack([h_pos, np.zeros((n_rows, 3))])
+
+
+def measurement_noise_covariance(
+    ra_sigma_rad: float,
+    dec_sigma_rad: float,
+    range_sigma_km: float | None = None,
+) -> np.ndarray:
+    """
+    Measurement noise covariance R for a single angle [+ range]
+    observation, matching observation_jacobian's row order and units
+    exactly: [ra (rad), dec (rad), (range (km))].
+
+    Diagonal, since the only uncertainty this system's observations carry
+    per-axis (ObservationRecord's ra_sigma_rad, dec_sigma_rad,
+    range_sigma_m) has no recorded cross-axis correlation to build an
+    off-diagonal term from. A diagonal R is the assumption the available
+    data actually supports, not a simplification chosen over a richer
+    one that was on the table.
+
+    range_sigma_km, not range_sigma_m: observation_jacobian's range row
+    is d(range_km)/d(r_km), a km-based state, so R must be expressed in
+    the same km units to be dimensionally consistent when combined with
+    H in the Gramian. Convert range_sigma_m from the published contract
+    by /1000.0 before calling this, the same conversion already used at
+    services/tracker/main.py's /v1/iod endpoint
+    (range_sigma_km=rec.range_sigma_m / 1000.0) and carried on
+    IODObservation.range_sigma_km.
+
+    Returns a 2x2 matrix (angles only) or 3x3 matrix (angles and range),
+    matching whichever observation_jacobian call this feeds.
+
+    Raises ValueError if any sigma is not strictly positive: zero implies
+    infinite certainty, which makes R singular and R^-1 in the Gramian
+    formula undefined, and negative is not physically meaningful.
+    """
+    if ra_sigma_rad <= 0.0 or not math.isfinite(ra_sigma_rad):
+        raise ValueError(
+            f"measurement_noise_covariance: ra_sigma_rad must be finite "
+            f"and > 0, got {ra_sigma_rad}."
+        )
+    if dec_sigma_rad <= 0.0 or not math.isfinite(dec_sigma_rad):
+        raise ValueError(
+            f"measurement_noise_covariance: dec_sigma_rad must be finite "
+            f"and > 0, got {dec_sigma_rad}."
+        )
+
+    diag = [ra_sigma_rad ** 2, dec_sigma_rad ** 2]
+
+    if range_sigma_km is not None:
+        if range_sigma_km <= 0.0 or not math.isfinite(range_sigma_km):
+            raise ValueError(
+                f"measurement_noise_covariance: range_sigma_km must be "
+                f"finite and > 0 when provided, got {range_sigma_km}."
+            )
+        diag.append(range_sigma_km ** 2)
+
+    return np.diag(diag)
