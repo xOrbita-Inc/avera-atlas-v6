@@ -932,7 +932,7 @@ async function evaluateConjunction(conj,idx){
   const request={
     conjunction_id:'eval-'+conj.object_id,
     satellite:{sat_id:'XORB-001',r_sat_km:asset_r,v_sat_km_s:asset_v,
-      t_burn_utc:new Date(Date.now()-3600000).toISOString(),v_remaining_m_s:25.0},
+      t_burn_utc:new Date().toISOString(),v_remaining_m_s:25.0},
     conjunction:{obj_id:conj.object_id,
       ...(assetNoradId ? {primary_norad: assetNoradId} : {}),
       ...(secondaryNoradId ? {secondary_norad: secondaryNoradId} : {}),
@@ -1811,7 +1811,7 @@ function getPayloadContent(){
   return{
     scenario:selectedScenario,
     satellite:{sat_id:'XORB-001',r_sat_km:asset_r,v_sat_km_s:asset_v,
-      t_burn_utc:new Date(Date.now()-3600000).toISOString(),v_remaining_m_s:25.0},
+      t_burn_utc:new Date().toISOString(),v_remaining_m_s:25.0},
     conjunctions:conjs.map(function(c){
       var ar=c.r_asset_km||asset_r;
       return{
