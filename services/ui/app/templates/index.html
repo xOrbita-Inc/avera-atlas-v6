@@ -304,7 +304,7 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 <body>
 
 <div class="header">
-  <div class="logo"><h1>AVERA-ATLAS</h1><span class="tag">APS v2.4 Conjunction Assessment</span></div>
+  <div class="logo"><h1>AVERA-ATLAS</h1><span class="tag">APS v{{ aps_version }} Conjunction Assessment</span></div>
   <div class="header-right">
     <span class="sys-status" id="sysStatus">SYSTEM ONLINE</span>
     <span class="clock" id="clock">--:--:-- UTC</span>
@@ -401,7 +401,7 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
       </div>
     </div>
     <div class="panel" id="portlet-aps-output" data-portlet data-portlet-title="APS Output">
-      <div class="panel-hdr"><span class="panel-title">APS v2.4 Output<span id="plannerVer" style="font-size:8px;color:var(--text-dim)">--</span></span><div class="panel-ctrls"><button type="button" class="portlet-btn" data-portlet-action="minimize" title="Minimize">&#x2212;</button><button type="button" class="portlet-btn" data-portlet-action="maximize" title="Maximize">&#x26F6;</button><button type="button" class="portlet-btn portlet-info" data-portlet-action="info" title="Field reference" onclick="openApsInfoModal()">&#x24D8;</button></div></div>
+      <div class="panel-hdr"><span class="panel-title">APS v{{ aps_version }} Output<span id="plannerVer" style="font-size:8px;color:var(--text-dim)">--</span></span><div class="panel-ctrls"><button type="button" class="portlet-btn" data-portlet-action="minimize" title="Minimize">&#x2212;</button><button type="button" class="portlet-btn" data-portlet-action="maximize" title="Maximize">&#x26F6;</button><button type="button" class="portlet-btn portlet-info" data-portlet-action="info" title="Field reference" onclick="openApsInfoModal()">&#x24D8;</button></div></div>
       <div class="panel-body" id="plannerDetails"><div class="empty-state">Run a scenario to see planner output</div></div>
     </div>
   </div>
@@ -1708,7 +1708,7 @@ function openMissionImpactInfoModal(){
 }
 
 function openApsInfoModal(){
-  openInfoModal('APS v2.4 Output \u2014 Field Reference',[
+  openInfoModal('APS v{{ aps_version }} Output \u2014 Field Reference',[
     {label:'m\u00B2 pre',description:'Mahalanobis distance before maneuver. Unitless measure of conjunction severity relative to covariance geometry. Higher = greater separation relative to uncertainty.'},
     {label:'m\u00B2 post',description:'Mahalanobis distance after the planned burn. Should exceed m\u00B2 pre for an effective maneuver.'},
     {label:'Fuel',description:'Delta-v cost of the maneuver in m/s. Propellant consumed to execute the burn.'},
