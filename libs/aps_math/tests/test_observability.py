@@ -14,6 +14,7 @@ import math
 import numpy as np
 import pytest
 
+from aps_math import frames
 from aps_math.observability import measurement_noise_covariance, observation_jacobian
 
 
@@ -203,3 +204,143 @@ class TestMeasurementNoiseCovarianceGuards:
         raise."""
         R = measurement_noise_covariance(1e-5, 1e-5, range_sigma_km=None)
         assert R.shape == (2, 2)
+
+
+class TestStateTransforms:
+    """SCRUM-378: rtn_to_eci_state_transform / eci_to_rtn_state_transform,
+    the full 6-state RTN<->ECI conversion the Gramian needs to combine
+    cw_phi_full's RTN-frame output with observation_jacobian's ECI-frame
+    input. Verified against an independent two-body propagator, not
+    against either function under test, matching the convention already
+    used for cw_phi_full and observation_jacobian."""
+
+    @staticmethod
+    def _true_two_body_propagate(r0, v0, dt_s, mu, n_steps=6000):
+        """Independent RK4 two-body propagator, written out here rather
+        than imported from anywhere in this repo, so agreement with it
+        means something."""
+        def deriv(state):
+            r = state[:3]
+            v = state[3:]
+            r_norm = np.linalg.norm(r)
+            a = -mu * r / r_norm ** 3
+            return np.concatenate([v, a])
+
+        state = np.concatenate([np.asarray(r0, dtype=float), np.asarray(v0, dtype=float)])
+        h = dt_s / n_steps
+        for _ in range(n_steps):
+            k1 = deriv(state)
+            k2 = deriv(state + h / 2 * k1)
+            k3 = deriv(state + h / 2 * k2)
+            k4 = deriv(state + h * k3)
+            state = state + h / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+        return state[:3], state[3:]
+
+    @pytest.mark.parametrize(
+        "a_km,inc_deg,dt_s",
+        [
+            (6928.0, 0.0, 1800.0),
+            (6928.0, 53.0, 3600.0),
+            (7000.0, 97.8, 900.0),
+        ],
+    )
+    def test_full_round_trip_matches_true_two_body_motion(self, a_km, inc_deg, dt_s):
+        """Build a state deviation in RTN at t0, propagate it through
+        cw_phi_full, convert to ECI at TCA, and compare against a real
+        perturbed-vs-unperturbed two-body propagation. This is the
+        actual combination the Gramian needs, exercised end to end."""
+        mu = frames.MU_EARTH
+        inc = math.radians(inc_deg)
+        r0 = np.array([a_km, 0.0, 0.0])
+        n = math.sqrt(mu / a_km ** 3)
+        v0 = n * a_km * np.array([0.0, math.cos(inc), math.sin(inc)])
+
+        dr0_eci = np.array([0.05, 0.1, 0.02])
+        dv0_eci = np.array([0.00005, -0.00003, 0.00002])
+
+        r_ref_tau, v_ref_tau = self._true_two_body_propagate(r0, v0, dt_s, mu)
+        r_pert_tau, v_pert_tau = self._true_two_body_propagate(
+            r0 + dr0_eci, v0 + dv0_eci, dt_s, mu
+        )
+        dr_true = r_pert_tau - r_ref_tau
+        dv_true = v_pert_tau - v_ref_tau
+
+        rot0 = frames.rtn_to_eci_rotation(r0, v0)
+        rot_tau = frames.rtn_to_eci_rotation(r_ref_tau, v_ref_tau)
+
+        m0_inv = frames.eci_to_rtn_state_transform(rot0, a_km)
+        m_tau = frames.rtn_to_eci_state_transform(rot_tau, a_km)
+
+        dx0_eci = np.concatenate([dr0_eci, dv0_eci])
+        dx0_rtn = m0_inv @ dx0_eci
+
+        phi_rtn = frames.cw_phi_full(a_km, dt_s)
+        dx_tau_rtn = phi_rtn @ dx0_rtn
+        dx_tau_eci = m_tau @ dx_tau_rtn
+
+        dr_pred, dv_pred = dx_tau_eci[:3], dx_tau_eci[3:]
+        rel_err_r = np.linalg.norm(dr_pred - dr_true) / np.linalg.norm(dr_true)
+        rel_err_v = np.linalg.norm(dv_pred - dv_true) / np.linalg.norm(dv_true)
+
+        # Linearization error, not a defect: bounded well under 1e-3 at
+        # these lead times, an order of magnitude tighter than the bound
+        # used elsewhere in this repo for CW-vs-truth comparisons.
+        assert rel_err_r < 1e-3, f"position rel error {rel_err_r:.2e}"
+        assert rel_err_v < 1e-3, f"velocity rel error {rel_err_v:.2e}"
+
+    @pytest.mark.parametrize(
+        "a_km,inc_deg",
+        [
+            (6928.0, 0.0),
+            (6928.0, 53.0),
+            (7000.0, 90.0),
+        ],
+    )
+    def test_eci_to_rtn_is_the_exact_analytic_inverse(self, a_km, inc_deg):
+        """eci_to_rtn_state_transform must match numpy's numerical inverse
+        of rtn_to_eci_state_transform, not just be A valid inverse -- the
+        analytic form is claimed to be exact and cheaper than inverting."""
+        inc = math.radians(inc_deg)
+        r = np.array([a_km, 0.0, 0.0])
+        n = math.sqrt(frames.MU_EARTH / a_km ** 3)
+        v = n * a_km * np.array([0.0, math.cos(inc), math.sin(inc)])
+        rot = frames.rtn_to_eci_rotation(r, v)
+
+        m = frames.rtn_to_eci_state_transform(rot, a_km)
+        m_inv_analytic = frames.eci_to_rtn_state_transform(rot, a_km)
+        m_inv_numeric = np.linalg.inv(m)
+
+        assert np.allclose(m_inv_analytic, m_inv_numeric, atol=1e-10)
+        assert np.allclose(m_inv_analytic @ m, np.eye(6), atol=1e-10)
+
+    def test_position_block_is_a_plain_rotation_no_correction(self):
+        """The position half needs no transport-theorem term: r_eci =
+        rot @ r_rtn exactly, so the top-left 3x3 block of the state
+        transform must equal rot itself, unmodified."""
+        r = np.array([6928.0, 0.0, 0.0])
+        v = np.array([0.0, 7.6, 1.0])
+        rot = frames.rtn_to_eci_rotation(r, v)
+        m = frames.rtn_to_eci_state_transform(rot, 6928.0)
+        assert np.allclose(m[0:3, 0:3], rot)
+        assert np.allclose(m[0:3, 3:6], np.zeros((3, 3)))
+
+    def test_velocity_block_reduces_to_plain_rotation_at_zero_mean_motion(self):
+        """If the frame were not rotating (n=0, an unphysical but useful
+        limiting case), the transport-theorem correction term vanishes
+        and velocity should transform by the same plain rotation as
+        position. Checked by passing a huge a_km, which drives n toward
+        zero."""
+        r = np.array([6928.0, 0.0, 0.0])
+        v = np.array([0.0, 7.6, 1.0])
+        rot = frames.rtn_to_eci_rotation(r, v)
+        huge_a_km = 1e9
+        m = frames.rtn_to_eci_state_transform(rot, huge_a_km)
+        assert np.allclose(m[3:6, 3:6], rot)
+        assert np.allclose(m[3:6, 0:3], np.zeros((3, 3)), atol=1e-9)
+
+    def test_non_positive_a_km_raises(self):
+        rot = np.eye(3)
+        with pytest.raises(ValueError):
+            frames.rtn_to_eci_state_transform(rot, 0.0)
+        with pytest.raises(ValueError):
+            frames.eci_to_rtn_state_transform(rot, -100.0)
