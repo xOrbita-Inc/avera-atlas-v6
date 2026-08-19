@@ -15,7 +15,11 @@ import numpy as np
 import pytest
 
 from aps_math import frames
-from aps_math.observability import measurement_noise_covariance, observation_jacobian
+from aps_math.observability import (
+    marginalize_information,
+    measurement_noise_covariance,
+    observation_jacobian,
+)
 
 
 def _forward_model(r_target: np.ndarray, r_observer: np.ndarray, include_range: bool) -> np.ndarray:
@@ -344,3 +348,136 @@ class TestStateTransforms:
             frames.rtn_to_eci_state_transform(rot, 0.0)
         with pytest.raises(ValueError):
             frames.eci_to_rtn_state_transform(rot, -100.0)
+
+
+class TestMarginalizeInformation:
+    """SCRUM-378: the reduction the conjunction-plane projection needs,
+    applied twice (6D->3D dropping velocity, 3D->2D dropping the
+    relative-velocity direction). Per review: Schur complement is the
+    method for the gate, not the naive sub-block -- W is an information
+    matrix, and the naive sub-block is only correct for a covariance."""
+
+    def test_zero_coupling_naive_and_schur_agree_exactly(self):
+        """When the kept and dropped subspaces are uncorrelated, there is
+        nothing for the Schur complement to correct: both methods must
+        give the identical result."""
+        W = np.diag([2.0, 1.5, 1.0])
+        naive = marginalize_information(W, [0, 2], [1], method="naive")
+        schur = marginalize_information(W, [0, 2], [1], method="schur")
+        assert np.allclose(naive, schur)
+
+    def test_with_coupling_schur_differs_from_naive(self):
+        """The whole point of the distinction: with real coupling, the
+        two methods must NOT agree, or the fix does nothing."""
+        W = np.array([
+            [2.0, 0.5, 0.3],
+            [0.5, 1.5, 0.4],
+            [0.3, 0.4, 1.0],
+        ])
+        naive = marginalize_information(W, [0, 2], [1], method="naive")
+        schur = marginalize_information(W, [0, 2], [1], method="schur")
+        assert not np.allclose(naive, schur)
+
+    def test_schur_result_stays_symmetric(self):
+        W = np.array([
+            [2.0, 0.5, 0.3],
+            [0.5, 1.5, 0.4],
+            [0.3, 0.4, 1.0],
+        ])
+        schur = marginalize_information(W, [0, 2], [1], method="schur")
+        assert np.allclose(schur, schur.T)
+
+    def test_schur_result_stays_positive_semidefinite(self):
+        """A genuine information matrix property: marginalizing must not
+        produce negative "information", or the result cannot be a valid
+        Fisher information matrix for anything."""
+        W = np.array([
+            [2.0, 0.5, 0.3],
+            [0.5, 1.5, 0.4],
+            [0.3, 0.4, 1.0],
+        ])
+        schur = marginalize_information(W, [0, 2], [1], method="schur")
+        eigvals = np.linalg.eigvalsh(schur)
+        assert np.all(eigvals >= -1e-10)
+
+    def test_schur_correction_is_conservative_not_optimistic(self):
+        """The Schur-complement correction term is positive semi-definite
+        by construction (X^T inv(W_bb) X with W_bb positive definite), so
+        marginalizing can only reduce apparent information relative to
+        the naive sub-block, never increase it. A validity gate that
+        moved the wrong way here would be dangerous in the permissive
+        direction."""
+        W = np.array([
+            [2.0, 0.5, 0.3],
+            [0.5, 1.5, 0.4],
+            [0.3, 0.4, 1.0],
+        ])
+        naive = marginalize_information(W, [0, 2], [1], method="naive")
+        schur = marginalize_information(W, [0, 2], [1], method="schur")
+        # naive - schur must itself be PSD (naive is an upper bound on schur).
+        diff_eigvals = np.linalg.eigvalsh(naive - schur)
+        assert np.all(diff_eigvals >= -1e-10)
+
+    def test_works_at_6d_to_3d_scale(self):
+        """The first of the Gramian's two reductions: dropping velocity
+        from a full 6-state information matrix. Exercised at the actual
+        scale it will be used at, not just 3x3 toy matrices."""
+        rng = np.random.default_rng(42)
+        A = rng.normal(size=(6, 6))
+        W6 = A @ A.T + 6 * np.eye(6)  # guaranteed SPD
+        position_idx = [0, 1, 2]
+        velocity_idx = [3, 4, 5]
+        W3 = marginalize_information(W6, position_idx, velocity_idx, method="schur")
+        assert W3.shape == (3, 3)
+        assert np.allclose(W3, W3.T)
+        assert np.all(np.linalg.eigvalsh(W3) >= -1e-8)
+
+    def test_naive_matches_direct_subblock_indexing(self):
+        """method='naive' must be exactly equivalent to indexing the
+        sub-block directly -- the 'one-line switch' this function
+        provides, not a disguised different operation."""
+        W = np.array([
+            [2.0, 0.5, 0.3],
+            [0.5, 1.5, 0.4],
+            [0.3, 0.4, 1.0],
+        ])
+        naive = marginalize_information(W, [0, 2], [1], method="naive")
+        direct = W[np.ix_([0, 2], [0, 2])]
+        assert np.array_equal(naive, direct)
+
+
+class TestMarginalizeInformationGuards:
+    def test_singular_dropped_block_raises(self):
+        """A singular W_bb means the dropped direction carries no
+        information at all -- a real finding about the arc, not a
+        numerical nuisance to paper over with a pseudo-inverse."""
+        W = np.array([
+            [2.0, 0.5, 0.3],
+            [0.5, 0.0, 0.4],
+            [0.3, 0.4, 1.0],
+        ])
+        with pytest.raises(ValueError, match="singular"):
+            marginalize_information(W, [0, 2], [1], method="schur")
+
+    def test_invalid_method_raises(self):
+        W = np.eye(3)
+        with pytest.raises(ValueError, match="method"):
+            marginalize_information(W, [0, 2], [1], method="bogus")
+
+    def test_overlapping_indices_raise(self):
+        W = np.eye(3)
+        with pytest.raises(ValueError, match="partition"):
+            marginalize_information(W, [0, 1], [1, 2], method="naive")
+
+    def test_incomplete_partition_raises(self):
+        """keep_idx + drop_idx must cover every index -- silently
+        dropping an index the caller forgot about is exactly the kind of
+        defect this whole ticket has been about."""
+        W = np.eye(3)
+        with pytest.raises(ValueError, match="partition"):
+            marginalize_information(W, [0], [1], method="naive")  # index 2 missing
+
+    def test_non_square_raises(self):
+        W = np.zeros((3, 4))
+        with pytest.raises(ValueError, match="square"):
+            marginalize_information(W, [0], [1, 2], method="naive")

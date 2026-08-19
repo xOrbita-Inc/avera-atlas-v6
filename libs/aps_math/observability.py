@@ -21,7 +21,7 @@ import math
 
 import numpy as np
 
-__all__ = ["measurement_noise_covariance", "observation_jacobian"]
+__all__ = ["marginalize_information", "measurement_noise_covariance", "observation_jacobian"]
 
 
 def observation_jacobian(
@@ -185,3 +185,105 @@ def measurement_noise_covariance(
         diag.append(range_sigma_km ** 2)
 
     return np.diag(diag)
+
+
+def marginalize_information(
+    W: np.ndarray,
+    keep_idx: list[int],
+    drop_idx: list[int],
+    method: str = "schur",
+) -> np.ndarray:
+    """
+    Marginal Fisher information for the subspace indexed by keep_idx,
+    after eliminating the subspace indexed by drop_idx from a symmetric
+    information matrix W.
+
+    SCRUM-378. The observability Gramian's conjunction-plane projection
+    needs to drop a subspace twice (velocity from the full 6-state, then
+    the relative-velocity direction from the resulting 3D position
+    information within the conjunction plane), and both are the same
+    operation: this function, not two different ad hoc reductions.
+
+    method="schur" (default, and the one to use for W): the correct
+    reduction for an information matrix. Partitioning W into blocks over
+    keep_idx ("a") and drop_idx ("b"),
+
+        W_marginal = W_aa - W_ab @ inv(W_bb) @ W_ba
+
+    This is standard: the Schur complement of the eliminated block in a
+    partitioned precision matrix gives the marginal precision. Reduces
+    to W_aa exactly when W_ab is zero (the kept and dropped subspaces
+    are uncorrelated), and is otherwise strictly more conservative (the
+    subtracted term is positive semi-definite, since it has the form
+    X^T inv(W_bb) X with W_bb positive definite), reflecting that
+    information partially explained by the correlation with the dropped
+    subspace does not count as information about the kept subspace alone.
+
+    method="naive": the raw W_aa sub-block, with no correction. This is
+    the CORRECT reduction for a COVARIANCE (marginal covariance is
+    always just the relevant sub-block, no Schur complement needed,
+    e.g. pc_utils.py's own conjunction-plane projection, which operates
+    on a covariance). It is generally WRONG for an information matrix
+    unless the off-diagonal coupling happens to be exactly zero. Kept
+    here as an explicit, one-line-switch alternative for comparison
+    only, per review -- not the default, and not to be used for W
+    without a specific reason to.
+
+    Args:
+        W: symmetric information matrix, shape (n, n).
+        keep_idx: indices of the subspace to retain.
+        drop_idx: indices of the subspace to eliminate. Must partition
+            {0, ..., n-1} together with keep_idx: no overlap, nothing
+            left out.
+        method: "schur" or "naive".
+
+    Returns:
+        The marginal information matrix, shape (len(keep_idx), len(keep_idx)).
+
+    Raises:
+        ValueError if keep_idx/drop_idx don't partition W's indices
+        exactly, if method is not "schur" or "naive", or if W_bb (the
+        dropped-subspace block) is singular under method="schur" -- a
+        singular W_bb means the dropped directions carry no information
+        at all, which makes "the information explained by correlation
+        with them" undefined, not zero.
+    """
+    W = np.asarray(W, dtype=float)
+    n = W.shape[0]
+    if W.shape != (n, n):
+        raise ValueError(f"marginalize_information: W must be square, got shape {W.shape}")
+
+    keep_idx = list(keep_idx)
+    drop_idx = list(drop_idx)
+    all_idx = sorted(keep_idx + drop_idx)
+    if all_idx != list(range(n)):
+        raise ValueError(
+            f"marginalize_information: keep_idx and drop_idx must together "
+            f"partition range({n}) exactly with no overlap and nothing left "
+            f"out, got keep_idx={keep_idx}, drop_idx={drop_idx}"
+        )
+
+    W_aa = W[np.ix_(keep_idx, keep_idx)]
+
+    if method == "naive":
+        return W_aa
+    elif method == "schur":
+        W_ab = W[np.ix_(keep_idx, drop_idx)]
+        W_ba = W[np.ix_(drop_idx, keep_idx)]
+        W_bb = W[np.ix_(drop_idx, drop_idx)]
+        try:
+            W_bb_inv = np.linalg.inv(W_bb)
+        except np.linalg.LinAlgError as e:
+            raise ValueError(
+                "marginalize_information: the dropped-subspace block W_bb "
+                "is singular, so it carries no information and the "
+                "correlation correction is undefined. This means the arc "
+                "does not observe the dropped direction(s) at all -- a "
+                "genuine finding, not a numerical edge case to paper over."
+            ) from e
+        return W_aa - W_ab @ W_bb_inv @ W_ba
+    else:
+        raise ValueError(
+            f"marginalize_information: method must be 'schur' or 'naive', "
+            f"got {method!r}"
+        )
