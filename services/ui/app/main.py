@@ -21,6 +21,8 @@ from app import demo_presets
 app = FastAPI(title="AVERA-ATLAS Dashboard", version="6.0.0")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
+APS_VERSION = "2.5"
+
 PLANNER_SERVICE_URL = os.getenv("PLANNER_SERVICE_URL", "http://planner:8060")
 TRACKER_SERVICE_URL = os.getenv("TRACKER_SERVICE_URL", "http://tracker:8000")
 DETECTOR_SERVICE_URL = os.getenv("SWIR_SERVICE_URL", "http://detector:8000/predict")
@@ -41,7 +43,13 @@ templates = Jinja2Templates(directory="app/templates")
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(
+        "index.html",
+        {
+            "request": request,
+            "aps_version": APS_VERSION,
+        },
+    )
 
 
 # ---------- Planner proxy (ATLAS never runs analytics) ----------
