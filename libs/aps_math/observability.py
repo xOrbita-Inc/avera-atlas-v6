@@ -24,6 +24,8 @@ import numpy as np
 from . import frames
 
 __all__ = [
+    "conjunction_plane_basis",
+    "conjunction_plane_epsilon",
     "marginalize_information",
     "measurement_noise_covariance",
     "observability_gramian",
@@ -439,3 +441,141 @@ def observability_gramian(epoch_terms: list) -> np.ndarray:
             )
         w += term
     return w
+
+
+def conjunction_plane_basis(r_rel_km: np.ndarray, v_rel_km_s: np.ndarray) -> np.ndarray:
+    """
+    3x3 rotation whose columns are the conjunction-plane unit vectors
+    [x_hat, y_hat, z_hat] expressed in ECI.
+
+    SCRUM-378. Matches the encounter-frame convention already used by
+    libs/aps_math/pc_utils.py's Pc calculation: y is the relative-
+    velocity direction, z is the relative-motion orbit normal, x
+    completes the frame. The conjunction plane itself is the x-z plane;
+    y (relative velocity) is dropped when projecting onto it, since
+    motion along the relative-velocity direction does not change
+    whether the two objects collide, only when.
+
+        y_hat = v_rel / |v_rel|
+        z_hat = (r_rel x v_rel) / |r_rel x v_rel|
+        x_hat = y_hat x z_hat
+
+    Use it the same way rtn_to_eci_rotation is used: `eci = rot @ cp`,
+    `cp = rot.T @ eci`.
+
+    Args:
+        r_rel_km: relative position (primary minus secondary), ECI, km.
+        v_rel_km_s: relative velocity (primary minus secondary), ECI,
+            km/s, at the same epoch as r_rel_km (TCA, for the validity
+            gate's use).
+
+    Returns:
+        3x3 orthonormal matrix, columns [x_hat, y_hat, z_hat] in ECI.
+
+    Raises:
+        ValueError if the relative velocity is zero (no encounter frame
+        is defined without relative motion) or if r_rel and v_rel are
+        parallel (a degenerate geometry with no defined orbit normal --
+        physically, a purely radial approach with no cross-track
+        component at all).
+    """
+    r_rel = np.asarray(r_rel_km, dtype=float)
+    v_rel = np.asarray(v_rel_km_s, dtype=float)
+
+    v_norm = float(np.linalg.norm(v_rel))
+    if v_norm < 1e-12:
+        raise ValueError(
+            "conjunction_plane_basis: relative velocity is zero, no "
+            "encounter plane is defined without relative motion."
+        )
+    y_hat = v_rel / v_norm
+
+    h = np.cross(r_rel, v_rel)
+    h_norm = float(np.linalg.norm(h))
+    if h_norm < 1e-12:
+        raise ValueError(
+            "conjunction_plane_basis: relative position and velocity "
+            "are parallel, the encounter geometry is degenerate (no "
+            "defined orbit normal)."
+        )
+    z_hat = h / h_norm
+
+    x_hat = np.cross(y_hat, z_hat)
+
+    return np.column_stack([x_hat, y_hat, z_hat])
+
+
+def conjunction_plane_epsilon(
+    w_position_eci: np.ndarray,
+    r_rel_km: np.ndarray,
+    v_rel_km_s: np.ndarray,
+) -> tuple[float, np.ndarray, np.ndarray]:
+    """
+    Project a 3x3 ECI position information matrix onto the conjunction
+    plane and compute epsilon = lambda_min(W_CP) / lambda_max(W_CP).
+
+    SCRUM-378, MAF v2.0 Sec 7. Two steps, both using marginalize_
+    information's Schur-complement default (per review: W is an
+    information matrix, and the naive sub-block, correct for a
+    covariance, is not correct here):
+
+    1. Rotate w_position_eci into the conjunction-plane-aligned [x,y,z]
+       basis (a similarity transform, valid for an information matrix
+       exactly as for a covariance -- only the marginalization step
+       needs the Schur complement, not this rotation).
+    2. Marginalize out y (the relative-velocity direction), keeping
+       [x, z]: the 2D conjunction plane.
+
+    w_position_eci must already be information about the state AT THE
+    SAME EPOCH r_rel_km/v_rel_km_s are given at -- TCA, for the validity
+    gate. Obtain it by building the observability Gramian with t0=TCA
+    (each observation's dt_s to observability_gramian_epoch_term will
+    then be negative, since observations happen before TCA), then
+    marginalizing out velocity via marginalize_information(W, keep_idx=
+    [0,1,2], drop_idx=[3,4,5], method="schur"). Passing position
+    information referenced to a different epoch (e.g. the arc's start)
+    would silently mix two different epochs' geometry with no error --
+    the shapes all still work, the answer is just wrong.
+
+    Args:
+        w_position_eci: 3x3 symmetric position information matrix, ECI,
+            at the same epoch as r_rel_km/v_rel_km_s.
+        r_rel_km, v_rel_km_s: relative position/velocity (primary minus
+            secondary), ECI, at that same epoch.
+
+    Returns:
+        (epsilon, W_CP, weak_direction_eci): epsilon is
+        lambda_min/lambda_max of the 2x2 conjunction-plane information
+        matrix W_CP. weak_direction_eci is the 3D ECI unit vector
+        (embedded back from the 2D x-z eigenvector, with y=0) for the
+        eigenvector corresponding to the SMALLEST eigenvalue -- the
+        poorly-observed direction, for weak_directions reporting.
+    """
+    w_pos = np.asarray(w_position_eci, dtype=float)
+    if w_pos.shape != (3, 3):
+        raise ValueError(
+            f"conjunction_plane_epsilon: w_position_eci must be 3x3, "
+            f"got shape {w_pos.shape}"
+        )
+
+    q = conjunction_plane_basis(r_rel_km, v_rel_km_s)
+    w_xyz = q.T @ w_pos @ q
+
+    w_cp = marginalize_information(w_xyz, keep_idx=[0, 2], drop_idx=[1], method="schur")
+
+    eigvals, eigvecs = np.linalg.eigh(w_cp)  # ascending order
+    if eigvals[0] <= 0:
+        raise ValueError(
+            f"conjunction_plane_epsilon: W_CP is not positive definite "
+            f"(smallest eigenvalue {eigvals[0]:.3e}), epsilon is "
+            f"undefined. This means the tracking arc provides no "
+            f"information at all in some direction within the "
+            f"conjunction plane."
+        )
+    epsilon = float(eigvals[0] / eigvals[-1])
+
+    weak_xz = eigvecs[:, 0]  # 2D, [x-component, z-component]
+    weak_xyz = np.array([weak_xz[0], 0.0, weak_xz[1]])  # embed into full xyz, y=0
+    weak_direction_eci = q @ weak_xyz
+
+    return epsilon, w_cp, weak_direction_eci

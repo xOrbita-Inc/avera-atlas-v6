@@ -16,6 +16,8 @@ import pytest
 
 from aps_math import frames
 from aps_math.observability import (
+    conjunction_plane_basis,
+    conjunction_plane_epsilon,
     marginalize_information,
     measurement_noise_covariance,
     observability_gramian,
@@ -714,3 +716,172 @@ class TestObservabilityGramianGuards:
         bad = np.eye(3)
         with pytest.raises(ValueError, match="shape"):
             observability_gramian([good, bad])
+
+
+class TestConjunctionPlaneBasis:
+    """SCRUM-378: matches the encounter-frame convention already used by
+    libs/aps_math/pc_utils.py's Pc calculation (y = relative-velocity
+    direction, z = relative-motion orbit normal, x = y cross z)."""
+
+    def test_columns_are_orthonormal(self):
+        r_rel = np.array([1.0, 0.5, 0.2])
+        v_rel = np.array([0.1, -0.05, 0.02])
+        q = conjunction_plane_basis(r_rel, v_rel)
+        assert np.allclose(q.T @ q, np.eye(3), atol=1e-12)
+        assert math.isclose(np.linalg.det(q), 1.0, rel_tol=1e-9)
+
+    def test_y_is_the_relative_velocity_direction(self):
+        r_rel = np.array([1.0, 0.5, 0.2])
+        v_rel = np.array([0.1, -0.05, 0.02])
+        q = conjunction_plane_basis(r_rel, v_rel)
+        expected_y = v_rel / np.linalg.norm(v_rel)
+        assert np.allclose(q[:, 1], expected_y)
+
+    def test_z_is_the_relative_orbit_normal(self):
+        r_rel = np.array([1.0, 0.5, 0.2])
+        v_rel = np.array([0.1, -0.05, 0.02])
+        q = conjunction_plane_basis(r_rel, v_rel)
+        h = np.cross(r_rel, v_rel)
+        expected_z = h / np.linalg.norm(h)
+        assert np.allclose(q[:, 2], expected_z)
+
+    def test_zero_relative_velocity_raises(self):
+        with pytest.raises(ValueError, match="relative velocity"):
+            conjunction_plane_basis(np.array([1.0, 0.0, 0.0]), np.array([0.0, 0.0, 0.0]))
+
+    def test_parallel_position_and_velocity_raises(self):
+        with pytest.raises(ValueError, match="degenerate"):
+            conjunction_plane_basis(np.array([1.0, 0.0, 0.0]), np.array([2.0, 0.0, 0.0]))
+
+
+class TestConjunctionPlaneEpsilon:
+    """SCRUM-378, MAF v2.0 Sec 7."""
+
+    @staticmethod
+    def _kepler_propagate(r0, v0, dt, mu, n_steps=2000):
+        def deriv(state):
+            r = state[:3]
+            v = state[3:]
+            r_norm = np.linalg.norm(r)
+            a = -mu * r / r_norm ** 3
+            return np.concatenate([v, a])
+        state = np.concatenate([r0, v0])
+        steps = n_steps if dt != 0 else 0
+        h = dt / n_steps if dt != 0 else 1.0
+        for _ in range(steps):
+            k1 = deriv(state)
+            k2 = deriv(state + h / 2 * k1)
+            k3 = deriv(state + h / 2 * k2)
+            k4 = deriv(state + h * k3)
+            state = state + h / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+        return state[:3], state[3:]
+
+    def _build_realistic_arc_position_info(self):
+        """A physically realistic short angles-only tracking arc, ground
+        station to LEO primary, all observations before TCA (t0=TCA per
+        this ticket's own resolved epoch convention -- see
+        conjunction_plane_epsilon's docstring)."""
+        mu = frames.MU_EARTH
+        a_km = 6928.0  # ~550 km altitude
+        r_tca = np.array([a_km, 0.0, 0.0])
+        n = math.sqrt(mu / a_km ** 3)
+        v_tca = np.array([0.0, n * a_km, 0.0])
+
+        r_earth = 6378.0
+        r_observer = np.array(
+            [r_earth * math.cos(math.radians(5)), 0.0, r_earth * math.sin(math.radians(5))]
+        )
+
+        terms = []
+        for i in range(5):
+            dt_s = -(300.0 - i * 60.0)
+            r_tau, v_tau = self._kepler_propagate(r_tca, v_tca, dt_s, mu)
+            term = observability_gramian_epoch_term(
+                r_tca, v_tca, r_tau, v_tau, r_observer, a_km, dt_s,
+                ra_sigma_rad=1e-5, dec_sigma_rad=1e-5,
+            )
+            terms.append(term)
+
+        w = observability_gramian(terms)
+        w_pos = marginalize_information(w, keep_idx=[0, 1, 2], drop_idx=[3, 4, 5], method="schur")
+        return w_pos, r_tca, v_tca
+
+    def test_epsilon_stays_in_zero_one(self):
+        """A ratio of the smallest to largest eigenvalue of a positive
+        definite matrix is always in [0, 1] -- checked across several
+        random PSD position-information matrices and geometries, not
+        just one convenient case."""
+        rng = np.random.default_rng(1)
+        checked = 0
+        for _ in range(20):
+            a = rng.normal(size=(3, 3))
+            w_pos = a @ a.T + 3 * np.eye(3)
+            r_rel = rng.normal(size=3)
+            v_rel = rng.normal(size=3) * 0.01
+            if np.linalg.norm(np.cross(r_rel, v_rel)) < 1e-6:
+                continue
+            eps, _, _ = conjunction_plane_epsilon(w_pos, r_rel, v_rel)
+            assert 0.0 <= eps <= 1.0
+            checked += 1
+        assert checked >= 15, "too many degenerate geometries were skipped to be a meaningful check"
+
+    def test_weak_direction_is_a_unit_vector(self):
+        w_pos = np.diag([2.0, 1.5, 1.0])
+        r_rel = np.array([1.0, 0.0, 0.0])
+        v_rel = np.array([0.0, 1.0, 0.0])
+        _, _, weak_dir = conjunction_plane_epsilon(w_pos, r_rel, v_rel)
+        assert math.isclose(np.linalg.norm(weak_dir), 1.0, rel_tol=1e-9)
+
+    def test_weak_direction_has_zero_relative_velocity_component(self):
+        """The weak direction lives IN the conjunction plane by
+        construction, so it must be orthogonal to the relative-velocity
+        direction (the y-axis that got marginalized out)."""
+        w_pos = np.diag([2.0, 1.5, 1.0])
+        r_rel = np.array([1.0, 0.3, 0.1])
+        v_rel = np.array([0.05, 1.0, -0.02])
+        _, _, weak_dir = conjunction_plane_epsilon(w_pos, r_rel, v_rel)
+        y_hat = v_rel / np.linalg.norm(v_rel)
+        assert math.isclose(float(np.dot(weak_dir, y_hat)), 0.0, abs_tol=1e-9)
+
+    def test_matches_the_docs_stated_physical_expectation(self):
+        """SCRUM-333's own validity doc: 'Typical failure mode for
+        CDM-based LEO conjunctions: poor radial observability from short
+        tracking arcs. Cross-track is typically the best-resolved
+        direction.' Checked here against the FULL 3D position
+        information (before any conjunction-plane projection, which
+        depends on a specific secondary's geometry): the weakest and
+        strongest full-3D directions should be radial and cross-track
+        respectively, in RTN terms. This is not just internal
+        self-consistency -- it is the pipeline reproducing a real,
+        independently-stated physical prediction."""
+        w_pos_eci, r_tca, v_tca = self._build_realistic_arc_position_info()
+        rot_tca = frames.rtn_to_eci_rotation(r_tca, v_tca)
+        w_pos_rtn = rot_tca.T @ w_pos_eci @ rot_tca
+        eigvals, eigvecs = np.linalg.eigh(w_pos_rtn)
+
+        labels = ["R", "T", "N"]
+        weakest_label = labels[np.argmax(np.abs(eigvecs[:, 0]))]
+        strongest_label = labels[np.argmax(np.abs(eigvecs[:, -1]))]
+
+        assert weakest_label == "R", (
+            f"expected radial to be the weakest-observed direction for a "
+            f"short single-station angles-only arc, got {weakest_label}"
+        )
+        assert strongest_label == "N", (
+            f"expected cross-track to be the best-resolved direction, "
+            f"got {strongest_label}"
+        )
+
+    def test_wrong_shape_w_position_raises(self):
+        with pytest.raises(ValueError, match="3x3"):
+            conjunction_plane_epsilon(np.eye(6), np.array([1.0, 0, 0]), np.array([0.0, 1.0, 0]))
+
+    def test_singular_dropped_block_raises(self):
+        """Propagates marginalize_information's own guard: zero
+        information in the direction being dropped is a real finding
+        about the geometry, not a numerical nuisance."""
+        w_singular = np.diag([1.0, 0.0, 1.0])
+        r_rel = np.array([1.0, 0.0, 0.0])
+        v_rel = np.array([0.0, 1.0, 0.0])
+        with pytest.raises(ValueError):
+            conjunction_plane_epsilon(w_singular, r_rel, v_rel)
