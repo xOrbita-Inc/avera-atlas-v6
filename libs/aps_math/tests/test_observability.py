@@ -18,6 +18,8 @@ from aps_math import frames
 from aps_math.observability import (
     marginalize_information,
     measurement_noise_covariance,
+    observability_gramian,
+    observability_gramian_epoch_term,
     observation_jacobian,
 )
 
@@ -481,3 +483,234 @@ class TestMarginalizeInformationGuards:
         W = np.zeros((3, 4))
         with pytest.raises(ValueError, match="square"):
             marginalize_information(W, [0], [1, 2], method="naive")
+
+
+class TestObservabilityGramianEpochTerm:
+    """SCRUM-378: the correctly frame-combined single-epoch Gramian term,
+    verified against true two-body motion, not against Phi or H
+    individually -- this is the integration point where a frame mismatch
+    (the SCRUM-409 failure mode, for a general state deviation) would
+    show up."""
+
+    @staticmethod
+    def _true_two_body_propagate(r0, v0, dt_s, mu, n_steps=6000):
+        def deriv(state):
+            r = state[:3]
+            v = state[3:]
+            r_norm = np.linalg.norm(r)
+            a = -mu * r / r_norm ** 3
+            return np.concatenate([v, a])
+
+        state = np.concatenate([np.asarray(r0, dtype=float), np.asarray(v0, dtype=float)])
+        h = dt_s / n_steps
+        for _ in range(n_steps):
+            k1 = deriv(state)
+            k2 = deriv(state + h / 2 * k1)
+            k3 = deriv(state + h / 2 * k2)
+            k4 = deriv(state + h * k3)
+            state = state + h / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+        return state[:3], state[3:]
+
+    @staticmethod
+    def _ra_dec(r_target, r_observer):
+        los = r_target - r_observer
+        rng = np.linalg.norm(los)
+        u = los / rng
+        dec = math.asin(np.clip(u[2], -1.0, 1.0))
+        ra = math.atan2(u[1], u[0])
+        return np.array([ra, dec])
+
+    def test_linear_prediction_matches_true_two_body_measurement_change(self):
+        """The actual thing that matters: does H_eff correctly predict
+        how the measurement changes for a real perturbation, propagated
+        with real (nonlinear) two-body motion? This is the test that
+        would catch a frame mismatch in combining Phi and H."""
+        mu = frames.MU_EARTH
+        a_km = 6928.0
+        r0 = np.array([a_km, 0.0, 0.0])
+        n = math.sqrt(mu / a_km ** 3)
+        v0 = np.array([0.0, n * a_km, 0.0])
+        r_observer = np.array([6900.0, 0.0, 0.0])
+        dt_s = 300.0
+
+        r_tau, v_tau = self._true_two_body_propagate(r0, v0, dt_s, mu)
+
+        dr0 = np.array([0.01, -0.02, 0.005])
+        dv0 = np.array([0.00001, 0.000005, -0.000003])
+        dx0 = np.concatenate([dr0, dv0])
+
+        r_pert_tau, _ = self._true_two_body_propagate(r0 + dr0, v0 + dv0, dt_s, mu)
+
+        meas_ref = self._ra_dec(r_tau, r_observer)
+        meas_pert = self._ra_dec(r_pert_tau, r_observer)
+        dy_true = meas_pert - meas_ref
+
+        rot_t0 = frames.rtn_to_eci_rotation(r0, v0)
+        rot_tau = frames.rtn_to_eci_rotation(r_tau, v_tau)
+        phi_rtn = frames.cw_phi_full(a_km, dt_s)
+        m_tau = frames.rtn_to_eci_state_transform(rot_tau, a_km)
+        m0_inv = frames.eci_to_rtn_state_transform(rot_t0, a_km)
+        h_tau = observation_jacobian(r_tau, r_observer, include_range=False)
+        h_eff = h_tau @ m_tau @ phi_rtn @ m0_inv
+
+        dy_pred = h_eff @ dx0
+        rel_err = np.linalg.norm(dy_pred - dy_true) / np.linalg.norm(dy_true)
+        assert rel_err < 1e-3, f"rel error {rel_err:.2e}"
+
+    def test_returns_symmetric_psd_6x6(self):
+        a_km = 6928.0
+        r0 = np.array([a_km, 0.0, 0.0])
+        n = math.sqrt(frames.MU_EARTH / a_km ** 3)
+        v0 = np.array([0.0, n * a_km, 0.0])
+        r_observer = np.array([6900.0, 50.0, 20.0])
+
+        term = observability_gramian_epoch_term(
+            r0, v0, r0, v0, r_observer, a_km, 0.0,
+            ra_sigma_rad=1e-5, dec_sigma_rad=1e-5,
+        )
+        assert term.shape == (6, 6)
+        assert np.allclose(term, term.T)
+        eigvals = np.linalg.eigvalsh(term)
+        assert np.all(eigvals >= -1e-6)
+
+    def test_single_epoch_term_is_rank_deficient(self):
+        """A single observation cannot fully determine a 6-state: at most
+        2 (angles-only) or 3 (angles+range) of the 6 eigenvalues should
+        be meaningfully nonzero."""
+        a_km = 6928.0
+        r0 = np.array([a_km, 0.0, 0.0])
+        n = math.sqrt(frames.MU_EARTH / a_km ** 3)
+        v0 = np.array([0.0, n * a_km, 0.0])
+        r_observer = np.array([6900.0, 50.0, 20.0])
+
+        term = observability_gramian_epoch_term(
+            r0, v0, r0, v0, r_observer, a_km, 300.0,
+            ra_sigma_rad=1e-5, dec_sigma_rad=1e-5,
+        )
+        eigvals = np.linalg.eigvalsh(term)
+        significant = np.sum(eigvals > 1e-6 * eigvals.max())
+        assert significant <= 2, f"expected rank <= 2 for angles-only, got {significant}"
+
+    def test_angles_and_range_gives_higher_rank_than_angles_only(self):
+        """A sanity check on the whole chain: adding a range measurement
+        should never reduce the observable rank relative to angles-only
+        at the same epoch."""
+        a_km = 6928.0
+        r0 = np.array([a_km, 0.0, 0.0])
+        n = math.sqrt(frames.MU_EARTH / a_km ** 3)
+        v0 = np.array([0.0, n * a_km, 0.0])
+        r_observer = np.array([6900.0, 50.0, 20.0])
+
+        term_angles = observability_gramian_epoch_term(
+            r0, v0, r0, v0, r_observer, a_km, 300.0,
+            ra_sigma_rad=1e-5, dec_sigma_rad=1e-5,
+        )
+        term_range = observability_gramian_epoch_term(
+            r0, v0, r0, v0, r_observer, a_km, 300.0,
+            ra_sigma_rad=1e-5, dec_sigma_rad=1e-5, range_sigma_km=0.05,
+        )
+        rank_angles = np.sum(np.linalg.eigvalsh(term_angles) > 1e-6 * np.linalg.eigvalsh(term_angles).max())
+        rank_range = np.sum(np.linalg.eigvalsh(term_range) > 1e-6 * np.linalg.eigvalsh(term_range).max())
+        assert rank_range >= rank_angles
+
+
+class TestObservabilityGramian:
+    """SCRUM-378: summing single-epoch terms into the full-arc Gramian."""
+
+    def _build_arc_terms(self, n_obs=5, dt_step_s=60.0):
+        a_km = 6928.0
+        r0 = np.array([a_km, 0.0, 0.0])
+        n = math.sqrt(frames.MU_EARTH / a_km ** 3)
+        v0 = np.array([0.0, n * a_km, 0.0])
+        r_observer = np.array([6900.0, 50.0, 20.0])
+
+        def kepler_propagate(r, v, dt, mu, n_steps=2000):
+            def deriv(state):
+                rr = state[:3]
+                vv = state[3:]
+                rn = np.linalg.norm(rr)
+                aa = -mu * rr / rn ** 3
+                return np.concatenate([vv, aa])
+            state = np.concatenate([r, v])
+            h = dt / n_steps if dt != 0 else 1.0
+            steps = n_steps if dt != 0 else 0
+            for _ in range(steps):
+                k1 = deriv(state)
+                k2 = deriv(state + h / 2 * k1)
+                k3 = deriv(state + h / 2 * k2)
+                k4 = deriv(state + h * k3)
+                state = state + h / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+            return state[:3], state[3:]
+
+        terms = []
+        for i in range(n_obs):
+            dt_s = i * dt_step_s
+            r_tau, v_tau = kepler_propagate(r0, v0, dt_s, frames.MU_EARTH)
+            term = observability_gramian_epoch_term(
+                r0, v0, r_tau, v_tau, r_observer, a_km, dt_s,
+                ra_sigma_rad=1e-5, dec_sigma_rad=1e-5,
+            )
+            terms.append(term)
+        return terms
+
+    def test_arc_sum_reaches_full_rank(self):
+        """The core physical claim: individual epochs are rank-deficient,
+        but a short arc with real geometric diversity builds up full
+        6D rank. If this stopped being true, epsilon would be
+        meaningless for every real geometry, not just degenerate ones."""
+        terms = self._build_arc_terms(n_obs=5, dt_step_s=60.0)
+        W = observability_gramian(terms)
+        eigvals = np.linalg.eigvalsh(W)
+        assert np.all(eigvals > 1e-6 * eigvals.max()), (
+            f"expected full rank (6 significant eigenvalues), got "
+            f"eigenvalues {eigvals}"
+        )
+
+    def test_is_symmetric(self):
+        terms = self._build_arc_terms(n_obs=3)
+        W = observability_gramian(terms)
+        assert np.allclose(W, W.T)
+
+    def test_is_positive_semidefinite(self):
+        terms = self._build_arc_terms(n_obs=3)
+        W = observability_gramian(terms)
+        assert np.all(np.linalg.eigvalsh(W) >= -1e-6)
+
+    def test_equals_sum_of_individual_terms(self):
+        """Not testing anything clever -- confirms the function actually
+        sums and doesn't silently drop, average, or otherwise mangle the
+        inputs."""
+        terms = self._build_arc_terms(n_obs=4)
+        W = observability_gramian(terms)
+        manual_sum = np.zeros((6, 6))
+        for t in terms:
+            manual_sum += t
+        assert np.array_equal(W, manual_sum)
+
+    def test_more_observations_do_not_reduce_information(self):
+        """Adding an observation can only add PSD information, never
+        remove it: W_more - W_fewer must itself be PSD."""
+        terms_3 = self._build_arc_terms(n_obs=3, dt_step_s=60.0)
+        terms_5 = self._build_arc_terms(n_obs=5, dt_step_s=60.0)
+        W_3 = observability_gramian(terms_3)
+        W_5 = observability_gramian(terms_5)
+        diff_eigvals = np.linalg.eigvalsh(W_5 - W_3)
+        assert np.all(diff_eigvals >= -1e-6)
+
+
+class TestObservabilityGramianGuards:
+    def test_empty_arc_raises(self):
+        with pytest.raises(ValueError, match="empty"):
+            observability_gramian([])
+
+    def test_wrong_shape_term_raises(self):
+        with pytest.raises(ValueError, match="shape"):
+            observability_gramian([np.eye(3)])
+
+    def test_one_correct_one_wrong_shape_raises(self):
+        """The whole call must be rejected, not just the bad element
+        silently skipped."""
+        good = np.eye(6)
+        bad = np.eye(3)
+        with pytest.raises(ValueError, match="shape"):
+            observability_gramian([good, bad])

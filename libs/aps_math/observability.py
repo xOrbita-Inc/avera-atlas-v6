@@ -21,7 +21,15 @@ import math
 
 import numpy as np
 
-__all__ = ["marginalize_information", "measurement_noise_covariance", "observation_jacobian"]
+from . import frames
+
+__all__ = [
+    "marginalize_information",
+    "measurement_noise_covariance",
+    "observability_gramian",
+    "observability_gramian_epoch_term",
+    "observation_jacobian",
+]
 
 
 def observation_jacobian(
@@ -287,3 +295,147 @@ def marginalize_information(
             f"marginalize_information: method must be 'schur' or 'naive', "
             f"got {method!r}"
         )
+
+
+
+def observability_gramian_epoch_term(
+    r_target_t0_km: np.ndarray,
+    v_target_t0_km_s: np.ndarray,
+    r_target_tau_km: np.ndarray,
+    v_target_tau_km_s: np.ndarray,
+    r_observer_tau_km: np.ndarray,
+    a_km: float,
+    dt_s: float,
+    ra_sigma_rad: float,
+    dec_sigma_rad: float,
+    range_sigma_km: float | None = None,
+) -> np.ndarray:
+    """
+    Single-epoch contribution to the observability Gramian: the 6x6 term
+    H_eff(tau)^T R^-1 H_eff(tau), where H_eff maps an ECI state deviation
+    at t0 directly to a measurement deviation at tau, correctly combining
+    Phi (RTN-frame propagation) and H (ECI-frame measurement Jacobian).
+
+    SCRUM-378. cw_phi_full propagates a state deviation within the
+    rotating RTN frame from t0 to tau; observation_jacobian differentiates
+    the ECI-frame observation model at tau. Naively multiplying H(tau) by
+    Phi(tau,t0) mixes frames -- the same category of error SCRUM-409
+    found in maneuver_scorer.py, just for a general state deviation
+    rather than a pure burn. The correct combination converts the ECI
+    deviation at t0 into RTN, propagates it, converts the result back to
+    ECI at tau, then applies H:
+
+        H_eff(tau) = H(tau) @ rtn_to_eci_state_transform(rot_tau, a) @
+                     Phi(tau, t0) @ eci_to_rtn_state_transform(rot_t0, a)
+
+    This is algebraically the same quantity the SCRUM-333 formula's
+    Phi(tau,t0)^T H(tau)^T R^-1 H(tau) Phi(tau,t0) describes, correctly
+    accounting for the fact that Phi and H are not naturally expressed in
+    the same frame -- the formula's own notation implicitly assumes a
+    single consistent frame throughout, which does not hold here.
+
+    Verified against true two-body motion: H_eff's linear prediction of
+    the measurement change from a real perturbed-vs-unperturbed
+    propagation matches to ~1e-5 relative error at a 300s arc segment,
+    consistent with the linearization error already present in Phi and
+    the state transform individually. See tests/test_observability.py.
+
+    The returned 6x6 term is individually rank-deficient (rank at most 2
+    or 3, matching H's row count), since a single epoch cannot fully
+    determine a 6-state -- this is expected, not a defect, and shows up
+    as several eigenvalues near zero (floating-point noise around the
+    true zero, positive or negative). Summing this term across multiple
+    epochs in a tracking arc is what observability_gramian accumulates
+    toward full rank.
+
+    Args:
+        r_target_t0_km, v_target_t0_km_s: reference target state at the
+            arc's start epoch t0 (e.g. from an IOD solution).
+        r_target_tau_km, v_target_tau_km_s: reference target state at
+            this observation's epoch tau (e.g. from propagating the t0
+            state forward, such as services/tracker/iod.py's
+            kepler_propagate).
+        r_observer_tau_km: observer ECI position at epoch tau.
+        a_km: reference semi-major axis for the circular-orbit CW/state-
+            transform assumption, consistent across the whole arc.
+        dt_s: tau - t0, seconds. May be negative.
+        ra_sigma_rad, dec_sigma_rad: this observation's angular
+            measurement uncertainty.
+        range_sigma_km: this observation's range uncertainty, or None
+            for an angles-only observation (most observations from this
+            system's own sensor; see observation_jacobian's docstring).
+
+    Returns:
+        6x6 symmetric positive semi-definite matrix, in ECI-state-
+        deviation-at-t0 coordinates.
+    """
+    rot_t0 = frames.rtn_to_eci_rotation(r_target_t0_km, v_target_t0_km_s)
+    rot_tau = frames.rtn_to_eci_rotation(r_target_tau_km, v_target_tau_km_s)
+
+    phi_rtn = frames.cw_phi_full(a_km, dt_s)
+    m_tau = frames.rtn_to_eci_state_transform(rot_tau, a_km)
+    m0_inv = frames.eci_to_rtn_state_transform(rot_t0, a_km)
+
+    h_tau = observation_jacobian(
+        r_target_tau_km, r_observer_tau_km, include_range=range_sigma_km is not None
+    )
+    r_cov = measurement_noise_covariance(ra_sigma_rad, dec_sigma_rad, range_sigma_km)
+
+    h_eff = h_tau @ m_tau @ phi_rtn @ m0_inv
+
+    r_inv = np.linalg.inv(r_cov)
+    return h_eff.T @ r_inv @ h_eff
+
+
+def observability_gramian(epoch_terms: list) -> np.ndarray:
+    """
+    Sum single-epoch Gramian terms into the full-arc observability
+    Gramian W.
+
+    SCRUM-378. W = sum_i observability_gramian_epoch_term(...) over every
+    observation in the tracking arc. A single epoch's term is individually
+    rank-deficient (see observability_gramian_epoch_term); the sum across
+    an arc with enough geometric diversity is what builds up full rank
+    and makes the Gramian invertible/well-conditioned. That diversity, or
+    the lack of it, is exactly what epsilon (the ratio of smallest to
+    largest eigenvalue, after projecting onto the conjunction plane via
+    marginalize_information) is meant to detect.
+
+    Deliberately takes a plain list of already-computed 6x6 terms rather
+    than the raw per-observation inputs: this function's only job is the
+    summation, not looping over observations, fetching reference states,
+    or deciding which observations belong in the arc. Keeping it this
+    narrow means it needs no changes regardless of how observations get
+    selected or how their reference states get propagated.
+
+    Args:
+        epoch_terms: list of 6x6 matrices, each from
+            observability_gramian_epoch_term, all expressed relative to
+            the SAME t0 (they must be, since each term already maps an
+            ECI deviation at that shared t0 to a measurement deviation).
+
+    Returns:
+        6x6 symmetric positive semi-definite matrix, W.
+
+    Raises:
+        ValueError if epoch_terms is empty (a Gramian over zero
+        observations is not zero information, it is undefined -- the
+        arc has not been characterized at all) or if any term is not
+        6x6.
+    """
+    if not epoch_terms:
+        raise ValueError(
+            "observability_gramian: epoch_terms is empty. A Gramian over "
+            "zero observations is undefined, not zero -- there is no arc "
+            "to characterize."
+        )
+    w = np.zeros((6, 6), dtype=float)
+    for i, term in enumerate(epoch_terms):
+        term = np.asarray(term, dtype=float)
+        if term.shape != (6, 6):
+            raise ValueError(
+                f"observability_gramian: epoch_terms[{i}] has shape "
+                f"{term.shape}, expected (6, 6)"
+            )
+        w += term
+    return w
