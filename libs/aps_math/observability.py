@@ -18,12 +18,15 @@ CW state transition matrix this module's Gramian will use alongside H.
 from __future__ import annotations
 
 import math
+from enum import Enum
 
 import numpy as np
 
 from . import frames
 
 __all__ = [
+    "ValidityStatus",
+    "classify_validity",
     "conjunction_plane_basis",
     "conjunction_plane_epsilon",
     "marginalize_information",
@@ -31,6 +34,7 @@ __all__ = [
     "observability_gramian",
     "observability_gramian_epoch_term",
     "observation_jacobian",
+    "weak_direction_rtn_label",
 ]
 
 
@@ -579,3 +583,75 @@ def conjunction_plane_epsilon(
     weak_direction_eci = q @ weak_xyz
 
     return epsilon, w_cp, weak_direction_eci
+
+
+class ValidityStatus(str, Enum):
+    """MAF v2.0 section 7 observability-gate verdict."""
+
+    EARNED = "EARNED"
+    NOT_EARNED = "NOT_EARNED"
+
+
+def classify_validity(epsilon: float, epsilon_threshold: float) -> ValidityStatus:
+    """
+    Classify the Fisher-information observability check. SCRUM-378, MAF
+    v2.0 section 7: EARNED if epsilon >= epsilon_threshold, else
+    NOT_EARNED. epsilon_threshold is 0.20 for LEO (locked, SCRUM-333);
+    passed as a parameter here rather than hardcoded, since MEO/GEO get
+    their own value later and this function should not need to change
+    when that happens.
+
+    A non-finite or negative epsilon (should not occur from
+    conjunction_plane_epsilon's own output, which is bounded in [0,1] or
+    raises, but this function does not assume its caller always goes
+    through that path) is treated as NOT_EARNED: the conservative
+    fallback, matching classify_iod_confidence's own pattern of
+    defaulting to the least permissive verdict on invalid input rather
+    than raising or guessing.
+    """
+    if not np.isfinite(epsilon) or epsilon < 0.0:
+        return ValidityStatus.NOT_EARNED
+    if epsilon >= epsilon_threshold:
+        return ValidityStatus.EARNED
+    return ValidityStatus.NOT_EARNED
+
+
+_RTN_LABELS = ("radial", "along-track", "cross-track")
+
+
+def weak_direction_rtn_label(
+    weak_direction_eci: np.ndarray, rot_rtn_to_eci: np.ndarray
+) -> list[str]:
+    """
+    Map the conjunction-plane weak-direction eigenvector
+    (conjunction_plane_epsilon's third return value) back to an RTN
+    label, for ValidityVerdict's weak_directions field, e.g. ["radial"].
+
+    SCRUM-378, MAF v2.0 section 7. Labels the single dominant RTN
+    component of the weak-direction vector. A direction meaningfully
+    split across two RTN axes still gets one label, the closest axis --
+    an honest simplification, not a claim of pure alignment. Returns a
+    list (matching the interface field's documented single-element
+    example) rather than reporting multiple directions within some
+    margin of the smallest eigenvalue: no margin for that is specified
+    anywhere in the ticket or the MAF doc, and guessing one would be the
+    same kind of unstated-parameter guess this codebase's history argues
+    against.
+
+    Args:
+        weak_direction_eci: unit vector, ECI, from
+            conjunction_plane_epsilon.
+        rot_rtn_to_eci: the primary's RTN-to-ECI rotation AT THE SAME
+            EPOCH the weak direction was computed at (TCA, per
+            conjunction_plane_epsilon's own epoch convention), from
+            aps_math.frames.rtn_to_eci_rotation.
+
+    Returns:
+        Single-element list containing one of "radial", "along-track",
+        "cross-track".
+    """
+    weak_dir_eci = np.asarray(weak_direction_eci, dtype=float)
+    rot = np.asarray(rot_rtn_to_eci, dtype=float)
+    weak_dir_rtn = rot.T @ weak_dir_eci
+    dominant_idx = int(np.argmax(np.abs(weak_dir_rtn)))
+    return [_RTN_LABELS[dominant_idx]]

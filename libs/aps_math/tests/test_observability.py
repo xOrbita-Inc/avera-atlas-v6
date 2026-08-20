@@ -16,6 +16,8 @@ import pytest
 
 from aps_math import frames
 from aps_math.observability import (
+    ValidityStatus,
+    classify_validity,
     conjunction_plane_basis,
     conjunction_plane_epsilon,
     marginalize_information,
@@ -23,6 +25,7 @@ from aps_math.observability import (
     observability_gramian,
     observability_gramian_epoch_term,
     observation_jacobian,
+    weak_direction_rtn_label,
 )
 
 
@@ -885,3 +888,88 @@ class TestConjunctionPlaneEpsilon:
         v_rel = np.array([0.0, 1.0, 0.0])
         with pytest.raises(ValueError):
             conjunction_plane_epsilon(w_singular, r_rel, v_rel)
+
+
+class TestClassifyValidity:
+    """SCRUM-378, MAF v2.0 Sec 7: EARNED if epsilon >= threshold, else
+    NOT_EARNED. Matches services/tracker/iod.py's classify_iod_confidence
+    pattern: a classify function plus a str Enum verdict."""
+
+    def test_above_threshold_is_earned(self):
+        assert classify_validity(0.25, 0.20) == ValidityStatus.EARNED
+
+    def test_below_threshold_is_not_earned(self):
+        assert classify_validity(0.15, 0.20) == ValidityStatus.NOT_EARNED
+
+    def test_exactly_at_threshold_is_earned(self):
+        """The doc says 'at or above' -- the boundary is inclusive."""
+        assert classify_validity(0.20, 0.20) == ValidityStatus.EARNED
+
+    def test_locked_leo_threshold_from_the_ticket(self):
+        """Pins the actual SCRUM-333/SCRUM-378 locked value, 0.20, so the
+        ticket and the code cannot silently drift apart."""
+        assert classify_validity(0.1999, 0.20) == ValidityStatus.NOT_EARNED
+        assert classify_validity(0.2000, 0.20) == ValidityStatus.EARNED
+        assert classify_validity(0.2001, 0.20) == ValidityStatus.EARNED
+
+    def test_nan_epsilon_is_not_earned(self):
+        """The conservative fallback on invalid input, matching
+        classify_iod_confidence's own pattern."""
+        assert classify_validity(float("nan"), 0.20) == ValidityStatus.NOT_EARNED
+
+    def test_negative_epsilon_is_not_earned(self):
+        assert classify_validity(-0.1, 0.20) == ValidityStatus.NOT_EARNED
+
+    def test_returns_a_str_enum_member(self):
+        """Matches IODConfidenceVerdict's str, Enum pattern: usable
+        directly as a string (e.g. for JSON serialization) without an
+        explicit .value access."""
+        result = classify_validity(0.25, 0.20)
+        assert result == "EARNED"
+        assert isinstance(result, str)
+
+
+class TestWeakDirectionRtnLabel:
+    """SCRUM-378, MAF v2.0 Sec 7: maps the conjunction-plane weak
+    direction back to an RTN label for ValidityVerdict's weak_directions
+    field."""
+
+    def _rtn_rotation(self):
+        a_km = 6928.0
+        r = np.array([a_km, 0.0, 0.0])
+        n = math.sqrt(frames.MU_EARTH / a_km ** 3)
+        v = np.array([0.0, n * a_km, 0.0])
+        return frames.rtn_to_eci_rotation(r, v)
+
+    def test_pure_radial_direction_labels_radial(self):
+        rot = self._rtn_rotation()
+        weak_dir = rot[:, 0]  # R column
+        assert weak_direction_rtn_label(weak_dir, rot) == ["radial"]
+
+    def test_pure_along_track_direction_labels_along_track(self):
+        rot = self._rtn_rotation()
+        weak_dir = rot[:, 1]  # T column
+        assert weak_direction_rtn_label(weak_dir, rot) == ["along-track"]
+
+    def test_pure_cross_track_direction_labels_cross_track(self):
+        rot = self._rtn_rotation()
+        weak_dir = rot[:, 2]  # N column
+        assert weak_direction_rtn_label(weak_dir, rot) == ["cross-track"]
+
+    def test_returns_a_single_element_list(self):
+        """Matches the interface field's documented shape, e.g.
+        ["radial"], not a bare string."""
+        rot = self._rtn_rotation()
+        result = weak_direction_rtn_label(rot[:, 0], rot)
+        assert isinstance(result, list)
+        assert len(result) == 1
+
+    def test_dominant_component_wins_for_a_mixed_direction(self):
+        """A direction mostly radial with a small along-track component
+        should still label as radial -- the dominant axis, not a
+        compound label, per this function's documented simplification."""
+        rot = self._rtn_rotation()
+        mixed_rtn = np.array([0.9, 0.1, 0.0])
+        mixed_rtn = mixed_rtn / np.linalg.norm(mixed_rtn)
+        mixed_eci = rot @ mixed_rtn
+        assert weak_direction_rtn_label(mixed_eci, rot) == ["radial"]
