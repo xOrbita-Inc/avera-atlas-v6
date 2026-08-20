@@ -946,15 +946,17 @@ class TestWeakDirectionRtnLabel:
         weak_dir = rot[:, 0]  # R column
         assert weak_direction_rtn_label(weak_dir, rot) == ["radial"]
 
-    def test_pure_along_track_direction_labels_along_track(self):
+    def test_pure_transverse_direction_labels_transverse(self):
+        """gnc_interface.yaml's weak_directions enum is [radial,
+        transverse, normal], not along-track/cross-track."""
         rot = self._rtn_rotation()
         weak_dir = rot[:, 1]  # T column
-        assert weak_direction_rtn_label(weak_dir, rot) == ["along-track"]
+        assert weak_direction_rtn_label(weak_dir, rot) == ["transverse"]
 
-    def test_pure_cross_track_direction_labels_cross_track(self):
+    def test_pure_normal_direction_labels_normal(self):
         rot = self._rtn_rotation()
         weak_dir = rot[:, 2]  # N column
-        assert weak_direction_rtn_label(weak_dir, rot) == ["cross-track"]
+        assert weak_direction_rtn_label(weak_dir, rot) == ["normal"]
 
     def test_returns_a_single_element_list(self):
         """Matches the interface field's documented shape, e.g.
@@ -973,3 +975,19 @@ class TestWeakDirectionRtnLabel:
         mixed_rtn = mixed_rtn / np.linalg.norm(mixed_rtn)
         mixed_eci = rot @ mixed_rtn
         assert weak_direction_rtn_label(mixed_eci, rot) == ["radial"]
+
+    def test_output_always_validates_against_the_published_contract_enum(self):
+        """Direct regression guard for the bug this exact test file
+        originally had: weak_direction_rtn_label used to emit
+        along-track/cross-track, which openapi/gnc_interface.yaml's
+        weak_directions enum ([radial, transverse, normal]) does not
+        accept. Checked against all three RTN axes, not just one."""
+        contract_enum = {"radial", "transverse", "normal"}
+        rot = self._rtn_rotation()
+        for axis_idx in range(3):
+            result = weak_direction_rtn_label(rot[:, axis_idx], rot)
+            assert len(result) == 1
+            assert result[0] in contract_enum, (
+                f"'{result[0]}' is not in the published contract's "
+                f"weak_directions enum {contract_enum}"
+            )

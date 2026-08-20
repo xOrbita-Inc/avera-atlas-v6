@@ -616,7 +616,7 @@ def classify_validity(epsilon: float, epsilon_threshold: float) -> ValidityStatu
     return ValidityStatus.NOT_EARNED
 
 
-_RTN_LABELS = ("radial", "along-track", "cross-track")
+_RTN_LABELS = ("radial", "transverse", "normal")
 
 
 def weak_direction_rtn_label(
@@ -647,8 +647,12 @@ def weak_direction_rtn_label(
             aps_math.frames.rtn_to_eci_rotation.
 
     Returns:
-        Single-element list containing one of "radial", "along-track",
-        "cross-track".
+        Single-element list containing one of "radial", "transverse",
+        "normal" -- matching openapi/gnc_interface.yaml's weak_directions
+        enum exactly. Not "along-track"/"cross-track": those are common
+        informal RTN synonyms elsewhere in this codebase's comments, but
+        the published contract's enum uses transverse/normal, and this
+        function's output must validate against that enum.
     """
     weak_dir_eci = np.asarray(weak_direction_eci, dtype=float)
     rot = np.asarray(rot_rtn_to_eci, dtype=float)
