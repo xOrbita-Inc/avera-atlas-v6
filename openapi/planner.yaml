@@ -182,6 +182,13 @@ components:
           example: [0, 7.668, 0]
           items:
             type: number
+        a_ref_km:
+          type: number
+          description: >
+            Reference semi-major axis (km). If omitted, APS 2.5 derives a
+            two-body osculating value from r_sat_km and v_sat_km_s. Callers
+            with a mean semi-major axis should provide it explicitly.
+          example: 6871
         t_burn_utc:
           type: string
           description: "Planned burn execution time (UTC, ISO-8601)"

@@ -493,3 +493,21 @@ def test_thresholds_and_hard_body_radius_are_unchanged(tmp_path):
     assert propagator_main.PC_AMBER_THRESHOLD == 1e-5
     assert propagator_main.PC_GREEN_THRESHOLD == 1e-7
     assert propagator_main.DEFAULT_DEBRIS_UNCERTAINTY_M == 2000.0
+
+
+class TestScrum400ReferenceSemiMajorAxis:
+    def test_demo_state_and_v25_payload_a_ref_agree(self):
+        """SCRUM-400: the live v2.5 payload derives a_ref from its own state."""
+        r = np.asarray(demo_presets.ASSET_R_ECI_KM, dtype=float)
+        v = np.asarray(demo_presets.ASSET_V_ECI_KM_S, dtype=float)
+        mu = float(demo_presets.MU_EARTH)
+        energy = 0.5 * float(np.dot(v, v)) - mu / float(np.linalg.norm(r))
+        a_ref_km = -mu / (2.0 * energy)
+
+        assert a_ref_km == pytest.approx(demo_presets.ASSET_R_MAG_KM, abs=1e-9)
+        assert a_ref_km == pytest.approx(6871.0, abs=1e-9)
+
+        template = (_REPO_ROOT / "services" / "ui" / "app" / "templates" / "index.html").read_text(encoding="utf-8")
+        wiring = "a_ref_km:semiMajorAxisFromStateKm(asset_r,asset_v)"
+        assert template.count(wiring) == 2
+        assert "function semiMajorAxisFromStateKm(rKm,vKmS)" in template

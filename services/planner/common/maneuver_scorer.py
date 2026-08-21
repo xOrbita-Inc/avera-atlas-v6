@@ -128,6 +128,7 @@ from avoid.decision_model import (
 # ---------------------------------------------------------------------------
 
 _MU_KM3_S2: float       = 3.986004418e5  # km³/s²
+_MEAN_EARTH_RADIUS_KM: float = 6371.0  # rounded spherical mean Earth radius [km]
 _DRAG_RATE_M_PER_DAY: float = -50.0      # SMA decay at 482 km [m/day] (§6.2)
 _DRAG_THRESHOLD_ALT_KM: float = 550.0    # Apply drag correction below this [km]
 _DRAG_ORBIT_THRESHOLD: float  = 2.0      # Apply drag correction above this [orbits]
@@ -178,6 +179,18 @@ def compute_lifetime_fraction(
 # ---------------------------------------------------------------------------
 # CTO Item 2: drag-corrected return cost
 # ---------------------------------------------------------------------------
+
+def _drag_gate_altitude_from_sma_km(sma_km: float) -> float:
+    """Return the coarse orbital-altitude proxy used by the drag gate.
+
+    This intentionally retains the existing SMA-minus-Earth-radius model.
+    The 6371 km radius is a rounded spherical mean-Earth approximation, not
+    WGS-84 geodetic altitude. WGS-84 surface radius spans approximately
+    6356.752-6378.137 km, so this approximation can differ from local surface
+    altitude by at most about 14.248 km.
+    """
+    return float(sma_km) - _MEAN_EARTH_RADIUS_KM
+
 
 def _drag_corrected_dv_return_m_s(
     dv_avoid_m_s: float,
@@ -1163,7 +1176,7 @@ def score_maneuver_candidates(
                 dv_return_base = _return_burn_cost_m_s(dv_tangential_m_s, cap.a_ref_km)
                 dv_return_drag = _drag_corrected_dv_return_m_s(
                     dv_tangential_m_s, cap.a_ref_km,
-                    recovery_orbits, cap.a_ref_km - 6371.0,  # altitude_km is not on SatelliteCapability; derive from a_ref_km
+                    recovery_orbits, _drag_gate_altitude_from_sma_km(cap.a_ref_km),
                 )
                 drag_applied = dv_return_drag > dv_return_base + 1e-6
                 dv_return = dv_return_drag
