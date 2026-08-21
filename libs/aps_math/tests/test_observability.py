@@ -17,6 +17,8 @@ import pytest
 from aps_math import frames
 from aps_math.observability import (
     ValidityStatus,
+    ValidityVerdict,
+    build_validity_verdict,
     classify_validity,
     conjunction_plane_basis,
     conjunction_plane_epsilon,
@@ -991,3 +993,157 @@ class TestWeakDirectionRtnLabel:
                 f"'{result[0]}' is not in the published contract's "
                 f"weak_directions enum {contract_enum}"
             )
+
+
+class TestBuildValidityVerdict:
+    """SCRUM-378, MAF v2.0 Sec 7: the full ValidityVerdict assembly."""
+
+    @staticmethod
+    def _kepler_propagate(r0, v0, dt, mu, n_steps=2000):
+        def deriv(state):
+            r = state[:3]
+            v = state[3:]
+            r_norm = np.linalg.norm(r)
+            a = -mu * r / r_norm ** 3
+            return np.concatenate([v, a])
+        state = np.concatenate([r0, v0])
+        steps = n_steps if dt != 0 else 0
+        h = dt / n_steps if dt != 0 else 1.0
+        for _ in range(steps):
+            k1 = deriv(state)
+            k2 = deriv(state + h / 2 * k1)
+            k3 = deriv(state + h / 2 * k2)
+            k4 = deriv(state + h * k3)
+            state = state + h / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+        return state[:3], state[3:]
+
+    def _build_scenario(self):
+        mu = frames.MU_EARTH
+        a_km = 6928.0
+        r_tca = np.array([a_km, 0.0, 0.0])
+        n = math.sqrt(mu / a_km ** 3)
+        v_tca = np.array([0.0, n * a_km, 0.0])
+
+        r_earth = 6378.0
+        r_observer = np.array(
+            [r_earth * math.cos(math.radians(5)), 0.0, r_earth * math.sin(math.radians(5))]
+        )
+
+        terms = []
+        for i in range(5):
+            dt_s = -(300.0 - i * 60.0)
+            r_tau, v_tau = self._kepler_propagate(r_tca, v_tca, dt_s, mu)
+            term = observability_gramian_epoch_term(
+                r_tca, v_tca, r_tau, v_tau, r_observer, a_km, dt_s,
+                ra_sigma_rad=1e-5, dec_sigma_rad=1e-5,
+            )
+            terms.append(term)
+
+        w = observability_gramian(terms)
+        w_pos = marginalize_information(w, keep_idx=[0, 1, 2], drop_idx=[3, 4, 5], method="schur")
+
+        r_secondary = r_tca + np.array([0.0, 0.0, 0.3])
+        v_secondary = v_tca + np.array([0.001, -0.002, 0.0005])
+        r_rel = r_tca - r_secondary
+        v_rel = v_tca - v_secondary
+
+        rot_tca = frames.rtn_to_eci_rotation(r_tca, v_tca)
+        return w_pos, r_rel, v_rel, rot_tca
+
+    def test_not_earned_case_includes_weak_directions(self):
+        w_pos, r_rel, v_rel, rot_tca = self._build_scenario()
+        verdict = build_validity_verdict(
+            w_pos, r_rel, v_rel, rot_tca, epsilon_threshold=0.20,
+            phenomenologies_used=["TLE"],
+        )
+        assert verdict.status == ValidityStatus.NOT_EARNED
+        assert len(verdict.weak_directions) == 1
+        assert verdict.weak_directions[0] in {"radial", "transverse", "normal"}
+
+    def test_earned_case_has_empty_weak_directions(self):
+        """Per the MAF doc's own scoping: weak-direction identification
+        is described specifically for the NOT_EARNED case."""
+        w_pos, r_rel, v_rel, rot_tca = self._build_scenario()
+        verdict = build_validity_verdict(
+            w_pos, r_rel, v_rel, rot_tca, epsilon_threshold=0.0001,
+            phenomenologies_used=["optical"],
+        )
+        assert verdict.status == ValidityStatus.EARNED
+        assert verdict.weak_directions == []
+
+    def test_phenomenologies_used_is_passed_through(self):
+        w_pos, r_rel, v_rel, rot_tca = self._build_scenario()
+        verdict = build_validity_verdict(
+            w_pos, r_rel, v_rel, rot_tca, epsilon_threshold=0.20,
+            phenomenologies_used=["optical", "TLE"],
+        )
+        assert verdict.phenomenologies_used == ["optical", "TLE"]
+
+    def test_epsilon_threshold_is_passed_through(self):
+        w_pos, r_rel, v_rel, rot_tca = self._build_scenario()
+        verdict = build_validity_verdict(
+            w_pos, r_rel, v_rel, rot_tca, epsilon_threshold=0.20,
+            phenomenologies_used=["TLE"],
+        )
+        assert verdict.epsilon_threshold == 0.20
+
+    def test_invalid_phenomenology_raises(self):
+        w_pos, r_rel, v_rel, rot_tca = self._build_scenario()
+        with pytest.raises(ValueError, match="phenomenologies_used"):
+            build_validity_verdict(
+                w_pos, r_rel, v_rel, rot_tca, epsilon_threshold=0.20,
+                phenomenologies_used=["radar"],
+            )
+
+    def test_one_valid_one_invalid_phenomenology_raises(self):
+        """The whole call must be rejected, not just the bad entry
+        silently dropped."""
+        w_pos, r_rel, v_rel, rot_tca = self._build_scenario()
+        with pytest.raises(ValueError, match="phenomenologies_used"):
+            build_validity_verdict(
+                w_pos, r_rel, v_rel, rot_tca, epsilon_threshold=0.20,
+                phenomenologies_used=["TLE", "radar"],
+            )
+
+    @pytest.mark.parametrize("valid_phenomenology", ["optical", "RF", "LIDAR", "TLE"])
+    def test_each_contract_phenomenology_is_accepted(self, valid_phenomenology):
+        w_pos, r_rel, v_rel, rot_tca = self._build_scenario()
+        verdict = build_validity_verdict(
+            w_pos, r_rel, v_rel, rot_tca, epsilon_threshold=0.20,
+            phenomenologies_used=[valid_phenomenology],
+        )
+        assert verdict.phenomenologies_used == [valid_phenomenology]
+
+
+class TestValidityVerdictToDict:
+    def test_to_dict_matches_the_published_interface_shape(self):
+        verdict = ValidityVerdict(
+            status=ValidityStatus.NOT_EARNED,
+            epsilon=0.15,
+            epsilon_threshold=0.20,
+            weak_directions=["radial"],
+            phenomenologies_used=["TLE"],
+        )
+        d = verdict.to_dict()
+        assert d == {
+            "status": "NOT_EARNED",
+            "epsilon": 0.15,
+            "epsilon_threshold": 0.20,
+            "weak_directions": ["radial"],
+            "phenomenologies_used": ["TLE"],
+        }
+
+    def test_status_serializes_as_plain_string_not_enum_repr(self):
+        """A JSON encoder must be able to handle this directly; status
+        must be the plain string value, not an Enum member repr."""
+        verdict = ValidityVerdict(
+            status=ValidityStatus.EARNED,
+            epsilon=0.5,
+            epsilon_threshold=0.20,
+            weak_directions=[],
+            phenomenologies_used=["optical"],
+        )
+        d = verdict.to_dict()
+        assert d["status"] == "EARNED"
+        assert isinstance(d["status"], str)
+        assert not isinstance(d["status"], ValidityStatus)

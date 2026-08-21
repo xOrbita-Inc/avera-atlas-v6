@@ -18,6 +18,7 @@ CW state transition matrix this module's Gramian will use alongside H.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from enum import Enum
 
 import numpy as np
@@ -26,6 +27,8 @@ from . import frames
 
 __all__ = [
     "ValidityStatus",
+    "ValidityVerdict",
+    "build_validity_verdict",
     "classify_validity",
     "conjunction_plane_basis",
     "conjunction_plane_epsilon",
@@ -659,3 +662,116 @@ def weak_direction_rtn_label(
     weak_dir_rtn = rot.T @ weak_dir_eci
     dominant_idx = int(np.argmax(np.abs(weak_dir_rtn)))
     return [_RTN_LABELS[dominant_idx]]
+
+
+_VALID_PHENOMENOLOGIES = frozenset({"optical", "RF", "LIDAR", "TLE"})
+
+
+@dataclass(frozen=True)
+class ValidityVerdict:
+    """
+    MAF v2.0 Sec 7 output, matching openapi/gnc_interface.yaml's
+    validity field exactly: status, epsilon, epsilon_threshold,
+    weak_directions, phenomenologies_used.
+    """
+
+    status: ValidityStatus
+    epsilon: float
+    epsilon_threshold: float
+    weak_directions: list[str]
+    phenomenologies_used: list[str]
+
+    def to_dict(self) -> dict:
+        """JSON-serializable form matching the published interface
+        field exactly (status as its string value, not the Enum
+        member)."""
+        return {
+            "status": self.status.value,
+            "epsilon": self.epsilon,
+            "epsilon_threshold": self.epsilon_threshold,
+            "weak_directions": list(self.weak_directions),
+            "phenomenologies_used": list(self.phenomenologies_used),
+        }
+
+
+def build_validity_verdict(
+    w_position_eci: np.ndarray,
+    r_rel_km: np.ndarray,
+    v_rel_km_s: np.ndarray,
+    rot_rtn_to_eci: np.ndarray,
+    epsilon_threshold: float,
+    phenomenologies_used: list[str],
+) -> ValidityVerdict:
+    """
+    Assemble the full ValidityVerdict from the pieces already built in
+    this module: computes epsilon and the weak direction
+    (conjunction_plane_epsilon), classifies EARNED/NOT_EARNED
+    (classify_validity), and labels the weak direction in RTN terms
+    (weak_direction_rtn_label) -- but only when NOT_EARNED.
+
+    SCRUM-378. weak_directions is an empty list when EARNED, matching
+    the MAF doc's own scoping of weak-direction identification to the
+    NOT_EARNED case ("When epsilon < epsilon_min, the validity assessor
+    identifies which RTN directions have poor observability..."): the
+    geometry does not need explaining if it already passed. This is a
+    reporting-detail choice, not a safety-relevant one like the Schur
+    complement decision elsewhere in this module, so it is made and
+    documented here rather than escalated.
+
+    Args:
+        w_position_eci: 3x3 ECI position information matrix, at the
+            same epoch as r_rel_km/v_rel_km_s -- TCA, per
+            conjunction_plane_epsilon's own epoch requirement (build the
+            Gramian with t0=TCA and negative dt_s per observation; see
+            that function's docstring for why).
+        r_rel_km, v_rel_km_s: relative position/velocity (primary minus
+            secondary), ECI, at that same epoch.
+        rot_rtn_to_eci: the primary's RTN-to-ECI rotation at that epoch
+            (aps_math.frames.rtn_to_eci_rotation), used only to label
+            the weak direction; not used when EARNED, since
+            weak_directions is empty there regardless.
+        epsilon_threshold: per-regime EARNED floor. 0.20 for LEO,
+            locked (SCRUM-333); MEO/GEO have their own value, not yet
+            set -- pass whichever applies, this function does not
+            assume LEO.
+        phenomenologies_used: sensor types that contributed to this
+            arc's observations, e.g. ["TLE"] or ["optical"]. Must be
+            caller-supplied: this module builds the Gramian from
+            whatever observations the caller assembled and has no
+            independent way to know which sensor types they came from.
+
+    Returns:
+        ValidityVerdict.
+
+    Raises:
+        ValueError if any entry of phenomenologies_used is not one of
+        the published contract's enum values (optical, RF, LIDAR, TLE) --
+        not silently accepted and passed through, the same discipline
+        applied to weak_directions' own vocabulary elsewhere in this
+        module.
+    """
+    invalid = [p for p in phenomenologies_used if p not in _VALID_PHENOMENOLOGIES]
+    if invalid:
+        raise ValueError(
+            f"build_validity_verdict: phenomenologies_used contains "
+            f"values not in the published contract's enum "
+            f"{sorted(_VALID_PHENOMENOLOGIES)}: {invalid}"
+        )
+
+    epsilon, _w_cp, weak_direction_eci = conjunction_plane_epsilon(
+        w_position_eci, r_rel_km, v_rel_km_s
+    )
+    status = classify_validity(epsilon, epsilon_threshold)
+
+    if status == ValidityStatus.NOT_EARNED:
+        weak_directions = weak_direction_rtn_label(weak_direction_eci, rot_rtn_to_eci)
+    else:
+        weak_directions = []
+
+    return ValidityVerdict(
+        status=status,
+        epsilon=epsilon,
+        epsilon_threshold=epsilon_threshold,
+        weak_directions=weak_directions,
+        phenomenologies_used=list(phenomenologies_used),
+    )
