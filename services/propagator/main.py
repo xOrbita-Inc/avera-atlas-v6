@@ -61,145 +61,115 @@ MY_SAT_TLE_LINE2 = "2 25544  51.6416 288.7738 0005519 253.3323 214.2882 15.50066
 # =============================================================================
 
 def kepler_propagate(r0: np.ndarray, v0: np.ndarray, dt: float) -> Tuple[np.ndarray, np.ndarray]:
+    """Propagate a bound elliptic state with universal-variable two-body dynamics.
+
+    Hyperbolic and near-parabolic trajectories are deliberately unsupported
+    here rather than silently replaced with straight-line motion.
     """
-    Propagate a state vector using Keplerian two-body dynamics.
-    
-    Uses universal variable formulation for robustness.
-    
-    Parameters
-    ----------
-    r0 : np.ndarray
-        Initial position [km]
-    v0 : np.ndarray
-        Initial velocity [km/s]
-    dt : float
-        Time step [seconds]
-        
-    Returns
-    -------
-    Tuple[np.ndarray, np.ndarray]
-        (position, velocity) at time t0 + dt
-    """
-    # Handle dt=0 case
+    r0 = np.asarray(r0, dtype=float)
+    v0 = np.asarray(v0, dtype=float)
+
+    if r0.shape != (3,) or v0.shape != (3,):
+        raise ValueError("r0 and v0 must each be 3-element vectors")
+    if not np.all(np.isfinite(r0)) or not np.all(np.isfinite(v0)):
+        raise ValueError("r0 and v0 must contain only finite values")
+    if not np.isfinite(dt):
+        raise ValueError("dt must be finite")
+
     if abs(dt) < 1e-10:
         return r0.copy(), v0.copy()
-    
+
     mu = MU_EARTH
-    
-    r0_mag = np.linalg.norm(r0)
-    v0_mag = np.linalg.norm(v0)
-    
-    # Check for degenerate cases
-    if r0_mag < 100:  # Inside Earth or too close
-        return r0.copy(), v0.copy()
-    
-    # Specific energy
-    energy = v0_mag**2 / 2 - mu / r0_mag
-    
-    # Semi-major axis
-    if abs(energy) > 1e-10:
-        a = -mu / (2 * energy)
-    else:
-        # Parabolic - use large value
-        a = 1e10
-    
-    # Check if hyperbolic escape (a < 0 means hyperbolic)
-    # For hyperbolic orbits, use simplified linear propagation
-    if a < 0 or abs(a) > 1e8:
-        # Object is escaping - use linear approximation
-        r_new = r0 + v0 * dt
-        return r_new, v0.copy()
-    
-    # Initial radial velocity
-    vr0 = np.dot(r0, v0) / r0_mag
-    
-    # Universal variable initial guess
-    alpha = 1 / a
-    
-    if alpha > 1e-10:  # Elliptical
-        chi = np.sqrt(mu) * dt * alpha
-    else:  # Near-parabolic
-        chi = np.sqrt(mu) * dt / r0_mag
-    
-    # Newton-Raphson iteration for universal anomaly
-    ratio = 1
+    sqrt_mu = np.sqrt(mu)
+    r0_mag = float(np.linalg.norm(r0))
+    if r0_mag < 100.0:
+        raise ValueError("initial position magnitude is too small for Earth-orbit propagation")
+
+    v0_sq = float(np.dot(v0, v0))
+    alpha = 2.0 / r0_mag - v0_sq / mu  # reciprocal semi-major axis [1/km]
+
+    # Preserve the old near-parabolic boundary (|a| > 1e8 km), but fail
+    # explicitly instead of substituting a linear trajectory.
+    if abs(alpha) < 1e-8:
+        raise ValueError("near-parabolic trajectories are unsupported by kepler_propagate")
+    if alpha < 0.0:
+        raise ValueError("hyperbolic trajectories are unsupported by kepler_propagate")
+
+    vr0 = float(np.dot(r0, v0) / r0_mag)
+    radial_coeff = r0_mag * vr0 / sqrt_mu
+
+    def stumpff_c2_c3(z: float) -> Tuple[float, float]:
+        if z > 1e-6:
+            sqrt_z = np.sqrt(z)
+            c2 = (1.0 - np.cos(sqrt_z)) / z
+            c3 = (sqrt_z - np.sin(sqrt_z)) / (sqrt_z * z)
+        elif z < -1e-6:
+            sqrt_neg_z = np.sqrt(-z)
+            c2 = (np.cosh(sqrt_neg_z) - 1.0) / (-z)
+            c3 = (np.sinh(sqrt_neg_z) - sqrt_neg_z) / ((-z) ** 1.5)
+        else:
+            z2 = z * z
+            c2 = 0.5 - z / 24.0 + z2 / 720.0
+            c3 = 1.0 / 6.0 - z / 120.0 + z2 / 5040.0
+        return float(c2), float(c3)
+
+    # Elliptic universal-anomaly initial guess. The sign follows dt so
+    # backward propagation is handled by the same equations.
+    chi = sqrt_mu * dt * alpha
+    converged = False
     max_iter = 50
     tol = 1e-10
-    
-    for iteration in range(max_iter):
-        chi2 = chi * chi
-        psi = chi2 * alpha
-        
-        # Stumpff functions
-        if psi > 1e-6:
-            sqrt_psi = np.sqrt(psi)
-            c2 = (1 - np.cos(sqrt_psi)) / psi
-            c3 = (sqrt_psi - np.sin(sqrt_psi)) / (sqrt_psi * psi)
-        elif psi < -1e-6:
-            sqrt_neg_psi = np.sqrt(-psi)
-            c2 = (1 - np.cosh(sqrt_neg_psi)) / psi
-            c3 = (np.sinh(sqrt_neg_psi) - sqrt_neg_psi) / (-psi * sqrt_neg_psi)
-        else:
-            c2 = 1/2
-            c3 = 1/6
-        
-        r = chi2 * c2 + vr0 / np.sqrt(mu) * chi * (1 - psi * c3) + r0_mag * (1 - psi * c2)
-        
-        # Protect against division by zero
-        if abs(r) < 1e-10:
+
+    for _ in range(max_iter):
+        z = alpha * chi * chi
+        c2, c3 = stumpff_c2_c3(z)
+
+        # Universal Kepler residual F(chi) = 0 and its derivative.
+        # The r0_mag factor on the radial-velocity term is required for
+        # general states away from an apsis.
+        F = (
+            radial_coeff * chi * chi * c2
+            + (1.0 - alpha * r0_mag) * chi**3 * c3
+            + r0_mag * chi
+            - sqrt_mu * dt
+        )
+        dF = (
+            radial_coeff * chi * (1.0 - z * c3)
+            + (1.0 - alpha * r0_mag) * chi * chi * c2
+            + r0_mag
+        )
+
+        if not np.isfinite(F) or not np.isfinite(dF) or abs(dF) < 1e-12:
+            raise RuntimeError("universal-variable iteration produced an invalid Newton step")
+
+        delta_chi = F / dF
+        chi -= delta_chi
+        if abs(delta_chi) < tol:
+            converged = True
             break
-        
-        # Time equation
-        t_chi = chi**3 * c3 + vr0 / np.sqrt(mu) * chi2 * c2 + r0_mag * chi * (1 - psi * c3)
-        t_chi = t_chi / np.sqrt(mu)
-        
-        ratio = (dt - t_chi) / r
-        chi = chi + ratio
-        
-        if abs(ratio) < tol:
-            break
-    
-    # If iteration didn't converge, fall back to linear
-    if iteration >= max_iter - 1 or not np.isfinite(chi):
-        r_new = r0 + v0 * dt
-        return r_new, v0.copy()
-    
-    # Compute f and g functions
+
+    if not converged or not np.isfinite(chi):
+        raise RuntimeError("universal-variable Kepler propagation did not converge")
+
+    z = alpha * chi * chi
+    c2, c3 = stumpff_c2_c3(z)
     chi2 = chi * chi
-    psi = chi2 * alpha
-    
-    if psi > 1e-6:
-        sqrt_psi = np.sqrt(psi)
-        c2 = (1 - np.cos(sqrt_psi)) / psi
-        c3 = (sqrt_psi - np.sin(sqrt_psi)) / (sqrt_psi * psi)
-    elif psi < -1e-6:
-        sqrt_neg_psi = np.sqrt(-psi)
-        c2 = (1 - np.cosh(sqrt_neg_psi)) / psi
-        c3 = (np.sinh(sqrt_neg_psi) - sqrt_neg_psi) / (-psi * sqrt_neg_psi)
-    else:
-        c2 = 1/2
-        c3 = 1/6
-    
-    f = 1 - chi2 / r0_mag * c2
-    g = dt - chi**3 / np.sqrt(mu) * c3
-    
+
+    f = 1.0 - chi2 / r0_mag * c2
+    g = dt - chi**3 / sqrt_mu * c3
     r_new = f * r0 + g * v0
-    r_new_mag = np.linalg.norm(r_new)
-    
-    # Check for valid result
-    if r_new_mag < 100 or not np.all(np.isfinite(r_new)):
-        r_new = r0 + v0 * dt
-        return r_new, v0.copy()
-    
-    fdot = np.sqrt(mu) / (r_new_mag * r0_mag) * chi * (psi * c3 - 1)
-    gdot = 1 - chi2 / r_new_mag * c2
-    
+    r_new_mag = float(np.linalg.norm(r_new))
+
+    if r_new_mag < 100.0 or not np.all(np.isfinite(r_new)):
+        raise RuntimeError("universal-variable propagation produced an invalid position")
+
+    fdot = sqrt_mu / (r_new_mag * r0_mag) * chi * (z * c3 - 1.0)
+    gdot = 1.0 - chi2 / r_new_mag * c2
     v_new = fdot * r0 + gdot * v0
-    
-    # Final sanity check
+
     if not np.all(np.isfinite(v_new)):
-        return r_new, v0.copy()
-    
+        raise RuntimeError("universal-variable propagation produced an invalid velocity")
+
     return r_new, v_new
 
 
