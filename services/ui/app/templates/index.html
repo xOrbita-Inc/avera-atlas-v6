@@ -931,7 +931,7 @@ async function evaluateConjunction(conj,idx){
   const asset_v=conj.v_asset_km_s||[0.0,7.668,0.0];
   const request={
     conjunction_id:'eval-'+conj.object_id,
-    satellite:{sat_id:'XORB-001',r_sat_km:asset_r,v_sat_km_s:asset_v,
+    satellite:{sat_id:'XORB-001',r_sat_km:asset_r,v_sat_km_s:asset_v,a_ref_km:semiMajorAxisFromStateKm(asset_r,asset_v),
       t_burn_utc:new Date().toISOString(),v_remaining_m_s:25.0},
     conjunction:{obj_id:conj.object_id,
       ...(assetNoradId ? {primary_norad: assetNoradId} : {}),
@@ -1000,6 +1000,21 @@ function updateCandidatesTable(candidates,bestDir,fuelCost){
     return'<tr class="'+rowCls+'" onclick="selectCandidate(\''+c.direction+'\')" style="cursor:pointer"><td class="'+cls+'">'+prefix+c.direction+'</td><td class="'+cls+'">'+c.delta_C.toFixed(3)+'</td><td>'+dv.toFixed(1)+'</td><td class="'+cls+'">'+c.utility.toFixed(3)+'</td></tr>'
   }).join('');
   renderFuelRiskChart(candidates,bestDir,fuelCost);
+}
+
+// SCRUM-400: APS v2.5 reads a_ref_km from the satellite block, not policy.
+// Derive a two-body osculating SMA from the same Cartesian state we send.
+function semiMajorAxisFromStateKm(rKm,vKmS){
+  if(!Array.isArray(rKm)||rKm.length!==3||!Array.isArray(vKmS)||vKmS.length!==3){
+    throw new Error(`r_sat_km and v_sat_km_s must each contain 3 values`);
+  }
+  const mu=398600.4418;
+  const rMag=Math.hypot(...rKm);
+  if(!(rMag>0)) throw new Error(`r_sat_km must have non-zero magnitude`);
+  const v2=vKmS.reduce((sum,x)=>sum+x*x,0);
+  const energy=0.5*v2-mu/rMag;
+  if(!Number.isFinite(energy)||energy>=0) throw new Error(`cannot derive a_ref_km from the supplied two-body state`);
+  return -mu/(2*energy);
 }
 
 function getPolicy(){
@@ -1810,7 +1825,7 @@ function getPayloadContent(){
   const asset_v=conjs[0].v_asset_km_s||[0.0,7.668,0.0];
   return{
     scenario:selectedScenario,
-    satellite:{sat_id:'XORB-001',r_sat_km:asset_r,v_sat_km_s:asset_v,
+    satellite:{sat_id:'XORB-001',r_sat_km:asset_r,v_sat_km_s:asset_v,a_ref_km:semiMajorAxisFromStateKm(asset_r,asset_v),
       t_burn_utc:new Date().toISOString(),v_remaining_m_s:25.0},
     conjunctions:conjs.map(function(c){
       var ar=c.r_asset_km||asset_r;

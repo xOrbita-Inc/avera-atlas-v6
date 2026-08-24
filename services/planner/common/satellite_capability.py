@@ -32,6 +32,36 @@ from typing import List, Optional
 # value this module should own a second copy of.
 from aps_math import conventions
 
+_MU_EARTH_KM3_S2 = 398600.4418
+
+
+def _osculating_sma_from_state_km(r_sat_km: List[float], v_sat_km_s: List[float]) -> float:
+    """Derive two-body osculating semi-major axis [km] from an instantaneous state.
+
+    This is an osculating element, not a J2 mean element. SCRUM-366 bounded the
+    short-period J2 variation well below the 129 km bias caused by the former
+    7000 km request fallback. Callers with a mean SMA should provide a_ref_km
+    explicitly.
+    """
+    if len(r_sat_km) != 3 or len(v_sat_km_s) != 3:
+        raise ValueError("r_sat_km and v_sat_km_s must each contain 3 values")
+
+    r_mag_km = math.sqrt(sum(float(x) ** 2 for x in r_sat_km))
+    v2_km2_s2 = sum(float(x) ** 2 for x in v_sat_km_s)
+    if not math.isfinite(r_mag_km) or r_mag_km <= 0.0:
+        raise ValueError("r_sat_km must have finite, non-zero magnitude")
+    if not math.isfinite(v2_km2_s2):
+        raise ValueError("v_sat_km_s must contain finite values")
+
+    specific_energy = 0.5 * v2_km2_s2 - _MU_EARTH_KM3_S2 / r_mag_km
+    if not math.isfinite(specific_energy) or specific_energy >= 0.0:
+        raise ValueError("cannot derive a_ref_km from an invalid or unbound two-body state")
+
+    a_ref_km = -_MU_EARTH_KM3_S2 / (2.0 * specific_energy)
+    if not math.isfinite(a_ref_km) or a_ref_km <= 0.0:
+        raise ValueError("derived a_ref_km is not finite and positive")
+    return a_ref_km
+
 # ---------------------------------------------------------------------------
 # Propulsion type enum
 # ---------------------------------------------------------------------------
@@ -361,7 +391,7 @@ class SatelliteCapability:
         cap = SatelliteCapability(sat_id="SAT-001", a_ref_km=6878.0)
     """
     sat_id: str
-    a_ref_km: float = 7000.0
+    a_ref_km: float
     radius_m: float = conventions.DEFAULT_PRIMARY_RADIUS_M
     propulsion: PropulsionProfile = field(default_factory=PropulsionProfile)
     lifetime: LifetimeProfile = field(default_factory=LifetimeProfile)
@@ -389,8 +419,18 @@ class SatelliteCapability:
         # the evidence chain is keyed per satellite, and a constant key merges
         # every spacecraft's audit trail into one chain. Found by running the
         # planner against a live ingest rather than a mocked one.
-        sat_id   = str(sat.get("sat_id") or sat.get("norad_id") or "UNKNOWN")
-        a_ref_km = float(sat.get("a_ref_km", 7000.0))
+        sat_id = str(sat.get("sat_id") or sat.get("norad_id") or "UNKNOWN")
+        if "a_ref_km" in sat:
+            a_ref_km = float(sat["a_ref_km"])
+        else:
+            try:
+                r_sat_km = sat["r_sat_km"]
+                v_sat_km_s = sat["v_sat_km_s"]
+            except KeyError as exc:
+                raise ValueError(
+                    "a_ref_km omitted; r_sat_km and v_sat_km_s are required to derive it"
+                ) from exc
+            a_ref_km = _osculating_sma_from_state_km(r_sat_km, v_sat_km_s)
         radius_m = float(sat.get("radius_m", conventions.DEFAULT_PRIMARY_RADIUS_M))
 
         # PropulsionProfile
