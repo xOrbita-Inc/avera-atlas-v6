@@ -266,7 +266,7 @@ def _validate_demo_asset_state(r0: np.ndarray, v0: np.ndarray) -> None:
     energy = v_mag**2 / 2.0 - MU_EARTH / max(r_mag, 1e-6)
     if energy >= 0.0:
         print(f"[WARN] demo asset state is not bound (specific energy={energy:.3f} >= 0); "
-              f"Keplerian propagation will fall back to linear")
+              f"unbound state is unsupported by kepler_propagate and will raise")
 
 
 def _debris_uncertainty_m(position_sigma_m: float, confidence: float):
