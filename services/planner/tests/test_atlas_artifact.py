@@ -181,12 +181,13 @@ class TestSecondaryConflictCheckNoCatalog:
     def test_not_performed_when_no_catalog(self):
         result = _run_secondary_conflict_check(None, None)
         assert result.secondary_check_performed is False
-        assert result.secondary_conjunction_clear is True
+        assert result.secondary_conjunction_clear is False
         assert result.flagged_objects == []
 
-    def test_operator_note_mentions_aps_30(self):
+    def test_operator_note_mentions_m4(self):
         result = _run_secondary_conflict_check([0.0, 0.0, 0.0], None)
-        assert "APS 3.0" in result.operator_note
+        assert "M4" in result.operator_note
+        assert "NOT CLEAR" in result.operator_note
 
     def test_not_performed_empty_catalog(self):
         result = _run_secondary_conflict_check([0.0, 0.0, 0.0], [])
@@ -194,41 +195,19 @@ class TestSecondaryConflictCheckNoCatalog:
 
 
 # ---------------------------------------------------------------------------
-# 3. SecondaryConflictCheck -- with catalog
+# 3. SecondaryConflictCheck -- SCRUM-381 horizon contract
 # ---------------------------------------------------------------------------
 
-class TestSecondaryConflictCheckWithCatalog:
-    def test_clear_when_all_objects_far(self):
-        r_post = [6853.0, 0.0, 0.0]
-        objects = [
-            {"obj_id": "OBJ-001", "r_km": [6855.0, 0.0, 0.0]},  # 2 km away
-            {"obj_id": "OBJ-002", "r_km": [6853.0, 5.0, 0.0]},  # 5 km away
-        ]
-        result = _run_secondary_conflict_check(r_post, objects)
-        assert result.secondary_check_performed is True
-        assert result.secondary_conjunction_clear is True
-        assert result.flagged_objects == []
-
-    def test_flagged_when_object_close(self):
-        r_post = [6853.0, 0.0, 0.0]
-        objects = [
-            {"obj_id": "CLOSE-001", "r_km": [6853.3, 0.0, 0.0]},  # 0.3 km
-        ]
-        result = _run_secondary_conflict_check(r_post, objects)
-        assert result.secondary_check_performed is True
+class TestSecondaryConflictCheckHorizonContract:
+    def test_nonempty_catalog_without_horizon_inputs_fails_closed(self):
+        result = _run_secondary_conflict_check(
+            [6853.0, 0.0, 0.0],
+            [{"obj_id": "OBJ-001", "r_km": [6855.0, 0.0, 0.0]}],
+        )
+        assert result.secondary_check_performed is False
         assert result.secondary_conjunction_clear is False
-        assert "CLOSE-001" in result.flagged_objects
-
-    def test_multiple_flagged(self):
-        r_post = [6853.0, 0.0, 0.0]
-        objects = [
-            {"obj_id": "A", "r_km": [6853.1, 0.0, 0.0]},
-            {"obj_id": "B", "r_km": [6853.2, 0.0, 0.0]},
-            {"obj_id": "C", "r_km": [6860.0, 0.0, 0.0]},  # far
-        ]
-        result = _run_secondary_conflict_check(r_post, objects)
-        assert len(result.flagged_objects) == 2
-        assert "C" not in result.flagged_objects
+        assert result.flagged_objects == []
+        assert "M4" in result.operator_note
 
 
 # ---------------------------------------------------------------------------

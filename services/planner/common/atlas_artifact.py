@@ -36,11 +36,10 @@ New in 9.5:
 
 Scientific gaps carried forward
 --------------------------------
-  - Secondary conflict check requires a full object catalog for real
-    conflict detection. The current implementation accepts an optional
-    list of known conjunction objects and flags unverified cases with
-    secondary_check_performed = False. Full catalog integration is
-    APS 3.0 scope.
+  - Secondary conflict screening requires an object catalog at decision time.
+    Missing catalog data or an unrunnable horizon screen fails closed with
+    secondary_check_performed = False and secondary_conjunction_clear = False,
+    which requires M4 safe hold.
   - Post-burn verification uses the pre-computed m2_post from CW dynamics
     as the risk proxy, not an updated Pc from a propagator. The
     verification pass/fail is therefore a planning-time estimate, not a
@@ -69,6 +68,7 @@ from common.maneuver_scorer import (
     ManeuverScoringResult,
     CandidateScore,
 )
+from common.secondary_horizon import screen_secondary_catalog
 
 
 # ---------------------------------------------------------------------------
@@ -219,16 +219,16 @@ class DecisionRationale:
 class SecondaryConflictCheck:
     """Result of checking whether the maneuver introduces new conjunctions.
 
-    The secondary conflict check takes the post-maneuver state vector and
-    checks it against a list of known conjunction objects. If no catalog
-    is supplied, the check is marked as not performed and flagged for
-    operator awareness.
+    The secondary conflict check propagates the post-maneuver asset state and
+    normalized J2000 catalog states across the operator-policy horizon, evaluates
+    Pc at each object's refined TCA, and fails closed when safety cannot be
+    established.
 
     Attributes
     ----------
     secondary_check_performed : bool
-        True if an object catalog was supplied and checked.
-        False when no catalog is available (APS 3.0 for full catalog).
+        True only when the required catalog/state inputs were available and the
+        policy-horizon screen completed successfully.
     secondary_conjunction_clear : bool
         True if no new conjunctions were detected. Meaningful only when
         secondary_check_performed is True.
@@ -237,15 +237,14 @@ class SecondaryConflictCheck:
     operator_note : str
         Human-readable explanation of the check result.
     closest_approach_km : float or None
-        Separation to the closest catalog object at the screening epoch [km].
-        None when check was not performed.
+        Smallest propagated separation found across screened catalog objects over
+        the policy horizon [km]. None when check was not performed.
     closest_object_id : str or None
-        Object ID of the closest catalog object at the screening epoch.
-        None when check was not performed or catalog was empty.
+        Object ID associated with closest_approach_km. None when the check was
+        not performed or the catalog was unavailable.
     screening_epoch_utc : str or None
-        ISO-8601 UTC timestamp of the screening epoch (burn time).
-        Single-epoch SGP4 check -- TCA is approximated as this epoch.
-        None when check was not performed.
+        ISO-8601 UTC burn epoch that anchors the policy-horizon propagation.
+        None when no epoch was supplied.
     """
     secondary_check_performed: bool
     secondary_conjunction_clear: bool
@@ -260,99 +259,71 @@ def _run_secondary_conflict_check(
     r_post_km: Optional[List[float]],
     known_objects: Optional[List[Dict[str, Any]]],
     screening_epoch_utc: Optional[str] = None,
+    v_post_km_s: Optional[List[float]] = None,
+    policy: Optional[OperatorPolicy] = None,
+    cap: Optional[SatelliteCapability] = None,
 ) -> SecondaryConflictCheck:
-    """Run secondary conflict check against a list of known objects.
+    """Run the SCRUM-381 secondary-conjunction horizon Pc screen.
 
-    Parameters
-    ----------
-    r_post_km : list[float] or None
-        Post-maneuver satellite position in ECI [km].
-    known_objects : list[dict] or None
-        List of conjunction objects with 'obj_id' and 'r_km' fields.
-        If None, check is not performed.
-    screening_epoch_utc : str or None
-        ISO-8601 UTC timestamp of the screening epoch (burn time).
-        Carried through to SecondaryConflictCheck for operator display.
-
-    Returns
-    -------
-    SecondaryConflictCheck
-        Result with performed flag, clear flag, flagged objects, and
-        closest approach distance and object ID.
-
-    Notes
-    -----
-    Performs a single-epoch proximity check at the burn time epoch.
-    The 1 km separation threshold matches policy.min_miss_distance_km
-    default. Full time-window propagation is APS 3.0 scope.
+    The gate is fail closed. A result is CLEAR only when the full required
+    catalog and post-burn state are available, the horizon screen completes,
+    and every secondary Pc is strictly below the operator action threshold.
+    Missing inputs or any screening failure require NOT CLEAR and M4 safe hold.
     """
-    if not known_objects or r_post_km is None:
+    missing = []
+    if not known_objects:
+        missing.append("object catalog")
+    if r_post_km is None:
+        missing.append("post-burn position")
+    if v_post_km_s is None:
+        missing.append("post-burn velocity")
+    if not screening_epoch_utc:
+        missing.append("burn epoch")
+    if policy is None:
+        missing.append("operator policy")
+    if cap is None:
+        missing.append("satellite capability")
+
+    if missing:
         return SecondaryConflictCheck(
             secondary_check_performed=False,
-            secondary_conjunction_clear=True,
+            secondary_conjunction_clear=False,
             flagged_objects=[],
             operator_note=(
-                "Secondary conflict check not performed: no object catalog "
-                "supplied. Full catalog integration is APS 3.0 scope. "
-                "Operator should verify manually against current TLE set."
+                "Secondary horizon screen not performed; missing required input(s): "
+                + ", ".join(missing)
+                + ". Safety could not be established. MAF requires NOT CLEAR and "
+                "M4 safe hold."
             ),
             closest_approach_km=None,
             closest_object_id=None,
             screening_epoch_utc=screening_epoch_utc,
         )
 
-    import numpy as np
-    r_post = np.array(r_post_km, dtype=float)
-    flagged = []
-    THRESHOLD_KM = 1.0
-
-    closest_sep = float("inf")
-    closest_id = None
-
-    for obj in known_objects:
-        obj_id = obj.get("obj_id", "UNKNOWN")
-        r_obj = obj.get("r_km")
-        if r_obj is None:
-            continue
-        sep = float(np.linalg.norm(r_post - np.array(r_obj, dtype=float)))
-        if sep < closest_sep:
-            closest_sep = sep
-            closest_id = obj_id
-        if sep < THRESHOLD_KM:
-            flagged.append(obj_id)
-
-    closest_approach_km = round(closest_sep, 3) if closest_id is not None else None
-
-    if flagged:
-        note = (
-            f"Proximity screening at burn epoch flagged {len(flagged)} object(s) "
-            f"within 1 km: {', '.join(flagged)}. Closest object at burn epoch: "
-            f"{closest_approach_km} km ({closest_id}). "
-            "This is a single-epoch proximity check at burn time, not a full "
-            "post-maneuver conjunction assessment. Tracks have not yet diverged "
-            "at this epoch. Treat as a screening proxy -- operator should verify "
-            "manually. Time-window propagation is APS 3.0 scope."
+    try:
+        result = screen_secondary_catalog(
+            r_post_km=r_post_km,
+            v_post_km_s=v_post_km_s,
+            known_objects=known_objects,
+            burn_time_utc=screening_epoch_utc,
+            horizon_hours=policy.max_hours_before_tca,
+            pc_action=policy.pc_maneuver_threshold,
+            primary_radius_m=cap.radius_m,
         )
-    else:
-        note = (
-            f"Proximity screening at burn epoch found no objects within 1 km "
-            f"across {len(known_objects)} catalog objects screened. Closest object "
-            f"at burn epoch: {closest_approach_km} km ({closest_id}). "
-            "This is a single-epoch proximity check at burn time only -- it screens "
-            "for immediate conflicts at the burn instant, not along the full "
-            "post-maneuver trajectory. Treat as a screening proxy until APS 3.0 "
-            "time-window propagation is available."
+        return SecondaryConflictCheck(**result)
+    except Exception as exc:
+        return SecondaryConflictCheck(
+            secondary_check_performed=False,
+            secondary_conjunction_clear=False,
+            flagged_objects=[],
+            operator_note=(
+                "Secondary horizon screen could not establish safety; "
+                f"M4 safe hold is required. Reason: {exc}"
+            ),
+            closest_approach_km=None,
+            closest_object_id=None,
+            screening_epoch_utc=screening_epoch_utc,
         )
-
-    return SecondaryConflictCheck(
-        secondary_check_performed=True,
-        secondary_conjunction_clear=len(flagged) == 0,
-        flagged_objects=flagged,
-        operator_note=note,
-        closest_approach_km=closest_approach_km,
-        closest_object_id=closest_id,
-        screening_epoch_utc=screening_epoch_utc,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -525,14 +496,20 @@ def _build_verification_result(
         )
 
     secondary_clear = (
-        not secondary.secondary_check_performed
-        or secondary.secondary_conjunction_clear
+        secondary.secondary_check_performed
+        and secondary.secondary_conjunction_clear
     )
     if not secondary_clear:
-        failures.append(
-            f"Secondary conjunction detected with: "
-            f"{', '.join(secondary.flagged_objects)}."
-        )
+        if not secondary.secondary_check_performed:
+            failures.append(
+                "Secondary conjunction screen was not performed; safety could not "
+                "be established and M4 safe hold is required."
+            )
+        else:
+            failures.append(
+                f"Secondary conjunction detected with: "
+                f"{', '.join(secondary.flagged_objects)}."
+            )
 
     budget_ok = scoring.dv_total_m_s <= policy.max_dv_per_event_ms
     if not budget_ok:
@@ -923,6 +900,7 @@ def build_atlas_artifact(
     miss_distance_km: Optional[float] = None,
     known_objects: Optional[List[Dict[str, Any]]] = None,
     r_post_km: Optional[List[float]] = None,
+    v_post_km_s: Optional[List[float]] = None,
 ) -> ATLASManeuverArtifact:
     """Assemble a complete ATLASManeuverArtifact from a ManeuverScoringResult.
 
@@ -947,7 +925,9 @@ def build_atlas_artifact(
     known_objects : list[dict] or None
         Known conjunction objects for secondary conflict check.
     r_post_km : list[float] or None
-        Post-maneuver satellite position [km] for secondary check.
+        Post-maneuver satellite position at burn time [km], ECI J2000.
+    v_post_km_s : list[float] or None
+        Post-maneuver satellite velocity at burn time [km/s], ECI J2000.
 
     Returns
     -------
@@ -973,9 +953,14 @@ def build_atlas_artifact(
     )
 
     # --- Secondary conflict check ---
-    # screening_epoch_utc is the burn time (t_burn_utc from request), passed
-    # as tca_utc here since build_atlas_artifact receives tca_utc at assembly.
-    secondary = _run_secondary_conflict_check(r_post_km, known_objects, tca_utc)
+    secondary = _run_secondary_conflict_check(
+        r_post_km,
+        known_objects,
+        scoring.t_burn_utc,
+        v_post_km_s=v_post_km_s,
+        policy=policy,
+        cap=cap,
+    )
 
     # --- A4: PostManeuverProjection ---
     post_maneuver: Optional[PostManeuverProjection] = None
