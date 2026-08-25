@@ -67,7 +67,12 @@ def test_live_search_parse_and_cross_check():
             f"submit an on-demand screening."
         )
 
-    parsed = parse_leolabs_cdm(cdms[0], _OBJECT)
+    # AC5: resolve which CDM object is ours via the asset registry, mapped once
+    # from the subscribed-objects list, rather than assuming the query id.
+    from common.leolabs_asset_map import AssetRegistry
+    registry = AssetRegistry.from_client(client)
+    our_id = registry.resolve_our_catalog_id(cdms[0])
+    parsed = parse_leolabs_cdm(cdms[0], our_id)
 
     # Golden check 2 on live data: our Pc agrees with the CDM's.
     ours = cross_check_pc(parsed)
@@ -85,6 +90,7 @@ def test_live_end_to_end_evaluate():
     to the planner in-process. The real per-object covariance drives the score.
     """
     from common.leolabs_client import LeoLabsClient
+    from common.leolabs_asset_map import AssetRegistry
     from common.leolabs_cdm_parser import parse_leolabs_cdm
     from common.leolabs_evaluate import build_evaluate_request
 
@@ -101,8 +107,11 @@ def test_live_end_to_end_evaluate():
     if not cdms:
         pytest.skip(f"no LeoLabs CDMs for {_OBJECT} in the window.")
 
-    parsed = parse_leolabs_cdm(cdms[0], _OBJECT)
-    req = build_evaluate_request(parsed, sat_id=_OBJECT, v_remaining_m_s=25.0)
+    # AC5 -> AC7: map our identity, resolve our object, parse, assemble, evaluate.
+    registry = AssetRegistry.from_client(client)
+    our_id = registry.resolve_our_catalog_id(cdms[0])
+    parsed = parse_leolabs_cdm(cdms[0], our_id)
+    req = build_evaluate_request(parsed, sat_id=our_id, v_remaining_m_s=25.0)
 
     # UDL disabled so the leolabs bypass path is exercised, not the UDL path.
     server.UDL_ENABLED = False
