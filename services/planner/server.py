@@ -789,8 +789,19 @@ async def post_evaluate(request: Request):
     # --- Covariance adapter (ADR-008) -------------------------------------
     # When UDL_ENABLED=true, UDL already supplied the covariance in the block
     # above. Skip the ingest CDM fetch so it cannot overwrite the UDL source.
+    _conj_block = body.get("conjunction", {}) or {}
+    _is_leolabs = str(_conj_block.get("source", "")).lower() == "leolabs"
     if UDL_ENABLED:
         covariance_source = "UDL"
+        cdm_record_id = None
+    elif _is_leolabs and _conj_block.get("p_rel_km2"):
+        # SCRUM-411 AC7: a request assembled from a parsed LeoLabs CDM already
+        # carries the real per-object covariance rotated to ECI (km^2). Do NOT
+        # run the ingest covariance adapter, which would overwrite it with an
+        # unrelated Space-Track fetch or a surrogate. Trust the supplied matrix,
+        # same as the UDL path trusts its own. covariance_source stays real_cdm.
+        covariance_source = _conj_block.get("covariance_source") or "real_cdm"
+        body["conjunction"]["covariance_source"] = covariance_source
         cdm_record_id = None
     else:
         try:

@@ -76,3 +76,42 @@ def test_live_search_parse_and_cross_check():
           f"our Pc={ours:.6e}  CDM Pc={theirs}")
     if theirs:
         assert abs(ours - theirs) / theirs < 5.0e-3
+
+
+def test_live_end_to_end_evaluate():
+    """AC7: drive /v1/evaluate on a real LeoLabs CDM and get a recommendation.
+
+    Fetches a live CDM, parses it, assembles the evaluate request, and posts it
+    to the planner in-process. The real per-object covariance drives the score.
+    """
+    from common.leolabs_client import LeoLabsClient
+    from common.leolabs_cdm_parser import parse_leolabs_cdm
+    from common.leolabs_evaluate import build_evaluate_request
+
+    from fastapi.testclient import TestClient
+    import server
+
+    client = LeoLabsClient()
+    now = dt.datetime.now(dt.timezone.utc)
+    min_tca = (now - dt.timedelta(days=23)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    max_tca = (now + dt.timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cdms = client.search_conjunction_cdms(
+        object1=_OBJECT, min_tca=min_tca, max_tca=max_tca, cdm_source="LeoLabs"
+    )
+    if not cdms:
+        pytest.skip(f"no LeoLabs CDMs for {_OBJECT} in the window.")
+
+    parsed = parse_leolabs_cdm(cdms[0], _OBJECT)
+    req = build_evaluate_request(parsed, sat_id=_OBJECT, v_remaining_m_s=25.0)
+
+    # UDL disabled so the leolabs bypass path is exercised, not the UDL path.
+    server.UDL_ENABLED = False
+    resp = TestClient(server.svc).post("/v1/evaluate", json=req)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    print(f"AC7 evaluate: source={data['source']} "
+          f"covariance_source={data['covariance_source']} "
+          f"direction={data['recommendation']['direction']}")
+    assert data["source"] == "leolabs"
+    assert data["covariance_source"] == "real_cdm"
+    assert data["recommendation"]["direction"]
