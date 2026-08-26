@@ -1,14 +1,14 @@
 """
 tests/test_secondary_conflict.py
 
-SCRUM-330: Unit tests for SecondaryConflictCheck live catalog integration.
+SCRUM-381: Unit tests for fail-closed secondary horizon Pc screening.
 
 Tests cover:
-  AC1: performed=True when catalog is available
-  AC2: secondary conjunction correctly flagged with NORAD ID and distance
-  AC3: clean post-burn state returns performed=True, conflict=False
-  AC4: catalog unavailability falls back to not_performed, no crash
-  AC6: VerificationResult.secondary_clear reflects actual check result
+  - strict Pc_action CLEAR / NOT CLEAR semantics
+  - policy-owned screening horizon
+  - continuously refined TCA between 60-second brackets
+  - fail-closed missing-input, propagation, and Pc-computation paths
+  - VerificationResult.secondary_clear propagation
 
 Uses synthetic TLE pairs and known post-burn states so tests are
 deterministic and require no network access.
@@ -33,6 +33,7 @@ from common.atlas_artifact import (
     _run_secondary_conflict_check,
     _build_verification_result,
 )
+from common.secondary_horizon import _find_object_tca, screen_secondary_catalog
 from common.spacetrack_tle import (
     _parse_and_propagate_tle,
     fetch_catalog_objects,
@@ -88,91 +89,111 @@ _FAR_TLE_LINE2 = "2 99002  98.0000  20.0000 0010000  90.0000 270.0000 14.2000000
 
 
 # ---------------------------------------------------------------------------
-# AC2: Secondary conjunction flagged correctly
+# SCRUM-381: strict horizon Pc contract
 # ---------------------------------------------------------------------------
 
-class TestSecondaryConflictFlagged:
-    """AC2: A post-burn state that introduces a secondary conjunction is
-    correctly flagged with object ID and separation distance."""
+class TestSecondaryHorizonPcContract:
+    @pytest.mark.parametrize(
+        ("pc_value", "expected_clear"),
+        [
+            (9.0e-5, True),
+            (1.0e-4, False),
+            (1.1e-4, False),
+        ],
+    )
+    def test_pc_action_boundary_is_strict(self, pc_value, expected_clear):
+        # CLEAR requires every Pc to be strictly below Pc_action.
+        state = (
+            37.5,
+            0.25,
+            np.array([7000.0, 0.0, 0.0]),
+            np.array([0.0, 7.5, 0.0]),
+            np.array([7000.0, 0.25, 0.0]),
+            np.array([0.0, 7.5, 0.0]),
+        )
+        with patch(
+            "common.secondary_horizon._find_object_tca",
+            return_value=state,
+        ), patch("common.secondary_horizon.compute_pc") as pc_mock:
+            pc_mock.return_value = MagicMock(Pc=pc_value)
+            result = screen_secondary_catalog(
+                r_post_km=[7000.0, 0.0, 0.0],
+                v_post_km_s=[0.0, 7.5, 0.0],
+                known_objects=[{"obj_id": "OBJ-1", "r_km": [7000.0, 1.0, 0.0], "v_km_s": [0.0, 7.5, 0.0]}],
+                burn_time_utc="2026-08-24T12:00:00Z",
+                horizon_hours=12.0,
+                pc_action=1.0e-4,
+                primary_radius_m=0.6,
+            )
 
-    def test_flagged_when_object_within_threshold(self):
-        """Object within 1 km threshold must be in flagged_objects."""
-        r_post = [6778.0, 0.0, 0.0]
-        known_objects = [
-            {"obj_id": "35929", "r_km": [6778.4, 0.0, 0.0]},  # 0.4 km away
+        assert result["secondary_check_performed"] is True
+        assert result["secondary_conjunction_clear"] is expected_clear
+        assert ("OBJ-1" in result["flagged_objects"]) is (not expected_clear)
+
+    def test_closest_approach_is_from_each_objects_horizon_tca(self):
+        # Closest-object reporting uses refined horizon TCA results.
+        states = [
+            (
+                15.0,
+                2.0,
+                np.array([7000.0, 0.0, 0.0]),
+                np.array([0.0, 7.5, 0.0]),
+                np.array([7002.0, 0.0, 0.0]),
+                np.array([0.0, 7.5, 0.0]),
+            ),
+            (
+                75.0,
+                0.4,
+                np.array([7000.0, 0.0, 0.0]),
+                np.array([0.0, 7.5, 0.0]),
+                np.array([7000.4, 0.0, 0.0]),
+                np.array([0.0, 7.5, 0.0]),
+            ),
         ]
-        result = _run_secondary_conflict_check(r_post, known_objects)
-        assert result.secondary_check_performed is True
-        assert result.secondary_conjunction_clear is False
-        assert "35929" in result.flagged_objects
+        with patch(
+            "common.secondary_horizon._find_object_tca",
+            side_effect=states,
+        ), patch("common.secondary_horizon.compute_pc") as pc_mock:
+            pc_mock.return_value = MagicMock(Pc=1.0e-6)
+            result = screen_secondary_catalog(
+                r_post_km=[7000.0, 0.0, 0.0],
+                v_post_km_s=[0.0, 7.5, 0.0],
+                known_objects=[{"obj_id": "FAR", "r_km": [7002.0, 0.0, 0.0], "v_km_s": [0.0, 7.5, 0.0]}, {"obj_id": "NEAR", "r_km": [7000.4, 0.0, 0.0], "v_km_s": [0.0, 7.5, 0.0]}],
+                burn_time_utc="2026-08-24T12:00:00Z",
+                horizon_hours=6.0,
+                pc_action=1.0e-4,
+                primary_radius_m=0.6,
+            )
 
-    def test_flagged_object_id_preserved(self):
-        """Flagged object ID must match the obj_id in known_objects."""
-        r_post = [6778.0, 0.0, 0.0]
-        known_objects = [{"obj_id": "IRIDIUM-33-DEB", "r_km": [6778.2, 0.0, 0.0]}]
-        result = _run_secondary_conflict_check(r_post, known_objects)
-        assert "IRIDIUM-33-DEB" in result.flagged_objects
-
-    def test_multiple_flagged_objects(self):
-        """Multiple objects within threshold must all appear in flagged_objects."""
-        r_post = [6778.0, 0.0, 0.0]
-        known_objects = [
-            {"obj_id": "OBJ-A", "r_km": [6778.3, 0.0, 0.0]},
-            {"obj_id": "OBJ-B", "r_km": [6777.8, 0.0, 0.0]},
-            {"obj_id": "OBJ-C", "r_km": [6800.0, 0.0, 0.0]},  # far, not flagged
-        ]
-        result = _run_secondary_conflict_check(r_post, known_objects)
-        assert "OBJ-A" in result.flagged_objects
-        assert "OBJ-B" in result.flagged_objects
-        assert "OBJ-C" not in result.flagged_objects
-
-    def test_operator_note_mentions_flagged_count(self):
-        """operator_note must mention the number of flagged objects."""
-        r_post = [6778.0, 0.0, 0.0]
-        known_objects = [{"obj_id": "TEST-1", "r_km": [6778.5, 0.0, 0.0]}]
-        result = _run_secondary_conflict_check(r_post, known_objects)
-        assert "1" in result.operator_note
+        assert result["closest_object_id"] == "NEAR"
+        assert result["closest_approach_km"] == pytest.approx(0.4)
+        assert result["screening_epoch_utc"] == "2026-08-24T12:00:00Z"
 
 
-# ---------------------------------------------------------------------------
-# AC3: Clean post-burn state
-# ---------------------------------------------------------------------------
+class TestHorizonTcaRefinement:
+    def test_refines_tca_between_sixty_second_brackets(self):
+        # A TCA at T+37.5 s must not collapse to the 0 s or 60 s grid.
+        def fake_relative_state(_r0, _v0, _obj, _epoch, dt_s):
+            r_primary = np.zeros(3)
+            v_primary = np.zeros(3)
+            r_secondary = np.array([float(dt_s) - 37.5, 0.2, 0.0])
+            v_secondary = np.array([1.0, 0.0, 0.0])
+            return r_primary, v_primary, r_secondary, v_secondary
 
-class TestSecondaryConflictClear:
-    """AC3: Clean post-burn state returns performed=True, conflict=False."""
+        with patch(
+            "common.secondary_horizon._relative_state",
+            side_effect=fake_relative_state,
+        ):
+            dt_s, miss_km, *_ = _find_object_tca(
+                np.array([7000.0, 0.0, 0.0]),
+                np.array([0.0, 7.5, 0.0]),
+                {"obj_id": "BETWEEN-GRID"},
+                datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc),
+                120.0,
+            )
 
-    def test_clear_when_no_objects_within_threshold(self):
-        """No objects within 1 km must return conjunction_clear=True."""
-        r_post = [6778.0, 0.0, 0.0]
-        known_objects = [
-            {"obj_id": "FAR-1", "r_km": [6800.0, 0.0, 0.0]},  # 22 km away
-            {"obj_id": "FAR-2", "r_km": [6778.0, 50.0, 0.0]},  # 50 km away
-        ]
-        result = _run_secondary_conflict_check(r_post, known_objects)
-        assert result.secondary_check_performed is True
-        assert result.secondary_conjunction_clear is True
-        assert len(result.flagged_objects) == 0
-
-    def test_clear_operator_note_mentions_object_count(self):
-        """operator_note for clear result must mention catalog size checked."""
-        r_post = [6778.0, 0.0, 0.0]
-        known_objects = [{"obj_id": "FAR-1", "r_km": [6900.0, 0.0, 0.0]}]
-        result = _run_secondary_conflict_check(r_post, known_objects)
-        assert "1" in result.operator_note
-
-    def test_exact_threshold_boundary_not_flagged(self):
-        """Object at exactly 1.0 km separation must NOT be flagged (< not <=)."""
-        r_post = [6778.0, 0.0, 0.0]
-        known_objects = [{"obj_id": "BOUNDARY", "r_km": [6779.0, 0.0, 0.0]}]
-        result = _run_secondary_conflict_check(r_post, known_objects)
-        assert result.secondary_conjunction_clear is True
-
-    def test_just_inside_threshold_is_flagged(self):
-        """Object at 0.999 km must be flagged."""
-        r_post = [6778.0, 0.0, 0.0]
-        known_objects = [{"obj_id": "CLOSE", "r_km": [6778.999, 0.0, 0.0]}]
-        result = _run_secondary_conflict_check(r_post, known_objects)
-        assert result.secondary_conjunction_clear is False
+        assert dt_s == pytest.approx(37.5, abs=1e-5)
+        assert miss_km == pytest.approx(0.2, abs=1e-8)
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +207,7 @@ class TestCatalogUnavailabilityFallback:
         """None known_objects must return not_performed."""
         result = _run_secondary_conflict_check([6778.0, 0.0, 0.0], None)
         assert result.secondary_check_performed is False
-        assert result.secondary_conjunction_clear is True
+        assert result.secondary_conjunction_clear is False
 
     def test_not_performed_when_r_post_none(self):
         """None r_post_km must return not_performed."""
@@ -240,26 +261,120 @@ class TestCatalogUnavailabilityFallback:
 
 
 # ---------------------------------------------------------------------------
-# AC1: performed=True when catalog available
+# SCRUM-381: full-input gate and fail-closed routing
 # ---------------------------------------------------------------------------
 
-class TestPerformedWhenCatalogAvailable:
-    """AC1: SecondaryConflictCheck.performed is True when catalog is available."""
+class TestSecondaryHorizonGate:
+    @staticmethod
+    def _policy(horizon_hours=18.5, pc_action=1.0e-4):
+        policy = MagicMock()
+        policy.max_hours_before_tca = horizon_hours
+        policy.pc_maneuver_threshold = pc_action
+        return policy
 
-    def test_performed_true_when_objects_supplied(self):
-        """Any non-empty known_objects list must set performed=True."""
-        r_post = [6778.0, 0.0, 0.0]
-        known_objects = [{"obj_id": "TEST", "r_km": [7000.0, 0.0, 0.0]}]
-        result = _run_secondary_conflict_check(r_post, known_objects)
+    @staticmethod
+    def _cap(radius_m=0.6):
+        cap = MagicMock()
+        cap.radius_m = radius_m
+        return cap
+
+    @staticmethod
+    def _success_result():
+        return {
+            "secondary_check_performed": True,
+            "secondary_conjunction_clear": True,
+            "flagged_objects": [],
+            "operator_note": "CLEAR",
+            "closest_approach_km": 2.5,
+            "closest_object_id": "OBJ-1",
+            "screening_epoch_utc": "2026-08-24T12:00:00Z",
+        }
+
+    def test_policy_max_hours_before_tca_owns_horizon(self):
+        # The screen consumes policy horizon and Pc threshold, not literals.
+        policy = self._policy(horizon_hours=18.5, pc_action=7.5e-5)
+        cap = self._cap(radius_m=0.75)
+        with patch(
+            "common.atlas_artifact.screen_secondary_catalog",
+            return_value=self._success_result(),
+        ) as screen:
+            result = _run_secondary_conflict_check(
+                [7000.0, 0.0, 0.0],
+                [{"obj_id": "OBJ-1", "r_km": [7000.0, 1.0, 0.0], "v_km_s": [0.0, 7.5, 0.0]}],
+                "2026-08-24T12:00:00Z",
+                [0.0, 7.5, 0.0],
+                policy,
+                cap,
+            )
+
         assert result.secondary_check_performed is True
+        kwargs = screen.call_args.kwargs
+        assert kwargs["horizon_hours"] == pytest.approx(18.5)
+        assert kwargs["pc_action"] == pytest.approx(7.5e-5)
+        assert kwargs["primary_radius_m"] == pytest.approx(0.75)
 
-    def test_performed_true_even_with_single_object(self):
-        """Single object catalog must still set performed=True."""
+    def test_missing_velocity_does_not_fall_back_to_proximity_proxy(self):
         result = _run_secondary_conflict_check(
-            [6778.0, 0.0, 0.0],
-            [{"obj_id": "SOLO", "r_km": [6900.0, 0.0, 0.0]}],
+            [7000.0, 0.0, 0.0],
+            [{"obj_id": "OBJ-1", "r_km": [7000.1, 0.0, 0.0]}],
+            "2026-08-24T12:00:00Z",
+            None,
+            self._policy(),
+            self._cap(),
         )
-        assert result.secondary_check_performed is True
+        assert result.secondary_check_performed is False
+        assert result.secondary_conjunction_clear is False
+        assert "post-burn velocity" in result.operator_note
+        assert "M4" in result.operator_note
+
+    def test_propagation_failure_fails_closed_to_m4(self):
+        with patch(
+            "common.atlas_artifact.screen_secondary_catalog",
+            side_effect=RuntimeError("propagation failed"),
+        ):
+            result = _run_secondary_conflict_check(
+                [7000.0, 0.0, 0.0],
+                [{"obj_id": "OBJ-1", "r_km": [7000.0, 1.0, 0.0], "v_km_s": [0.0, 7.5, 0.0]}],
+                "2026-08-24T12:00:00Z",
+                [0.0, 7.5, 0.0],
+                self._policy(),
+                self._cap(),
+            )
+
+        assert result.secondary_check_performed is False
+        assert result.secondary_conjunction_clear is False
+        assert "propagation failed" in result.operator_note
+        assert "M4" in result.operator_note
+
+    def test_pc_computation_failure_fails_closed_to_m4(self):
+        state = (
+            30.0,
+            0.5,
+            np.array([7000.0, 0.0, 0.0]),
+            np.array([0.0, 7.5, 0.0]),
+            np.array([7000.5, 0.0, 0.0]),
+            np.array([0.0, 7.5, 0.0]),
+        )
+        with patch(
+            "common.secondary_horizon._find_object_tca",
+            return_value=state,
+        ), patch(
+            "common.secondary_horizon.compute_pc",
+            side_effect=RuntimeError("Pc failed"),
+        ):
+            result = _run_secondary_conflict_check(
+                [7000.0, 0.0, 0.0],
+                [{"obj_id": "OBJ-1", "r_km": [7000.0, 1.0, 0.0], "v_km_s": [0.0, 7.5, 0.0]}],
+                "2026-08-24T12:00:00Z",
+                [0.0, 7.5, 0.0],
+                self._policy(),
+                self._cap(),
+            )
+
+        assert result.secondary_check_performed is False
+        assert result.secondary_conjunction_clear is False
+        assert "Pc failed" in result.operator_note
+        assert "M4" in result.operator_note
 
 
 # ---------------------------------------------------------------------------
@@ -296,18 +411,20 @@ class TestVerificationResultSecondaryField:
         result = _build_verification_result(scoring, policy, secondary)
         assert result.secondary_clear is False
 
-    def test_secondary_clear_true_when_not_performed(self):
-        """When check not performed, secondary_clear must be True (safe default)."""
+    def test_secondary_clear_false_when_not_performed(self):
+        """When check is not performed, verification must fail closed."""
         secondary = SecondaryConflictCheck(
             secondary_check_performed=False,
-            secondary_conjunction_clear=True,
+            secondary_conjunction_clear=False,
             flagged_objects=[],
             operator_note="not performed",
         )
         scoring = _make_scoring_stub()
         policy = _make_policy_stub()
         result = _build_verification_result(scoring, policy, secondary)
-        assert result.secondary_clear is True
+        assert result.secondary_clear is False
+        assert result.passed is False
+        assert any("M4" in reason for reason in result.failure_reasons)
 
     def test_verification_fails_when_secondary_conflict(self):
         """VerificationResult.passed must be False when secondary conflict detected."""
@@ -407,76 +524,53 @@ class TestTLEParseAndPropagate:
 # SCRUM-330 follow-on: closest_approach_km and closest_object_id fields
 # ---------------------------------------------------------------------------
 
-class TestClosestApproachFields:
-    """AC2 extension: SecondaryConflictCheck must carry closest approach
-    distance and object ID, not just a list of flagged object IDs."""
 
-    def test_closest_approach_km_present_when_check_performed(self):
-        """closest_approach_km must be set when check is performed."""
-        r_post = [6778.0, 0.0, 0.0]
-        known_objects = [{"obj_id": "OBJ-A", "r_km": [6780.0, 0.0, 0.0]}]
-        result = _run_secondary_conflict_check(r_post, known_objects)
-        assert result.closest_approach_km is not None
-        assert isinstance(result.closest_approach_km, float)
+class TestSecondaryCovarianceConvention:
+    @pytest.mark.parametrize(
+        ("extra", "expected_uncertainty_m"),
+        [
+            ({"position_sigma_m": 250.0, "confidence": 0.2}, 250.0),
+            ({"confidence": 0.5}, 4000.0),
+            ({}, 2500.0),
+        ],
+    )
+    def test_reuses_scrum_391_debris_uncertainty_convention(
+        self, extra, expected_uncertainty_m
+    ):
+        obj = {
+            "obj_id": "OBJ-1",
+            "r_km": [7000.0, 1.0, 0.0],
+            "v_km_s": [0.0, 7.5, 0.0],
+            **extra,
+        }
+        state = (
+            30.0,
+            1.0,
+            np.array([7000.0, 0.0, 0.0]),
+            np.array([0.0, 7.5, 0.0]),
+            np.array([7000.0, 1.0, 0.0]),
+            np.array([0.0, 7.5, 0.0]),
+        )
 
-    def test_closest_approach_km_none_when_not_performed(self):
-        """closest_approach_km must be None when check is not performed."""
-        result = _run_secondary_conflict_check(None, None)
-        assert result.closest_approach_km is None
+        with patch(
+            "common.secondary_horizon._find_object_tca",
+            return_value=state,
+        ), patch(
+            "common.secondary_horizon.compute_pc",
+            return_value=MagicMock(Pc=1.0e-6),
+        ), patch(
+            "common.secondary_horizon.default_covariance_from_uncertainty",
+            return_value=np.eye(3),
+        ) as covariance_mock:
+            screen_secondary_catalog(
+                r_post_km=[7000.0, 0.0, 0.0],
+                v_post_km_s=[0.0, 7.5, 0.0],
+                known_objects=[obj],
+                burn_time_utc="2026-08-24T12:00:00Z",
+                horizon_hours=12.0,
+                pc_action=1.0e-4,
+                primary_radius_m=0.6,
+            )
 
-    def test_closest_object_id_matches_nearest_object(self):
-        """closest_object_id must identify the nearest object, not just flagged ones."""
-        r_post = [6778.0, 0.0, 0.0]
-        known_objects = [
-            {"obj_id": "NEAR", "r_km": [6779.0, 0.0, 0.0]},   # 1.0 km -- not flagged
-            {"obj_id": "FAR",  "r_km": [6790.0, 0.0, 0.0]},   # 12.0 km
-        ]
-        result = _run_secondary_conflict_check(r_post, known_objects)
-        assert result.closest_object_id == "NEAR"
-
-    def test_closest_approach_km_is_accurate(self):
-        """closest_approach_km must equal the actual separation to nearest object."""
-        r_post = [6778.0, 0.0, 0.0]
-        known_objects = [
-            {"obj_id": "OBJ-A", "r_km": [6781.0, 0.0, 0.0]},  # 3.0 km
-            {"obj_id": "OBJ-B", "r_km": [6785.0, 0.0, 0.0]},  # 7.0 km
-        ]
-        result = _run_secondary_conflict_check(r_post, known_objects)
-        assert abs(result.closest_approach_km - 3.0) < 0.01
-        assert result.closest_object_id == "OBJ-A"
-
-    def test_closest_object_id_none_when_not_performed(self):
-        """closest_object_id must be None when check is not performed."""
-        result = _run_secondary_conflict_check(None, None)
-        assert result.closest_object_id is None
-
-    def test_screening_epoch_utc_carried_through(self):
-        """screening_epoch_utc must be passed through from the caller."""
-        r_post = [6778.0, 0.0, 0.0]
-        known_objects = [{"obj_id": "OBJ-A", "r_km": [6790.0, 0.0, 0.0]}]
-        epoch = "2024-01-01T12:00:00Z"
-        result = _run_secondary_conflict_check(r_post, known_objects, epoch)
-        assert result.screening_epoch_utc == epoch
-
-    def test_screening_epoch_utc_none_when_not_performed(self):
-        """screening_epoch_utc must be None when check is not performed and not supplied."""
-        result = _run_secondary_conflict_check(None, None)
-        assert result.screening_epoch_utc is None
-
-    def test_closest_approach_in_operator_note(self):
-        """operator_note must mention the closest approach distance."""
-        r_post = [6778.0, 0.0, 0.0]
-        known_objects = [{"obj_id": "TEST", "r_km": [6780.5, 0.0, 0.0]}]
-        result = _run_secondary_conflict_check(r_post, known_objects)
-        assert str(result.closest_approach_km) in result.operator_note or "km" in result.operator_note
-
-    def test_flagged_object_separate_from_closest(self):
-        """A flagged object and closest object can differ -- closest may not be flagged."""
-        r_post = [6778.0, 0.0, 0.0]
-        known_objects = [
-            {"obj_id": "CLOSEST-NOT-FLAGGED", "r_km": [6778.8, 0.0, 0.0]},  # 0.8 km -- flagged
-            {"obj_id": "FAR", "r_km": [6800.0, 0.0, 0.0]},                  # 22 km
-        ]
-        result = _run_secondary_conflict_check(r_post, known_objects)
-        assert result.closest_object_id == "CLOSEST-NOT-FLAGGED"
-        assert "CLOSEST-NOT-FLAGGED" in result.flagged_objects
+        secondary_call = covariance_mock.call_args_list[1]
+        assert secondary_call.args[0] == pytest.approx(expected_uncertainty_m)

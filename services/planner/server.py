@@ -1000,8 +1000,8 @@ async def post_evaluate(request: Request):
             result["detection_confidence"] = detection_confidence
 
         # --- 9.6 + SCRUM-330: ATLASManeuverArtifact + secondary conflict ----
-        # Catalog fetch is fire-and-forget: on any failure known_objects=[]
-        # which preserves the not_performed fallback in atlas_artifact.py.
+        # Catalog retrieval remains best-effort at this layer. SCRUM-381
+        # treats an unavailable/incomplete catalog as NOT CLEAR and fails closed.
         try:
             conj_dict = body.get("conjunction", {})
             sat_dict  = body.get("satellite", {})
@@ -1009,7 +1009,7 @@ async def post_evaluate(request: Request):
             cap     = SatelliteCapability.from_request(sat_dict)
             policy  = _policy_from_dict(body.get("policy", {}))
 
-            # SCRUM-330: fetch TLE catalog for secondary conflict screening.
+            # SCRUM-381: fetch the full TLE catalog for policy-horizon Pc screening.
             # r_post_km approximated as r_sat_km -- position barely changes
             # during a short avoidance burn; only velocity changes.
             r_sat_km_req = sat_dict.get("r_sat_km", [])
@@ -1019,6 +1019,7 @@ async def post_evaluate(request: Request):
                 known_objects = fetch_catalog_objects(
                     r_sat_km=r_sat_km_req,
                     burn_time_utc=t_burn_utc,
+                    screening_radius_km=None,
                 )
                 log.info(
                     "catalog screening complete",
@@ -1034,6 +1035,14 @@ async def post_evaluate(request: Request):
                     extra={"event": "catalog_fetch_failed", "exc": str(exc)},
                 )
 
+            v_sat_km_s_req = sat_dict.get("v_sat_km_s", [])
+            v_post_km_s = None
+            if v_sat_km_s_req and scoring.dv_eci_km_s:
+                v_post_km_s = [
+                    float(v_sat_km_s_req[i]) + float(scoring.dv_eci_km_s[i])
+                    for i in range(3)
+                ]
+
             artifact = build_atlas_artifact(
                 scoring=scoring,
                 cap=cap,
@@ -1043,6 +1052,7 @@ async def post_evaluate(request: Request):
                 miss_distance_km=conj_dict.get("miss_distance_km"),
                 known_objects=known_objects if known_objects else None,
                 r_post_km=r_sat_km_req if r_sat_km_req else None,
+                v_post_km_s=v_post_km_s,
             )
             result["atlas_artifact"] = artifact.to_dict()
             # --- DecisionLog (SCRUM-351): full audit record, retrievable by log_id ---
