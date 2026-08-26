@@ -61,7 +61,7 @@ async def planner_evaluate(request: Request):
     try:
         resp = requests.post(
             f"{PLANNER_SERVICE_URL}/v1/evaluate",
-            json=body, timeout=10
+            json=body, timeout=60  # SCRUM-412: live LeoLabs evaluate (cold registry build + API round trips) exceeds 10s
         )
         return JSONResponse(status_code=resp.status_code, content=resp.json())
     except requests.exceptions.ConnectionError:
