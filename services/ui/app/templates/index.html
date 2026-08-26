@@ -1023,19 +1023,51 @@ async function evaluateConjunction(conj,idx){
   }catch(e){console.error('Rendering the evaluate result failed:',e);}
 }
 
+// SCRUM-415/416: describe the scored conjunction from the evaluate result when a
+// live source (LeoLabs, Space-Track, UDL) drove it, rather than the clicked
+// scenario row. The object identity and true relative geometry are not in the
+// response yet (tracked as a backend follow-up), so the live label falls back to
+// the asset NORAD and the approach direction stays approximate; risk, miss, Pc
+// and TCA are the real scored values.
+function evalDisplayCtx(result, conj){
+  const live = !!(result && result.source && String(result.source).toLowerCase() !== 'surrogate');
+  const rs = (result && result.atlas_artifact && result.atlas_artifact.risk_summary) || {};
+  if(live){
+    const risk = rs.maneuver_required ? 'RED' : (rs.monitor_only ? 'AMBER' : 'GREEN');
+    const label = assetNoradId ? ('NORAD ' + assetNoradId) : (conj.object_id || 'LIVE');
+    const missM = (rs.miss_distance_km != null) ? rs.miss_distance_km * 1000 : (conj.miss_distance_m || 0);
+    const pc = (result.metrics && result.metrics.risk_surrogate_post != null) ? result.metrics.risk_surrogate_post : (conj.pc || 0);
+    let tcaMin = conj.time_to_tca_min;
+    if(rs.tca_utc){ const dm = (new Date(rs.tca_utc).getTime() - Date.now())/60000; if(isFinite(dm)) tcaMin = dm; }
+    return {live:true, risk, label, missM, pc, tcaMin};
+  }
+  return {live:false, risk:conj.risk_level, label:conj.object_id, missM:(conj.miss_distance_m||0), pc:(conj.pc||0), tcaMin:conj.time_to_tca_min};
+}
+
+function covLabelLine(result){
+  const cs = result && result.covariance_source;
+  if(cs === 'real_cdm'){
+    const src = String((result && result.source) || '').toLowerCase();
+    const name = src==='leolabs' ? 'LeoLabs' : src==='spacetrack' ? 'Space-Track' : src==='udl' ? 'UDL' : 'live';
+    return 'COVARIANCE: Live ' + name + ' CDM covariance (CCSDS 508.0-B-1)';
+  }
+  return 'COVARIANCE: Surrogate covariance (identity-scaled)';
+}
+
 function updateDecisionCard(result,conj){
+  const dctx=evalDisplayCtx(result,conj);
   const card=document.getElementById('decisionCard'),status=document.getElementById('decisionStatus'),badge=document.getElementById('decisionBadge');
   const utility=result.recommendation?.utility||0;
   const pos=utility>0.001;
   let dec='MONITORING',bc='badge-nogo',bt='NO ACTION',cc='';
-  if(conj.risk_level==='RED'&&pos){dec='EXECUTE MANEUVER';bc='badge-go';bt='GO';cc='alert-red'}
-  else if(conj.risk_level==='AMBER'&&pos){dec='PREPARE SYSTEMS';bc='badge-standby';bt='STANDBY';cc='alert-amber'}
-  else if(conj.risk_level==='RED'){dec='ASSESSING';bc='badge-standby';bt='ANALYZING';cc='alert-red'}
-  else if(conj.risk_level==='AMBER'){dec='MONITORING';bc='badge-nogo';bt='WATCH';cc='alert-amber'}
+  if(dctx.risk==='RED'&&pos){dec='EXECUTE MANEUVER';bc='badge-go';bt='GO';cc='alert-red'}
+  else if(dctx.risk==='AMBER'&&pos){dec='PREPARE SYSTEMS';bc='badge-standby';bt='STANDBY';cc='alert-amber'}
+  else if(dctx.risk==='RED'){dec='ASSESSING';bc='badge-standby';bt='ANALYZING';cc='alert-red'}
+  else if(dctx.risk==='AMBER'){dec='MONITORING';bc='badge-nogo';bt='WATCH';cc='alert-amber'}
   status.textContent=dec;badge.className='decision-badge '+bc;badge.textContent=bt;
   card.className='decision-card '+cc;
-  document.getElementById('dTarget').textContent=conj.object_id;
-  const t=conj.time_to_tca_min;
+  document.getElementById('dTarget').textContent=dctx.label;
+  const t=dctx.tcaMin;
   document.getElementById('dTCA').textContent=t<60?t.toFixed(0)+' min':(t/60).toFixed(1)+' hr';
   const dir=result.recommendation?.direction||'--';
   document.getElementById('dDir').textContent=dir==='no-burn'?'NO-BURN':dir.toUpperCase();
@@ -1205,16 +1237,17 @@ function updatePlannerDetails(result){
 }
 
 function updateRiskBar(result,conj){
+  const dctx=evalDisplayCtx(result,conj);
   const m=result.metrics||{};
-  document.getElementById('pcPre').textContent=conj.pc>0?conj.pc.toExponential(1):'--';
+  document.getElementById('pcPre').textContent=dctx.pc>0?dctx.pc.toExponential(1):'--';
   document.getElementById('pcPost').textContent=(m.risk_surrogate_post||0)>0?(m.risk_surrogate_post).toExponential(1):'--';
   document.getElementById('m2Pre').textContent=fmtM2(m.m2_pre||0);
   document.getElementById('m2Post').textContent=fmtM2(m.m2_post||0);
   document.getElementById('utilBar').textContent=(result.recommendation?.utility||0).toFixed(3);
   const al=document.getElementById('encounterAlert');al.className='encounter-alert';
-  if(conj.risk_level==='RED'){al.className='encounter-alert red';al.textContent='RED ALERT \u2014 '+conj.object_id}
-  else if(conj.risk_level==='AMBER'){al.className='encounter-alert amber';al.textContent='AMBER \u2014 '+conj.object_id}
-  document.getElementById('encounterTitleText').textContent='Encounter: '+conj.object_id+' \u2014 Miss '+conj.miss_distance_m.toFixed(0)+'m';
+  if(dctx.risk==='RED'){al.className='encounter-alert red';al.textContent='RED ALERT \u2014 '+dctx.label}
+  else if(dctx.risk==='AMBER'){al.className='encounter-alert amber';al.textContent='AMBER \u2014 '+dctx.label}
+  document.getElementById('encounterTitleText').textContent='Encounter: '+dctx.label+' \u2014 Miss '+dctx.missM.toFixed(0)+'m';
 }
 
 
@@ -1315,8 +1348,9 @@ function drawEncounter(conj,result){
   ctx.clearRect(0,0,W,H);
   drawGrid(ctx,W,H);
 
-  const miss_m=conj.miss_distance_m;
-  const risk=conj.risk_level;
+  const dctx=evalDisplayCtx(result,conj);
+  const miss_m=dctx.missM;
+  const risk=dctx.risk;
   const rc=risk==='RED'?'#ff3b5c':risk==='AMBER'?'#ffb020':risk==='GREEN'?'#3ddc84':'#4466aa';
 
   // Determine scale: fit miss distance nicely
@@ -1571,11 +1605,11 @@ function drawEncounter(conj,result){
   ctx.fillStyle='#6b6d8a';
   const lines=[
     'APPROACH VEL: '+conj.relative_velocity_km_s.toFixed(2)+' km/s',
-    'TIME TO TCA: '+(conj.time_to_tca_min<60?conj.time_to_tca_min.toFixed(0)+' min':(conj.time_to_tca_min/60).toFixed(1)+' hr'),
-    'Pc: '+conj.pc_display,
+    'TIME TO TCA: '+(dctx.tcaMin<60?dctx.tcaMin.toFixed(0)+' min':(dctx.tcaMin/60).toFixed(1)+' hr'),
+    'Pc: '+(dctx.live?dctx.pc.toExponential(2):conj.pc_display),
     'SCALE: 1px \u2248 '+(1/scale).toFixed(1)+'m',
     'HBR: 15m (combined)',
-    'COVARIANCE: Live Space-Track CDM covariance (CCSDS 508.0-B-1)',
+    covLabelLine(result),
     'ZOOM: '+zoomLevel.toFixed(1)+'x | scroll=zoom  drag=pan  dbl-click=reset'
   ];
   lines.forEach((l,i)=>ctx.fillText(l,ix,iy+i*14));
