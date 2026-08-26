@@ -130,6 +130,31 @@ async def planner_udl_status():
         })
 
 
+@app.get("/api/planner/leolabs-status")
+async def planner_leolabs_status():
+    """Passthrough proxy to the planner LeoLabs status endpoint (SCRUM-412).
+
+    Mirrors the UDL status proxy. The dashboard badge (loadSourceMode) calls this
+    first, since LeoLabs takes precedence over UDL as the live conjunction source.
+    Relayed verbatim; any upstream failure returns 502 so the badge JS falls
+    through to the UDL / reference source cleanly.
+    """
+    try:
+        resp = requests.get(f"{PLANNER_SERVICE_URL}/leolabs-status", timeout=5)
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"error": str(e)})
+    if not resp.ok:
+        return JSONResponse(status_code=502, content={
+            "error": f"planner leolabs-status returned {resp.status_code}"
+        })
+    try:
+        return JSONResponse(status_code=resp.status_code, content=resp.json())
+    except ValueError:
+        return JSONResponse(status_code=502, content={
+            "error": "planner leolabs-status returned invalid JSON"
+        })
+
+
 # ---------- Ingest CDM proxy ----------
 
 @app.post("/api/ingest/poll")

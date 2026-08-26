@@ -29,6 +29,15 @@ info:
     converts to km² (divides by 1e6) before returning. The planner receives and
     passes km² throughout. Do not apply further unit conversion.
 
+    **Changes in 2.5.7 (relative to 2.5.6)**
+    - SCRUM-412: LeoLabs live runtime. Behind LEOLABS_ENABLED, /v1/evaluate fetches
+      a live LeoLabs CDM for the requested primary, resolves our object via the
+      asset registry, and scores on real per-object covariance (source=leolabs,
+      covariance_source=real_cdm). LeoLabs takes precedence over UDL when both are
+      enabled. Adds the /leolabs-status endpoint (undocumented here, matching
+      /udl-status). No request/response schema changes; the `source` field from
+      2.5.6 already carries the result.
+
     **Changes in 2.5.6 (relative to 2.5.5)**
     - EvaluateResponse: added `source` (SourceEnum), the per-evaluate conjunction
       data source, distinct from covariance_source (SCRUM-411 AC6). Lights the
@@ -57,7 +66,7 @@ info:
     - No fields renamed or removed (SCRUM-281 constraint satisfied).
   contact:
     name: xOrbita APS Team
-  version: 2.5.6
+  version: 2.5.7
 servers:
 - url: http://localhost:8060
   description: Local / Jetson dev
