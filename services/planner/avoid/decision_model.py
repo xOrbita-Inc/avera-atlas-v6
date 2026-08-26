@@ -36,8 +36,6 @@ import numpy as np
 from aps_math import conventions, frames
 from aps_math.pc_utils import compute_pc
 
-MU_EARTH = 398600.4418  # km^3/s^2
-
 
 # -----------------------------------------------------------------------------
 # Time helpers
@@ -158,43 +156,27 @@ def cw_phi_rv(a_km: float, dt_s: float) -> np.ndarray:
     Clohessy–Wiltshire Phi_rv block for a circular reference orbit.
     Maps impulsive Δv (km/s) at burn time to Δr (km) at time dt later.
 
-    SCRUM-386. This previously returned the Phi_rr (position-to-position)
-    block, which is dimensionless, so applying it to a Δv in km/s produced a
-    number in km/s that was then read as km. Phi_rv carries units of seconds,
-    which is what makes Δv * Φ a displacement.
+    SCRUM-386, SCRUM-378. Thin wrapper around aps_math.frames.cw_phi_full's
+    rv block. One closed-form implementation now, not two: see that
+    function's docstring for the full derivation, the other three blocks
+    (Phi_rr, Phi_vr, Phi_vv) the SCRUM-378 observability Gramian needs and
+    this function alone does not provide, and why the consolidation
+    happened here rather than duplicating Phi_rv a second time.
 
-    The error was large, not marginal. A 2 m/s along-track burn 4 hours before
-    TCA at a = 6928 km came out as 2 metres of separation change where the
-    correct block gives 86.8 km.
-
-    Closed form (Clohessy–Wiltshire, RTN ordering, n = orbital mean motion):
-
-        Φ_rv = [[  sin(nt)/n,        2(1 - cos(nt))/n,      0          ],
-                [ -2(1 - cos(nt))/n, (4 sin(nt) - 3nt)/n,   0          ],
-                [  0,                0,                     sin(nt)/n  ]]
-
-    For contrast, the block that used to be here is Φ_rr:
-
-        Φ_rr = [[ 4 - 3cos(nt),      0,  0        ],
-                [ 6(sin(nt) - nt),   1,  0        ],
-                [ 0,                 0,  cos(nt)  ]]
+    This previously implemented Phi_rv directly. SCRUM-386 fixed a defect
+    where it returned Phi_rr, the position-to-position block, instead,
+    which is dimensionless, so applying it to a Δv in km/s produced a
+    number in km/s that was then read as km. The error was large, not
+    marginal: a 2 m/s along-track burn 4 hours before TCA at a = 6928 km
+    came out as 2 metres of separation change where the correct block
+    gives 86.8 km. services/planner/tests/test_cw_phi_rv.py still guards
+    this block's behaviour directly against an independent closed form,
+    unchanged by this refactor apart from where it imports MU_EARTH from.
 
     Reference: Clohessy & Wiltshire (1960); Vallado, Fundamentals of
     Astrodynamics and Applications, §6.7.
     """
-    if a_km <= 0:
-        raise ValueError("a_ref_km must be > 0")
-    omega = math.sqrt(MU_EARTH / (a_km ** 3))
-    c = math.cos(omega * dt_s)
-    s = math.sin(omega * dt_s)
-    return np.array(
-        [
-            [s / omega, 2.0 * (1.0 - c) / omega, 0.0],
-            [-2.0 * (1.0 - c) / omega, (4.0 * s - 3.0 * omega * dt_s) / omega, 0.0],
-            [0.0, 0.0, s / omega],
-        ],
-        dtype=float,
-    )
+    return frames.cw_phi_full(a_km, dt_s)[0:3, 3:6]
 
 
 def mahalanobis_sq(r_km: np.ndarray, cov_km2: np.ndarray) -> float:
