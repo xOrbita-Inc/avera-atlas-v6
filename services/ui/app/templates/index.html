@@ -955,6 +955,21 @@ function selectConj(idx){
   globeFocusOnConj(conjs[idx]);
 }
 
+// SCRUM-414: surface a failed evaluate instead of leaving the Planning spinner up.
+function showEvaluateError(msg){
+  const text=String(msg||'Unknown error');
+  const details=document.getElementById('plannerDetails');
+  if(details){
+    details.innerHTML='<div class="empty-state" style="color:var(--red,#ff4444)">Evaluate failed<br><span id="evalErrMsg" style="font-size:9px;color:var(--text-dim)"></span></div>';
+    const m=document.getElementById('evalErrMsg'); if(m) m.textContent=text;
+  }
+  const cbody=document.getElementById('candidatesBody');
+  if(cbody) cbody.innerHTML='<tr><td colspan="4" class="empty-state" style="color:var(--red,#ff4444)">Evaluate failed, see planner output</td></tr>';
+  const status=document.getElementById('decisionStatus'); if(status) status.textContent='EVALUATE FAILED';
+  const badge=document.getElementById('decisionBadge'); if(badge) badge.textContent='ERROR';
+  console.error('Planner call failed:', text);
+}
+
 async function evaluateConjunction(conj,idx){
   panX=0;panY=0;zoomLevel=2.5;
   document.getElementById('plannerDetails').innerHTML='<div class="empty-state"><span class="spinner"></span>Evaluating conjunction...</div>';
@@ -983,9 +998,15 @@ async function evaluateConjunction(conj,idx){
     policy:getPolicy()
   };
   updatePayloadModalIfOpen();
+  let resp, result;
   try{
-    const resp=await fetch('/api/planner/evaluate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)});
-    const result=await resp.json();if(result.error)return;
+    resp=await fetch('/api/planner/evaluate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)});
+    try{result=await resp.json();}catch(_){result={};}
+  }catch(e){showEvaluateError('planner unreachable: '+e.message);return;}
+  if(!resp.ok||result.error){showEvaluateError(result.error||result.detail||('planner returned HTTP '+resp.status));return;}
+  // Evaluate succeeded. A rendering error past this point is a display bug, not an
+  // evaluate failure, so log it rather than falsely reporting EVALUATE FAILED.
+  try{
     currentPlannerResult=result;currentConj=conj;
     if(result.decision_log_id){lastEvaluatedDecisionLogId=result.decision_log_id;const _e=document.getElementById('lastDecisionLogId');if(_e)_e.textContent=result.decision_log_id;}
     if(currentView==='3d')updateConjunctionArc(conj);
@@ -999,7 +1020,7 @@ async function evaluateConjunction(conj,idx){
     drawEncounter(conj,result);
     if(result.atlas_artifact)renderAtlasArtifact(result.atlas_artifact);
     updatePublishedPc(assetNoradId, secondaryNoradId);
-  }catch(e){console.error('Planner call failed:',e)}
+  }catch(e){console.error('Rendering the evaluate result failed:',e);}
 }
 
 function updateDecisionCard(result,conj){
