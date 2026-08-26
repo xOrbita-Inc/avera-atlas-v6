@@ -826,7 +826,23 @@ async function loadSourceMode(){
     const dot=document.getElementById('cdmSourceDot');
     const label=document.getElementById('cdmSourceLabel');
 
-    // Check UDL status first (SCRUM-331 AC7)
+    // SCRUM-412: LeoLabs takes precedence over UDL as the live conjunction
+    // source. Check it first; if enabled and live, it drives the badge.
+    try{
+      const llResp=await fetch('/api/planner/leolabs-status');
+      if(llResp.ok){
+        const ll=await llResp.json();
+        if(ll.enabled && ll.mode!=='disabled'){
+          const live=ll.mode==='live';
+          const color=live?'var(--green)':(ll.mode==='invalid'||ll.mode==='misconfigured')?'var(--red,#ff4444)':'var(--amber)';
+          dot.style.background=color;dot.style.boxShadow='0 0 6px '+color;
+          label.style.color=color;label.textContent=ll.label;
+          return;
+        }
+      }
+    } catch(e){}
+
+    // Check UDL status next (SCRUM-331 AC7)
     try{
       const udlResp=await fetch('/api/planner/udl-status');
       if(udlResp.ok){

@@ -54,6 +54,9 @@ from common.logging_setup import build_logger, _POLICY_CONFIG_PATH, SERVICE_NAME
 from common.operator_policy import OperatorPolicy, CovarianceSurrogate
 from common.spacetrack_tle import fetch_catalog_objects
 from common.udl_client import UDL_ENABLED, get_conjunctions, get_credential_validity
+from common import leolabs_runtime
+from common.leolabs_runtime import LEOLABS_ENABLED, fetch_leolabs_conjunction
+from common.leolabs_evaluate import build_evaluate_request
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -700,6 +703,43 @@ async def udl_status() -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# LeoLabs status (SCRUM-412)
+# ---------------------------------------------------------------------------
+
+@svc.get("/leolabs-status")
+async def leolabs_status() -> Dict[str, Any]:
+    """LeoLabs credential and connection status for the dashboard badge.
+
+    Mirrors /udl-status. Unlike UDL, LeoLabs -- when enabled and authenticated --
+    genuinely drives planner conjunctions, so the enabled+valid mode is "live"
+    and the dashboard shows a green LIVE badge. A throttled credential probe backs
+    the credential_valid field; a probe failure degrades to "unconfirmed" rather
+    than breaking the endpoint.
+    """
+    try:
+        return leolabs_runtime.get_status()
+    except Exception as exc:
+        log.warning(
+            "leolabs status probe raised unexpectedly",
+            extra={"event": "leolabs_status_error", "exc": str(exc)},
+        )
+        return {
+            "enabled": LEOLABS_ENABLED,
+            "credentials_set": bool(
+                os.environ.get("LEOLABS_ACCESS_KEY")
+                and os.environ.get("LEOLABS_SECRET_KEY")
+            ),
+            "credential_valid": False,
+            "credential_check_status": "unreachable",
+            "last_credential_check_utc": None,
+            "mode": "unconfirmed",
+            "label": "LEOLABS UNCONFIRMED",
+            "note": f"status probe failed: {exc}",
+            "last_fetch_utc": None,
+        }
+
+
+# ---------------------------------------------------------------------------
 # Single conjunction (unchanged from 9.6 except logging converted to JSON)
 # ---------------------------------------------------------------------------
 
@@ -721,6 +761,64 @@ async def post_evaluate(request: Request):
             content=error_response("Invalid JSON body"),
         )
 
+    # --- LeoLabs live conjunction fetch (SCRUM-412) ----------------------
+    # When LEOLABS_ENABLED=true, LeoLabs is the authoritative conjunction source
+    # and takes precedence over UDL: LeoLabs replaces the UDL route, which could
+    # not supply covariance. We fetch the highest-risk LeoLabs CDM for the
+    # requested primary, resolve our object via the asset registry, parse it, and
+    # rebuild the request from the parsed CDM (real per-object covariance rotated
+    # to ECI, source=leolabs). Operator inputs (sat_id, v_remaining, burn time,
+    # policy) are carried from the incoming request.
+    leolabs_used = False
+    if LEOLABS_ENABLED:
+        ll_primary = (body.get("conjunction") or {}).get("primary_norad")
+        if not ll_primary:
+            return JSONResponse(
+                status_code=422,
+                content=error_response(
+                    "LEOLABS_ENABLED=true requires primary_norad in the conjunction block"
+                ),
+            )
+        try:
+            parsed_ll = fetch_leolabs_conjunction(int(ll_primary))
+        except Exception as exc:
+            log.warning(
+                "LeoLabs fetch failed",
+                extra={"event": "leolabs_fetch_failed", "primary_norad": ll_primary,
+                       "exc": str(exc)},
+            )
+            return JSONResponse(
+                status_code=503,
+                content=error_response(f"LeoLabs fetch failed: {exc}"),
+            )
+        if parsed_ll is None:
+            log.info(
+                "LeoLabs returned no scorable conjunctions",
+                extra={"event": "leolabs_no_conjunctions", "primary_norad": ll_primary},
+            )
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "conjunction_id": None,
+                    "recommendation": {"direction": "no_maneuver_needed"},
+                    "source": "leolabs",
+                    "note": "LeoLabs returned no scorable conjunctions in the window. No maneuver needed.",
+                },
+            )
+        sat_in = body.get("satellite", {}) or {}
+        pol_in = body.get("policy", {}) or {}
+        body = build_evaluate_request(
+            parsed_ll,
+            sat_id=str(sat_in.get("sat_id", ll_primary)),
+            v_remaining_m_s=float(sat_in.get("v_remaining_m_s", 0.0)),
+            t_burn_utc=sat_in.get("t_burn_utc"),
+            a_ref_km=sat_in.get("a_ref_km"),
+            policy=pol_in or None,
+            conjunction_id=body.get("conjunction_id"),
+        )
+        leolabs_used = True
+    # ----------------------------------------------------------------------
+
     # --- UDL live conjunction fetch (SCRUM-331 AC5) ----------------------
     # When UDL_ENABLED=true, UDL is the authoritative conjunction source.
     # The injected body's conjunction block is replaced with the highest-risk
@@ -728,7 +826,7 @@ async def post_evaluate(request: Request):
     # from the request body. If UDL returns no records, treat as no-maneuver
     # needed -- do not fall back to injected data (would mislabel the source).
     udl_record_id: str | None = None
-    if UDL_ENABLED:
+    if UDL_ENABLED and not leolabs_used:
         global _udl_last_fetch_utc
         primary_norad_udl = (body.get("conjunction") or {}).get("primary_norad")
         if not primary_norad_udl:
@@ -791,7 +889,14 @@ async def post_evaluate(request: Request):
     # above. Skip the ingest CDM fetch so it cannot overwrite the UDL source.
     _conj_block = body.get("conjunction", {}) or {}
     _is_leolabs = str(_conj_block.get("source", "")).lower() == "leolabs"
-    if UDL_ENABLED:
+    if leolabs_used:
+        # SCRUM-412: the LeoLabs fetch above rebuilt the request from a parsed
+        # CDM, so the real per-object covariance is already in the block. Keep it
+        # and take precedence over UDL when both flags are set.
+        covariance_source = _conj_block.get("covariance_source") or "real_cdm"
+        body["conjunction"]["covariance_source"] = covariance_source
+        cdm_record_id = None
+    elif UDL_ENABLED:
         covariance_source = "UDL"
         cdm_record_id = None
     elif _is_leolabs and _conj_block.get("p_rel_km2"):

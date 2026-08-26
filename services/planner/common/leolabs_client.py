@@ -377,6 +377,16 @@ class LeoLabsClient:
         """Fetch metadata for one object by its LeoLabs catalog number."""
         return self._request("GET", f"/catalog/objects/{catalog_number}")
 
+    def ping(self) -> bool:
+        """Cheap authenticated probe to confirm the credentials work.
+
+        Returns True on 2xx. Raises LeoLabsAuthError on 401/403 and
+        LeoLabsHTTPError otherwise. Used by the runtime status endpoint so it can
+        report credential validity without pulling a full object list.
+        """
+        self._request("GET", "/catalog/objects", params={"limit": 1})
+        return True
+
     def list_subscribed_objects(self) -> List[Dict[str, Any]]:
         """Return the objects visible to this account (the trial subscription).
 
