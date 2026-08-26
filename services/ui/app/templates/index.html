@@ -789,6 +789,26 @@ function renderCovSourceBadge(covSource) {
     '</div>';
 }
 
+// SCRUM-411 AC6 (lands the dormant SCRUM-348 AC3 LIVE branch): the data-source
+// badge reflects the source each evaluate actually used, not a static label.
+// leolabs/udl/spacetrack are live (green LIVE); surrogate is amber.
+const _SOURCE_BADGE={
+  leolabs:{live:true,label:'LEOLABS LIVE'},
+  udl:{live:true,label:'UDL LIVE'},
+  spacetrack:{live:true,label:'SPACE-TRACK LIVE'},
+  surrogate:{live:false,label:'SURROGATE COVARIANCE'},
+};
+function renderEvaluateSourceBadge(source){
+  const dot=document.getElementById('cdmSourceDot');
+  const label=document.getElementById('cdmSourceLabel');
+  if(!dot||!label||!source)return;
+  const cfg=_SOURCE_BADGE[String(source).toLowerCase()]
+    ||{live:false,label:String(source).toUpperCase()};
+  const color=cfg.live?'var(--green)':'var(--amber)';
+  dot.style.background=color;dot.style.boxShadow='0 0 6px '+color;
+  label.style.color=color;label.textContent=cfg.label;
+}
+
 let selectedScenario='critical',conjunctionData=null,selectedConjunction=null;
 let currentPlannerResult=null,currentConj=null;
 let encounterCtx=null,encounterW=0,encounterH=0,zoomLevel=2.5,panX=0,panY=0,isDragging=false,dragStartX=0,dragStartY=0;
@@ -954,6 +974,7 @@ async function evaluateConjunction(conj,idx){
     if(result.decision_log_id){lastEvaluatedDecisionLogId=result.decision_log_id;const _e=document.getElementById('lastDecisionLogId');if(_e)_e.textContent=result.decision_log_id;}
     if(currentView==='3d')updateConjunctionArc(conj);
     renderCovSourceBadge(result.covariance_source || null);
+    renderEvaluateSourceBadge(result.source || null);
     updateDecisionCard(result,conj);
     currentCandidates=result.metrics?.all_candidates||[];
     updateCandidatesTable(currentCandidates,result.recommendation?.direction,result.metrics?.fuel_cost_m_s||0);

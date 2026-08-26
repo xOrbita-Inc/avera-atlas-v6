@@ -209,6 +209,59 @@ def _fetch_cdm_covariance(
         return _surrogate_covariance(r_sat_km, v_sat_km_s)
 
 
+# ---------------------------------------------------------------------------
+# Per-evaluate source (SCRUM-411 AC6)
+# ---------------------------------------------------------------------------
+
+# Conjunction data sources that represent a genuine live feed, and so light the
+# green LIVE badge in the dashboard (SCRUM-348 AC3). "surrogate" is not live.
+_LIVE_SOURCES = frozenset({"leolabs", "udl", "spacetrack"})
+
+
+def _resolve_evaluate_source(
+    body: Dict[str, Any],
+    covariance_source: str,
+    udl_used: bool,
+) -> str:
+    """Resolve the per-evaluate conjunction data source (SCRUM-411 AC6).
+
+    This is the source of the conjunction that drove the decision, distinct from
+    covariance_source (the provenance of the covariance matrix). It is what the
+    dashboard badge reflects per evaluate rather than a static label.
+
+    Resolution order:
+      1. An explicit source on the conjunction block (or body). This is how a
+         LeoLabs-driven evaluate reports itself: the request assembled from a
+         parsed LeoLabs CDM carries source="leolabs" (design section 7).
+      2. UDL, when a UDL conjunction drove the evaluate.
+      3. Otherwise derived from covariance_source: a real CDM came from
+         Space-Track; a surrogate is not a live source.
+
+    Returns one of: "leolabs", "udl", "spacetrack", "surrogate".
+    """
+    conj = body.get("conjunction", {}) or {}
+    explicit = conj.get("source") or body.get("source")
+    if explicit:
+        val = str(explicit).strip().lower()
+        if "leolabs" in val:
+            return "leolabs"
+        if "udl" in val:
+            return "udl"
+        if "space" in val:  # space-track / spacetrack / space_track
+            return "spacetrack"
+        return val
+
+    if udl_used:
+        return "udl"
+
+    cs = (covariance_source or "").lower()
+    if cs in ("real_cdm", "real"):
+        return "spacetrack"
+    if cs == "udl":
+        return "udl"
+    return "surrogate"
+
+
 def _post_planner_output(
     cdm_record_id: int,
     result: Dict[str, Any],
@@ -698,6 +751,7 @@ async def post_evaluate(request: Request):
                         "conjunction_id": None,
                         "recommendation": {"direction": "no_maneuver_needed"},
                         "covariance_source": "UDL",
+                        "source": "udl",
                         "udl_record_id": None,
                         "note": "UDL returned no conjunction records above threshold. No maneuver needed.",
                     },
@@ -735,8 +789,19 @@ async def post_evaluate(request: Request):
     # --- Covariance adapter (ADR-008) -------------------------------------
     # When UDL_ENABLED=true, UDL already supplied the covariance in the block
     # above. Skip the ingest CDM fetch so it cannot overwrite the UDL source.
+    _conj_block = body.get("conjunction", {}) or {}
+    _is_leolabs = str(_conj_block.get("source", "")).lower() == "leolabs"
     if UDL_ENABLED:
         covariance_source = "UDL"
+        cdm_record_id = None
+    elif _is_leolabs and _conj_block.get("p_rel_km2"):
+        # SCRUM-411 AC7: a request assembled from a parsed LeoLabs CDM already
+        # carries the real per-object covariance rotated to ECI (km^2). Do NOT
+        # run the ingest covariance adapter, which would overwrite it with an
+        # unrelated Space-Track fetch or a surrogate. Trust the supplied matrix,
+        # same as the UDL path trusts its own. covariance_source stays real_cdm.
+        covariance_source = _conj_block.get("covariance_source") or "real_cdm"
+        body["conjunction"]["covariance_source"] = covariance_source
         cdm_record_id = None
     else:
         try:
@@ -795,6 +860,11 @@ async def post_evaluate(request: Request):
                 "all_candidates":      scoring.all_candidates,
             },
             "covariance_source": covariance_source,
+            # SCRUM-411 AC6: the conjunction data source that drove this evaluate,
+            # distinct from covariance_source. Lights the dashboard LIVE badge.
+            "source":            _resolve_evaluate_source(
+                body, covariance_source, bool(udl_record_id)
+            ),
             "udl_record_id":     udl_record_id,
             "evaluated_at":      scoring.evaluated_at,
         }

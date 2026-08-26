@@ -29,6 +29,14 @@ info:
     converts to km² (divides by 1e6) before returning. The planner receives and
     passes km² throughout. Do not apply further unit conversion.
 
+    **Changes in 2.5.6 (relative to 2.5.5)**
+    - EvaluateResponse: added `source` (SourceEnum), the per-evaluate conjunction
+      data source, distinct from covariance_source (SCRUM-411 AC6). Lights the
+      dashboard LIVE badge per evaluate. Present on every /v1/evaluate response.
+    - ConjunctionState: added optional `source`, set by the producer of the
+      record (a request assembled from a parsed LeoLabs CDM carries "leolabs").
+      Echoed to the response when present. Additive; no fields renamed or removed.
+
     **Changes in 2.5.3 (relative to 2.5.2)**
     - EvaluateResponse: added optional decision_log_id and decision_log fields
       (SCRUM-351). Additive; no fields renamed or removed. The full DecisionLog
@@ -49,7 +57,7 @@ info:
     - No fields renamed or removed (SCRUM-281 constraint satisfied).
   contact:
     name: xOrbita APS Team
-  version: 2.5.5
+  version: 2.5.6
 servers:
 - url: http://localhost:8060
   description: Local / Jetson dev
@@ -288,6 +296,15 @@ components:
           nullable: true
         covariance_source:
           $ref: "#/components/schemas/CovarianceSourceEnum"
+        source:
+          allOf:
+          - $ref: "#/components/schemas/SourceEnum"
+          description: |
+            Optional conjunction data source. Set by whatever produced this
+            record: a request assembled from a parsed LeoLabs CDM carries
+            "leolabs" (SCRUM-411). When present it is echoed to the response and
+            drives the dashboard source badge; when absent the planner derives it
+            from covariance_source.
       description: Relative geometry at Time of Closest Approach (TCA)
     OperatorPolicy:
       required:
@@ -367,6 +384,14 @@ components:
           $ref: "#/components/schemas/DecisionMetrics"
         covariance_source:
           $ref: "#/components/schemas/CovarianceSourceEnum"
+        source:
+          allOf:
+          - $ref: "#/components/schemas/SourceEnum"
+          description: |
+            SCRUM-411 AC6: the conjunction data source that drove this evaluate,
+            distinct from covariance_source. "leolabs", "udl" and "spacetrack"
+            are live sources that light the dashboard LIVE badge; "surrogate" is
+            not. Present on every /v1/evaluate response.
         evaluated_at:
           type: string
           description: Timestamp when the evaluation was computed
@@ -605,6 +630,24 @@ components:
       enum:
       - real_cdm
       - surrogate_identity
+    SourceEnum:
+      type: string
+      description: |
+        Conjunction data source that drove an evaluate (SCRUM-411 AC6). Distinct
+        from CovarianceSourceEnum, which is the provenance of the covariance
+        matrix. The live sources (leolabs, udl, spacetrack) light the dashboard
+        LIVE badge; surrogate does not.
+        - leolabs: a LeoLabs Pulse CDM drove the decision (real per-object RTN
+          covariance, rotated to ECI).
+        - udl: a Unified Data Library conjunction drove the decision.
+        - spacetrack: a real Space-Track CDM covariance was used.
+        - surrogate: no live conjunction source; a surrogate covariance was used.
+      example: leolabs
+      enum:
+      - leolabs
+      - udl
+      - spacetrack
+      - surrogate
     ATLASManeuverArtifact:
       type: object
       description: |
