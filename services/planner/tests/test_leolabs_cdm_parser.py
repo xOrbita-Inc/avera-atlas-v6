@@ -244,3 +244,32 @@ def test_provenance_records_source_and_ids(cdm):
     assert prov["primary_norad_id"] == 36508
     assert prov["ref_frame"] == "EME2000"
     assert prov["cdm_collision_probability"] == pytest.approx(cdm["COLLISION_PROBABILITY"])
+
+
+# --- SCRUM-417: response conjunction block ---------------------------------
+
+def test_to_response_conjunction_block(cdm):
+    parsed = parse_leolabs_cdm(cdm, _OUR_ID)
+    block = parsed.to_response_conjunction()
+    assert block["primary"] == {
+        "designator": "L2669", "norad_id": 36508, "object_name": "CRYOSAT 2"}
+    assert block["secondary"] == {
+        "designator": "L143957", "norad_id": 270302,
+        "object_name": "TBA - TO BE ASSIGNED"}
+    assert block["tca_utc"] == parsed.t_ca_utc
+    assert block["miss_distance_km"] == pytest.approx(20.115063)
+    assert block["relative_position_rtn_m"] == pytest.approx(
+        [-307.847, 19903.728, 2891.813])
+    assert block["relative_velocity_rtn_m_s"] == pytest.approx(
+        [-29.797, -311.922, 2143.705])
+
+
+def test_to_response_conjunction_rtn_none_when_missing(cdm):
+    bad = copy.deepcopy(cdm)
+    del bad["RELATIVE_POSITION_T"]
+    parsed = parse_leolabs_cdm(bad, _OUR_ID)
+    block = parsed.to_response_conjunction()
+    assert block["relative_position_rtn_m"] is None
+    # velocity still fully present, so it is returned
+    assert block["relative_velocity_rtn_m_s"] == pytest.approx(
+        [-29.797, -311.922, 2143.705])

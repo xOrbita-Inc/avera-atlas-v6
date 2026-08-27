@@ -29,6 +29,16 @@ info:
     converts to km² (divides by 1e6) before returning. The planner receives and
     passes km² throughout. Do not apply further unit conversion.
 
+    **Changes in 2.5.8 (relative to 2.5.7)**
+    - EvaluateResponse: added optional `conjunction` (Conjunction), the identity
+      (primary and secondary designator, NORAD, name) and RTN relative geometry of
+      the scored conjunction (SCRUM-417). Present on the live path only, where a
+      real CDM was parsed; absent on the surrogate path. Additive; no fields
+      renamed or removed. Lets the dashboard name the secondary object and draw the
+      true encounter geometry.
+    - Added Conjunction and ConjunctionObject schema components.
+    - info.version bumped from 2.5.7 to 2.5.8.
+
     **Changes in 2.5.7 (relative to 2.5.6)**
     - SCRUM-412: LeoLabs live runtime. Behind LEOLABS_ENABLED, /v1/evaluate fetches
       a live LeoLabs CDM for the requested primary, resolves our object via the
@@ -66,7 +76,7 @@ info:
     - No fields renamed or removed (SCRUM-281 constraint satisfied).
   contact:
     name: xOrbita APS Team
-  version: 2.5.7
+  version: 2.5.8
 servers:
 - url: http://localhost:8060
   description: Local / Jetson dev
@@ -377,6 +387,56 @@ components:
         end_utc:
           type: string
           format: date-time
+    ConjunctionObject:
+      type: object
+      description: One object in a scored conjunction (SCRUM-417).
+      properties:
+        designator:
+          type: string
+          example: L2669
+        norad_id:
+          type: integer
+          nullable: true
+          example: 36508
+        object_name:
+          type: string
+          nullable: true
+          example: CRYOSAT 2
+    Conjunction:
+      type: object
+      description: |
+        SCRUM-417: identity and relative geometry of the scored conjunction,
+        present only on the live path (source in leolabs/udl/spacetrack) where a
+        real CDM was parsed. Absent on the surrogate path.
+      properties:
+        primary:
+          $ref: "#/components/schemas/ConjunctionObject"
+        secondary:
+          $ref: "#/components/schemas/ConjunctionObject"
+        tca_utc:
+          type: string
+          format: date-time
+        miss_distance_km:
+          type: number
+          format: float
+          nullable: true
+        relative_position_rtn_m:
+          type: array
+          items:
+            type: number
+            format: float
+          minItems: 3
+          maxItems: 3
+          nullable: true
+          description: Secondary relative to primary at TCA, RTN (radial, in-track, cross-track), meters.
+        relative_velocity_rtn_m_s:
+          type: array
+          items:
+            type: number
+            format: float
+          minItems: 3
+          maxItems: 3
+          nullable: true
     EvaluateResponse:
       required:
       - conjunction_id
@@ -401,6 +461,14 @@ components:
             distinct from covariance_source. "leolabs", "udl" and "spacetrack"
             are live sources that light the dashboard LIVE badge; "surrogate" is
             not. Present on every /v1/evaluate response.
+        conjunction:
+          allOf:
+          - $ref: "#/components/schemas/Conjunction"
+          nullable: true
+          description: |
+            SCRUM-417: present on the live path only. Identity and relative
+            geometry of the scored conjunction, so the UI can name the secondary
+            object and draw the true encounter geometry. Absent on the surrogate path.
         evaluated_at:
           type: string
           description: Timestamp when the evaluation was computed
