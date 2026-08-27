@@ -39,7 +39,7 @@ trail and the golden cross-check.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
@@ -132,6 +132,10 @@ class ParsedLeoLabsCDM:
     miss_distance_m: Optional[float]
     provenance: Dict[str, Any] = field(default_factory=dict)
 
+    # SCRUM-417: RTN relative geometry straight from the CDM, for the encounter viz.
+    relative_position_rtn_m: Optional[List[float]] = None
+    relative_velocity_rtn_m_s: Optional[List[float]] = None
+
     # -- relative geometry, ECI ------------------------------------------
 
     def r_rel_km(self) -> np.ndarray:
@@ -170,6 +174,29 @@ class ParsedLeoLabsCDM:
             # Intentionally None: the CDM Pc is a cross-check, not our Pc. The
             # planner computes Pc from this real geometry.
             "pc_precomputed": None,
+        }
+
+    def to_response_conjunction(self) -> Dict[str, Any]:
+        """SCRUM-417: identity and RTN relative geometry for the evaluate response.
+
+        Additive block, populated on the live path only, so the UI can name the
+        secondary object and draw the true encounter geometry instead of the
+        asset-NORAD fallback.
+        """
+        def _obj(o: ParsedObject) -> Dict[str, Any]:
+            return {
+                "designator": o.designator,
+                "norad_id": o.norad_id,
+                "object_name": o.object_name,
+            }
+        miss_km = (self.miss_distance_m / 1000.0) if self.miss_distance_m is not None else None
+        return {
+            "primary": _obj(self.primary),
+            "secondary": _obj(self.secondary),
+            "tca_utc": self.t_ca_utc,
+            "miss_distance_km": miss_km,
+            "relative_position_rtn_m": self.relative_position_rtn_m,
+            "relative_velocity_rtn_m_s": self.relative_velocity_rtn_m_s,
         }
 
 
@@ -475,6 +502,12 @@ def parse_leolabs_cdm(
             "cdm_collision_probability_method": cdm.get("COLLISION_PROBABILITY_METHOD"),
         },
     )
+
+    # SCRUM-417: carry the CDM's RTN relative geometry for the encounter viz.
+    _rp = [_num(cdm, "RELATIVE_POSITION_R"), _num(cdm, "RELATIVE_POSITION_T"), _num(cdm, "RELATIVE_POSITION_N")]
+    _rv = [_num(cdm, "RELATIVE_VELOCITY_R"), _num(cdm, "RELATIVE_VELOCITY_T"), _num(cdm, "RELATIVE_VELOCITY_N")]
+    parsed.relative_position_rtn_m = _rp if all(x is not None for x in _rp) else None
+    parsed.relative_velocity_rtn_m_s = _rv if all(x is not None for x in _rv) else None
 
     if validate_miss_distance and miss_distance_m is not None:
         recomputed_m = float(np.linalg.norm(parsed.r_rel_km())) * 1000.0

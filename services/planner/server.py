@@ -1081,6 +1081,12 @@ async def post_evaluate(request: Request):
             _post_planner_output(cdm_record_id, result, body, covariance_source, scoring)
         # ------------------------------------------------------------------
 
+        # SCRUM-417: on the live LeoLabs path, attach the scored conjunction's
+        # identity and RTN relative geometry so the UI can name the secondary and
+        # draw the true encounter. Additive, live path only.
+        if leolabs_used:
+            result["conjunction"] = parsed_ll.to_response_conjunction()
+
         return JSONResponse(status_code=200, content=result)
 
     except ValueError as exc:

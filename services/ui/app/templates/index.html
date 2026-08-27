@@ -1029,19 +1029,36 @@ async function evaluateConjunction(conj,idx){
 // response yet (tracked as a backend follow-up), so the live label falls back to
 // the asset NORAD and the approach direction stays approximate; risk, miss, Pc
 // and TCA are the real scored values.
+// SCRUM-417: label a conjunction object by name and id, preferring a real name.
+function conjObjectLabel(o){
+  if(!o) return null;
+  const name = (o.object_name && !/^(TBA|UNKNOWN)/i.test(String(o.object_name).trim())) ? o.object_name : null;
+  if(name && o.norad_id != null) return name + ' (' + o.norad_id + ')';
+  if(name) return name;
+  if(o.designator && o.norad_id != null) return o.designator + ' / ' + o.norad_id;
+  return o.designator || (o.norad_id != null ? ('NORAD ' + o.norad_id) : 'UNKNOWN');
+}
+
 function evalDisplayCtx(result, conj){
   const live = !!(result && result.source && String(result.source).toLowerCase() !== 'surrogate');
   const rs = (result && result.atlas_artifact && result.atlas_artifact.risk_summary) || {};
   if(live){
     const risk = rs.maneuver_required ? 'RED' : (rs.monitor_only ? 'AMBER' : 'GREEN');
-    const label = assetNoradId ? ('NORAD ' + assetNoradId) : (conj.object_id || 'LIVE');
-    const missM = (rs.miss_distance_km != null) ? rs.miss_distance_km * 1000 : (conj.miss_distance_m || 0);
+    // SCRUM-417: name the secondary and use the CDM's RTN geometry when the
+    // response carries the conjunction block; fall back to the 416 behavior.
+    const cj = result.conjunction || null;
+    let label = assetNoradId ? ('NORAD ' + assetNoradId) : (conj.object_id || 'LIVE');
+    if(cj && cj.secondary){ label = conjObjectLabel(cj.secondary) || label; }
+    const missM = (cj && cj.miss_distance_km != null) ? cj.miss_distance_km * 1000
+                : (rs.miss_distance_km != null) ? rs.miss_distance_km * 1000 : (conj.miss_distance_m || 0);
     const pc = (result.metrics && result.metrics.risk_surrogate_post != null) ? result.metrics.risk_surrogate_post : (conj.pc || 0);
     let tcaMin = conj.time_to_tca_min;
-    if(rs.tca_utc){ const dm = (new Date(rs.tca_utc).getTime() - Date.now())/60000; if(isFinite(dm)) tcaMin = dm; }
-    return {live:true, risk, label, missM, pc, tcaMin};
+    const tca = (cj && cj.tca_utc) || rs.tca_utc;
+    if(tca){ const dm = (new Date(tca).getTime() - Date.now())/60000; if(isFinite(dm)) tcaMin = dm; }
+    const rtn = (cj && cj.relative_position_rtn_m) || null;
+    return {live:true, risk, label, missM, pc, tcaMin, rtn};
   }
-  return {live:false, risk:conj.risk_level, label:conj.object_id, missM:(conj.miss_distance_m||0), pc:(conj.pc||0), tcaMin:conj.time_to_tca_min};
+  return {live:false, risk:conj.risk_level, label:conj.object_id, missM:(conj.miss_distance_m||0), pc:(conj.pc||0), tcaMin:conj.time_to_tca_min, rtn:null};
 }
 
 function covLabelLine(result){
@@ -1359,7 +1376,10 @@ function drawEncounter(conj,result){
 
   // Relative position vector from conjunction data
   let relX=miss_m,relY=0;
-  if(conj.r_obj_km&&conj.r_asset_km){
+  if(dctx.rtn){
+    relX=dctx.rtn[0]; // radial
+    relY=dctx.rtn[1]; // in-track
+  } else if(conj.r_obj_km&&conj.r_asset_km){
     relX=(conj.r_obj_km[0]-conj.r_asset_km[0])*1000;
     relY=(conj.r_obj_km[1]-conj.r_asset_km[1])*1000;
   }
@@ -1597,7 +1617,7 @@ function drawEncounter(conj,result){
   ctx.fillStyle='#4ff8e8';ctx.font='bold 11px "JetBrains Mono"';ctx.textAlign='center';
   ctx.fillText('XORB-001',cx,cy+30);
   ctx.fillStyle=rc;ctx.font='bold 10px "JetBrains Mono"';
-  ctx.fillText(conj.object_id,debX,debY-debR-8);
+  ctx.fillText(dctx.label,debX,debY-debR-8);  // SCRUM-417: name the scored secondary
 
   // ---- INFO OVERLAY (top-right) ----
   const ix=W-16,iy=16;
