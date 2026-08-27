@@ -37,7 +37,7 @@ import math
 import numpy as np
 import pytest
 
-from aps_math import conventions
+from aps_math import conventions, frames
 
 from avoid.decision_model import cw_phi_rv
 from common.maneuver_scorer import (
@@ -60,9 +60,18 @@ MU_EARTH = 398600.4418
 _A_KM = 6378.137 + 550.0
 _V_CIRC = math.sqrt(MU_EARTH / _A_KM)
 
-# Axis-aligned on purpose. R_hat is +x, T_hat is +y, N_hat is +z, so the RTN
-# ordering the CW blocks are written in coincides with ECI here. That keeps this
-# file measuring Pc rather than measuring a frame conversion.
+# Axis-aligned at the burn epoch. R_hat is +x, T_hat is +y, N_hat is +z, so
+# the RTN ordering the CW blocks are written in coincides with ECI at t=0.
+#
+# SCRUM-409: that alignment does NOT extend to TCA. R(burn)=I says nothing
+# about R(TCA); a real angle sweeps in the elapsed time regardless of the
+# burn's starting orientation, so a burn's ECI displacement still needs the
+# two-epoch rotation (burn-epoch input, TCA-epoch output) to match what
+# maneuver_scorer.py actually produces. Tests below that compare against
+# the real scorer's output account for this explicitly; tests that only
+# check a self-consistent property (never touching the scorer's actual
+# r_post) do not need to, since the missing rotation is consistent on
+# both sides of their own comparison.
 R_SAT = np.array([_A_KM, 0.0, 0.0])
 V_SAT = np.array([0.0, _V_CIRC, 0.0])
 V_REL_HEAD_ON = np.array([0.0, -2.0 * _V_CIRC, 0.0])
@@ -184,6 +193,13 @@ class TestPcPostIsAnchored:
         is scoped to the Pc computation given a post-burn geometry, not to
         whether the post-burn geometry is right. The CW propagation has its own
         defect, recorded on SCRUM-387, and pinning it here would freeze it.
+
+        SCRUM-409: r_post here must use the same two-epoch rotation the
+        production scorer applies (burn-epoch rotation for the input,
+        TCA-epoch rotation for the output). Axis-alignment at the burn
+        epoch (R(burn)=I here) does not carry through to TCA, so the raw
+        RTN block cannot be applied to the ECI delta-v directly and still
+        match what the scorer actually computed.
         """
         result = _score()
         winner = next(
@@ -191,7 +207,10 @@ class TestPcPostIsAnchored:
         )
 
         dt_s = DT_SHORT_S
-        phi_rv = cw_phi_rv(_A_KM, dt_s)
+        rot_burn = frames.rtn_to_eci_rotation(R_SAT, V_SAT)
+        rot_tca = frames.advance_rtn_to_eci_rotation(rot_burn, _A_KM, dt_s)
+        phi_rv_rtn = cw_phi_rv(_A_KM, dt_s)
+        phi_rv = frames.rotate_cw_block_two_epoch(phi_rv_rtn, rot_tca, rot_burn)
         r_post = R_REL - phi_rv @ np.asarray(winner.dv_eci_km_s, dtype=float)
 
         hbr_m, _ = resolve_hard_body_radius(_cap())
@@ -401,7 +420,20 @@ class TestHoldingRelativeVelocityFixed:
 
     def test_holding_v_rel_fixed_is_below_the_stated_bound(self):
         """Computes Pc both ways at the policy delta-v ceiling and asserts the
-        answers agree to well inside anything a decision turns on."""
+        answers agree to well inside anything a decision turns on.
+
+        SCRUM-409: r_post uses the same two-epoch rotation the production
+        scorer applies, needed so held_fixed's comparison against
+        result.pc_post is actually comparing the same geometry. v_rel_post
+        (via _cw_phi_vv below) is deliberately left as the raw RTN block
+        with no rotation: it is not compared against production output
+        directly, only against held_fixed, which is computed from the same
+        r_post either way, so the comparison stays self-consistent. The
+        transport-theorem correction a general velocity-frame conversion
+        would need is explicitly out of scope for SCRUM-409 (see that
+        ticket's Fix section) and belongs with the full STM's velocity
+        blocks if that work happens later.
+        """
         result = _score()
         winner = next(
             c for c in result.candidates_v25 if c.direction == result.direction
@@ -409,7 +441,12 @@ class TestHoldingRelativeVelocityFixed:
         dv = np.asarray(winner.dv_eci_km_s, dtype=float)
         dt_s = DT_SHORT_S
 
-        r_post = R_REL - cw_phi_rv(_A_KM, dt_s) @ dv
+        rot_burn = frames.rtn_to_eci_rotation(R_SAT, V_SAT)
+        rot_tca = frames.advance_rtn_to_eci_rotation(rot_burn, _A_KM, dt_s)
+        phi_rv_rtn = cw_phi_rv(_A_KM, dt_s)
+        phi_rv = frames.rotate_cw_block_two_epoch(phi_rv_rtn, rot_tca, rot_burn)
+
+        r_post = R_REL - phi_rv @ dv
         v_rel_post = V_REL_HEAD_ON - _cw_phi_vv(_A_KM, dt_s) @ dv
 
         hbr_m, _ = resolve_hard_body_radius(_cap())
@@ -429,8 +466,17 @@ class TestHoldingRelativeVelocityFixed:
         # the error could move a decision. Pc thresholds sit at 1e-4 and 1e-5,
         # an order of magnitude apart, and every Pc in this system spans decades.
         # A relative error of 0.1 percent cannot carry an event across either
-        # threshold from any starting point. Measured here it is about 1.4e-05,
-        # so there are two orders of margin against the bound being asserted.
+        # threshold from any starting point.
+        #
+        # SCRUM-409: r_post's geometry changed (two-epoch rotation instead of
+        # none), so the previously-measured ~1.4e-5 value above this comment
+        # is stale and not re-asserted here. The 1e-3 bound itself is argued
+        # from Pc's decade-spanning range, not fitted to that number, so it
+        # does not depend on it -- but the actual measured value after this
+        # change was not confirmed locally (no way to run this suite against
+        # the full planner dependency graph in this sandbox). If this
+        # assertion fails, that is worth a close look before loosening the
+        # tolerance further, since a large jump would itself be informative.
         assert held_fixed == pytest.approx(propagated, rel=1.0e-3), (
             "the encounter-plane rotation neglected by compute_pc_post has "
             "grown large enough to move a threshold decision; if the delta-v "
