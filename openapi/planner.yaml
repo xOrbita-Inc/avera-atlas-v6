@@ -601,6 +601,23 @@ components:
           type: number
           description: Dimensionless lifetime cost = dv / V_remaining
           example: 0.04
+        pc_pre:
+          type: number
+          nullable: true
+          description: |
+            SCRUM-396. Resolved collision probability before maneuver. This is
+            the value actually used by the scorer, whether supplied by ingest
+            or computed by the planner. Null only when no Pc could be established.
+        pc_source:
+          type: string
+          enum: [supplied, computed, unavailable]
+          description: Provenance of pc_pre.
+        hbr_m:
+          type: number
+          description: Hard-body radius used by the Pc calculation, in metres.
+        risk_gate:
+          type: string
+          description: Risk gate used by the scorer for the decision.
         risk_surrogate_post:
           type: number
           description: |
@@ -783,7 +800,7 @@ components:
         pc_pre:
           type: number
           nullable: true
-          description: Collision probability before maneuver. Null if not supplied.
+          description: Collision probability before maneuver. Null only when no Pc could be established.
         miss_distance_km:
           type: number
           nullable: true
@@ -800,6 +817,10 @@ components:
           type: boolean
         monitor_only:
           type: boolean
+        pc_source:
+          type: string
+          enum: [supplied, computed, unavailable]
+          description: Provenance of the resolved pc_pre value.
     ManeuverRecommendation2_5:
       type: object
       description: "A2: What should be done? (v2.5 extended fields)"

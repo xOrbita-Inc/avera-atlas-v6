@@ -84,7 +84,7 @@ class RiskSummary:
     Attributes
     ----------
     pc_pre : float or None
-        Probability of collision before maneuver. None if not supplied.
+        Probability of collision before maneuver. None if no Pc could be established.
     miss_distance_km : float or None
         Miss distance at TCA [km]. None if not supplied.
     mahalanobis_pre : float
@@ -98,6 +98,8 @@ class RiskSummary:
         True if Pc >= pc_maneuver_threshold OR miss_distance < floor.
     monitor_only : bool
         True if Pc is between monitor and maneuver thresholds.
+    pc_source : str
+        Provenance of pc_pre: supplied, computed, or unavailable.
     """
     pc_pre: Optional[float]
     miss_distance_km: Optional[float]
@@ -106,6 +108,7 @@ class RiskSummary:
     covariance_quality: str
     maneuver_required: bool
     monitor_only: bool
+    pc_source: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -807,6 +810,10 @@ class DecisionLog:
         ISO-8601 UTC timestamp when the log entry was created.
     artifact_summary : str
         operator_summary() string for quick log review.
+    pc_at_transition : float or None
+        Resolved Pc used for the decision. None only when no Pc could be established.
+    pc_source : str
+        Provenance of pc_at_transition: supplied, computed, or unavailable.
     """
     log_id: str
     conjunction_id: str
@@ -826,6 +833,8 @@ class DecisionLog:
     slot_recovery_required: bool
     logged_at: str
     artifact_summary: str
+    pc_at_transition: Optional[float] = None
+    pc_source: str = ""
 
     def to_json(self) -> str:
         """Serialise to JSON string for storage / retrieval."""
@@ -884,6 +893,8 @@ class DecisionLog:
             slot_recovery_required=artifact.mission_impact.slot_recovery_required,
             logged_at=now,
             artifact_summary=artifact.operator_summary(),
+            pc_at_transition=artifact.risk_summary.pc_pre,
+            pc_source=artifact.risk_summary.pc_source,
         )
 
 
@@ -919,7 +930,7 @@ def build_atlas_artifact(
     tca_utc : str
         Time of closest approach (ISO-8601 UTC).
     pc_precomputed : float or None
-        Pre-computed Pc. None if not available.
+        Pc supplied by ingest, if any. The resolved decision Pc is scoring.pc_pre.
     miss_distance_km : float or None
         Miss distance [km]. None if not available.
     known_objects : list[dict] or None
@@ -934,22 +945,28 @@ def build_atlas_artifact(
     ATLASManeuverArtifact
     """
     # --- A1: RiskSummary ---
+    # SCRUM-396: scoring.pc_pre is the resolved Pc used by the scorer. It may
+    # have been supplied by ingest or computed by SCRUM-389. Downstream
+    # artifacts must use that resolved value rather than the supplied-only input.
+    resolved_pc = scoring.pc_pre
+
     maneuver_required = False
     monitor_only = False
-    if pc_precomputed is not None:
+    if resolved_pc is not None:
         maneuver_required = policy.is_maneuver_required(
-            pc_precomputed, miss_distance_km or 999.0
+            resolved_pc, miss_distance_km or 999.0
         )
-        monitor_only = policy.is_monitor_only(pc_precomputed)
+        monitor_only = policy.is_monitor_only(resolved_pc)
 
     risk_summary = RiskSummary(
-        pc_pre=pc_precomputed,
+        pc_pre=resolved_pc,
         miss_distance_km=miss_distance_km,
         mahalanobis_pre=math.sqrt(max(0.0, scoring.m2_pre)),
         tca_utc=tca_utc,
         covariance_quality=scoring.covariance_quality,
         maneuver_required=maneuver_required,
         monitor_only=monitor_only,
+        pc_source=scoring.pc_source,
     )
 
     # --- Secondary conflict check ---
@@ -1011,7 +1028,7 @@ def build_atlas_artifact(
 
     # --- A3: DecisionRationale ---
     constraints_applied = []
-    if pc_precomputed is not None:
+    if resolved_pc is not None:
         if maneuver_required:
             constraints_applied.append("pc_threshold_exceeded")
         else:
@@ -1071,7 +1088,7 @@ def build_atlas_artifact(
         no_go = NoGoReasoning(
             reason_code=scoring.no_go_reason_code,
             human_readable=scoring.no_go_human_readable,
-            pc_at_decision=pc_precomputed,
+            pc_at_decision=resolved_pc,
             mahalanobis_at_decision=math.sqrt(max(0.0, scoring.m2_pre)),
         )
 

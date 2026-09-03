@@ -499,9 +499,13 @@ class TestBuildAtlasArtifactE2E:
         assert artifact.sat_id == "SAT-SOLO"
 
     def test_pc_populates_risk_summary(self, high_risk_scoring, cap_solo, policy):
+        # SCRUM-396: the artifact consumes the scorer-resolved Pc, not the
+        # original supplied-only input argument.
+        high_risk_scoring.pc_pre = 5e-4
+        high_risk_scoring.pc_source = "computed"
         artifact = build_atlas_artifact(
             high_risk_scoring, cap_solo, policy, T_CA,
-            pc_precomputed=5e-4,
+            pc_precomputed=None,
         )
         assert artifact.risk_summary.pc_pre == pytest.approx(5e-4)
 
