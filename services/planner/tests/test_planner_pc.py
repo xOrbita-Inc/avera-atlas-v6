@@ -41,7 +41,10 @@ from common.maneuver_scorer import (
     resolve_pc,
     score_maneuver_candidates,
 )
+from common.atlas_artifact import DecisionLog, build_atlas_artifact
+from common.evidence_record import GENESIS_HASH, FieldState, build_decision_record
 from common.operator_policy import OperatorPolicy
+from server import _evidence_values
 from common.satellite_capability import (
     LifetimeProfile,
     PropulsionProfile,
@@ -454,3 +457,142 @@ class TestNoGoResultsCarryTheResolvedPc:
         assert result.no_go_reason_code == "trivial_event"
         assert result.pc_pre is None
         assert result.risk_surrogate_post == pytest.approx(1.0 / result.m2_pre)
+
+
+# ---------------------------------------------------------------------------
+# SCRUM-396: resolved Pc survives the layers above the scorer
+# ---------------------------------------------------------------------------
+
+class TestResolvedPcPropagation:
+    def test_computed_pc_survives_artifact_decision_log_and_evidence(self):
+        policy = _policy()
+        r_rel = np.array([0.0, 0.0, 1.2])
+        scoring = score_maneuver_candidates(
+            "CID-396", R_SAT, V_SAT, r_rel, P_SURROGATE,
+            T_BURN, T_CA, _cap(), policy, v_rel_km_s=V_REL_HEAD_ON,
+        )
+
+        assert scoring.pc_source == PC_SOURCE_COMPUTED
+        assert scoring.pc_pre is not None
+
+        artifact = build_atlas_artifact(
+            scoring, _cap(), policy, T_CA,
+            pc_precomputed=None,
+            miss_distance_km=1.2,
+        )
+
+        # A1 must report the same resolved Pc the scorer actually used.
+        assert artifact.risk_summary.pc_pre == pytest.approx(scoring.pc_pre, rel=1e-12)
+        assert artifact.risk_summary.pc_source == PC_SOURCE_COMPUTED
+        assert artifact.risk_summary.maneuver_required == policy.is_maneuver_required(
+            scoring.pc_pre, 1.2
+        )
+        assert artifact.risk_summary.monitor_only == policy.is_monitor_only(scoring.pc_pre)
+
+        # A5 must not lose the Pc simply because ingest did not supply it.
+        assert artifact.no_go is not None
+        assert artifact.no_go.pc_at_decision == pytest.approx(scoring.pc_pre, rel=1e-12)
+
+        decision_log = DecisionLog.from_artifact(
+            artifact, policy.operator_id, policy.policy_version
+        )
+        assert decision_log.pc_at_transition == pytest.approx(scoring.pc_pre, rel=1e-12)
+        assert decision_log.pc_source == PC_SOURCE_COMPUTED
+
+        values, not_applicable = _evidence_values(
+            artifact,
+            decision_log,
+            {"operator_id": policy.operator_id, "policy_version": policy.policy_version},
+        )
+        assert values["pc_at_transition"] == pytest.approx(scoring.pc_pre, rel=1e-12)
+        assert "pc_at_transition" not in not_applicable
+        assert values["inputs_and_provenance"]["pc_source"] == PC_SOURCE_COMPUTED
+        assert values["inputs_and_provenance"]["pc_at_decision"] == pytest.approx(
+            scoring.pc_pre, rel=1e-12
+        )
+
+        # AC4: assert against the actual SCRUM-377 EvidenceRecord, not only
+        # the intermediate values passed to its builder.
+        record = build_decision_record(
+            "SAT-396", 0, GENESIS_HASH, values,
+            not_applicable=not_applicable,
+        )
+        assert record.fields["pc_at_transition"]["value"] == pytest.approx(
+            scoring.pc_pre, rel=1e-12
+        )
+        provenance = record.fields["inputs_and_provenance"]["value"]
+        assert provenance["pc_source"] == PC_SOURCE_COMPUTED
+        assert provenance["pc_at_decision"] == pytest.approx(
+            scoring.pc_pre, rel=1e-12
+        )
+
+    def test_computed_maneuver_pc_cannot_contradict_the_artifact(self):
+        # AC2: this geometry produces a planner-computed Pc comfortably above
+        # the maneuver threshold and a real burn recommendation.
+        policy = _policy()
+        r_rel = np.array([0.0, 0.0, 0.5])
+        scoring = score_maneuver_candidates(
+            "CID-396-GO", R_SAT, V_SAT, r_rel, P_SURROGATE,
+            T_BURN, T_CA, _cap(), policy, v_rel_km_s=V_REL_HEAD_ON,
+        )
+
+        assert scoring.pc_source == PC_SOURCE_COMPUTED
+        assert scoring.pc_pre is not None
+        assert scoring.pc_pre > policy.pc_maneuver_threshold
+        assert scoring.is_maneuver_recommended()
+
+        artifact = build_atlas_artifact(
+            scoring, _cap(), policy, T_CA,
+            pc_precomputed=None,
+            miss_distance_km=0.5,
+        )
+
+        assert artifact.is_maneuver_recommended()
+        assert artifact.risk_summary.pc_pre == pytest.approx(
+            scoring.pc_pre, rel=1e-12
+        )
+        assert artifact.risk_summary.pc_source == PC_SOURCE_COMPUTED
+        assert artifact.risk_summary.maneuver_required is True
+        assert artifact.risk_summary.monitor_only is False
+        assert "pc_threshold_exceeded" in artifact.rationale.policy_constraints_applied
+
+    def test_only_a_genuinely_unavailable_pc_is_not_applicable(self):
+        policy = _policy()
+        scoring = score_maneuver_candidates(
+            "CID-396-NOPC", R_SAT, V_SAT, np.array([0.0, 0.0, 3.0]),
+            P_SURROGATE, T_BURN, T_CA, _cap(), policy,
+        )
+
+        assert scoring.pc_source == PC_SOURCE_UNAVAILABLE
+        assert scoring.pc_pre is None
+
+        artifact = build_atlas_artifact(
+            scoring, _cap(), policy, T_CA,
+            pc_precomputed=None,
+            miss_distance_km=3.0,
+        )
+        decision_log = DecisionLog.from_artifact(
+            artifact, policy.operator_id, policy.policy_version
+        )
+
+        values, not_applicable = _evidence_values(
+            artifact,
+            decision_log,
+            {"operator_id": policy.operator_id, "policy_version": policy.policy_version},
+        )
+
+        assert decision_log.pc_at_transition is None
+        assert decision_log.pc_source == PC_SOURCE_UNAVAILABLE
+        assert "pc_at_transition" in not_applicable
+        assert "pc_at_transition" not in values
+        assert values["inputs_and_provenance"]["pc_source"] == PC_SOURCE_UNAVAILABLE
+        assert values["inputs_and_provenance"]["pc_at_decision"] is None
+
+        record = build_decision_record(
+            "SAT-396-NOPC", 0, GENESIS_HASH, values,
+            not_applicable=not_applicable,
+        )
+        assert record.fields["pc_at_transition"]["state"] == FieldState.NOT_APPLICABLE
+        provenance = record.fields["inputs_and_provenance"]["value"]
+        assert provenance["pc_source"] == PC_SOURCE_UNAVAILABLE
+        assert provenance["pc_at_decision"] is None

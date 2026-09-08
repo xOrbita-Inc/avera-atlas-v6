@@ -1,4 +1,5 @@
 """SCRUM-351: /v1/evaluate emits a DecisionLog id and posts the full record."""
+from copy import deepcopy
 from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
 import server
@@ -32,3 +33,29 @@ def test_evaluate_posts_full_decision_log_to_ingest():
          patch.object(server.http_requests, "post", return_value=MagicMock(status_code=201)) as mp:
         TestClient(server.svc).post("/v1/evaluate", json=_BODY)
     assert any("/decision_log" in str(call) for call in mp.call_args_list)
+
+
+def test_evaluate_exposes_resolved_computed_pc_and_provenance():
+    body = deepcopy(_BODY)
+    body["conjunction"]["v_rel_km_s"] = [0.0, -15.32, 0.0]
+
+    with patch.object(server, "UDL_ENABLED", False), \
+         patch.object(server.http_requests, "post", return_value=MagicMock(status_code=201)):
+        r = TestClient(server.svc).post("/v1/evaluate", json=body)
+
+    assert r.status_code == 200
+    j = r.json()
+    metrics = j["metrics"]
+
+    assert metrics["pc_pre"] is not None
+    assert metrics["pc_source"] == "computed"
+    assert metrics["hbr_m"] > 0.0
+    assert metrics["risk_gate"] == "pc"
+
+    risk = j["atlas_artifact"]["risk_summary"]
+    assert risk["pc_pre"] == metrics["pc_pre"]
+    assert risk["pc_source"] == "computed"
+
+    decision_log = j["decision_log"]
+    assert decision_log["pc_at_transition"] == metrics["pc_pre"]
+    assert decision_log["pc_source"] == "computed"

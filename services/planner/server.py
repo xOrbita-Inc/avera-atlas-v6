@@ -362,8 +362,8 @@ def _evidence_values(
 
     The split matters. producer_not_implemented means the component that would
     fill this field has not shipped. not_applicable means the producer exists
-    and this particular event simply had nothing to put there, e.g. a request
-    that supplied no Pc. Collapsing the two would make pending_producers()
+    and this particular event simply had nothing to put there, e.g. an event
+    for which no Pc could be established. Collapsing the two would make pending_producers()
     report "main" as an outstanding ticket, which is meaningless, and would
     hide which fields are genuinely still owed by 378 to 382.
     """
@@ -381,6 +381,11 @@ def _evidence_values(
             "tca_utc": risk.tca_utc,
             "decision": decision_log.decision,
             "reason_code": decision_log.reason_code,
+            # SCRUM-396: Pc provenance belongs with the existing evidence
+            # provenance package. pc_at_transition remains the canonical
+            # SCRUM-377 top-level transition field.
+            "pc_source": decision_log.pc_source,
+            "pc_at_decision": decision_log.pc_at_transition,
         },
         "covariance_state": {
             "covariance_quality": risk.covariance_quality,
@@ -393,10 +398,10 @@ def _evidence_values(
         "candidate_maneuvers": _candidate_evidence(artifact),
     }
     not_applicable: List[str] = []
-    if risk.pc_pre is not None:
-        values["pc_at_transition"] = risk.pc_pre
+    if decision_log.pc_at_transition is not None:
+        values["pc_at_transition"] = decision_log.pc_at_transition
     else:
-        # The producer exists; this request carried no Pc.
+        # The producer exists, but no Pc could be established for this event.
         not_applicable.append("pc_at_transition")
 
     return values, not_applicable
@@ -955,6 +960,12 @@ async def post_evaluate(request: Request):
                 "m2_post":             scoring.m2_post,
                 "fuel_cost_m_s":       scoring.fuel_cost_m_s,
                 "lifetime_penalty":    scoring.lifetime_penalty,
+                # SCRUM-396: expose the resolved pre-maneuver Pc and the
+                # provenance/risk-gate values that travel with it.
+                "pc_pre":              scoring.pc_pre,
+                "pc_source":           scoring.pc_source,
+                "hbr_m":               scoring.hbr_m,
+                "risk_gate":           scoring.risk_gate,
                 "risk_surrogate_post": scoring.risk_surrogate_post,
                 # SCRUM-393: risk_surrogate_post has carried three different
                 # quantities over its life and its name says none of them, so
