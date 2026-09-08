@@ -9,7 +9,7 @@ fails a test instead of redefining the spec.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 import pytest
 
