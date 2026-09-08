@@ -50,6 +50,7 @@ from common.evidence_record import (
 )
 from common.atlas_artifact import build_atlas_artifact, DecisionLog
 from common.monitor_adapter import evaluate_request as evaluate_decision_state_machine
+from common.mode_persistence import build_mode_store
 from common.satellite_capability import SatelliteCapability
 from common.logging_setup import build_logger, _POLICY_CONFIG_PATH, SERVICE_NAME, SERVICE_VERSION
 from common.operator_policy import OperatorPolicy, CovarianceSurrogate
@@ -330,6 +331,13 @@ def _post_planner_output(
     except Exception as exc:
         log.warning("audit write failed", extra={"event": "audit_write_failed", "cdm_record_id": cdm_record_id, "exc": str(exc)})
 
+
+# SCRUM-379, section 6.2. Durable onboard storage has no analogue in a
+# stateless planner, so persistence is opt-in: with MODE_STATE_DIR set this is a
+# FileModeStore, otherwise a NullModeStore that persists nothing. A store that
+# silently retained modes between unrelated requests would be worse than none,
+# because a mode left over from another event would read as this one's.
+_MODE_STORE = build_mode_store()
 
 # SCRUM-377: audit writes must not fail silently. A missing evidence record is
 # as damaging as a modified one, and the old fire-and-forget path swallowed
@@ -1201,6 +1209,8 @@ async def post_evaluate(request: Request):
                     policy=policy,
                     cap=cap,
                     covariance_source=covariance_source,
+                    store=_MODE_STORE,
+                    software_version=SERVICE_VERSION,
                 )
                 result["decision_state_machine"] = monitor.to_dict()
                 if monitor.authorized_execution is not None:

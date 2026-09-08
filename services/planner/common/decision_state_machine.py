@@ -359,6 +359,9 @@ class GuardInputs:
     validity_evidence: Mapping[str, Any] = field(default_factory=dict)
     # Section 6.3: an unavailable validity assessor is NOT_EARNED, not unknown.
     validity_service_available: bool = True
+    # Section 6.3, the ingest row: with ingest down, M1 may continue on the last
+    # CDM only while data_age_s is within the freshness bound.
+    ingest_available: bool = True
     # Section 4.2: the SCRUM-381 horizon gate, both halves. A check that was
     # never performed is NOT CLEAR.
     secondary_check_performed: bool = False

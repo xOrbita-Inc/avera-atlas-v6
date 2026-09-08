@@ -20,7 +20,7 @@ pair section 3 does not define lands in M4 rather than wherever it was headed.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -28,7 +28,9 @@ from common.decision_state_machine import (
     APPROVAL_BASIS_L1_OPERATOR,
     APPROVAL_BASIS_L2_VETO_EXPIRED,
     AUTONOMOUS_AUTHORITY_LEVELS,
+    COMMS_GAP_THRESHOLD_S,
     CONSECUTIVE_BELOW_MONITOR_TO_CLEAR,
+    DATA_FRESHNESS_BOUND_S,
     REAL_CDM_COVARIANCE_SOURCE,
     AuthorizedExecution,
     FlightMode,
@@ -36,6 +38,7 @@ from common.decision_state_machine import (
     GuardResult,
     TransitionDecision,
     ValidityRouting,
+    as_mode,
     first_failure,
     hold,
     resolve_transition,
@@ -423,6 +426,39 @@ def guard_tca_above_floor(inputs: GuardInputs) -> GuardResult:
     return GuardResult(name, True, f"TCA is {hours:.2f} h away", values)
 
 
+def guard_last_cdm_still_fresh(inputs: GuardInputs) -> GuardResult:
+    """Section 6.3, the ingest row: 'Ingest service unavailable (no fresh CDM) |
+    M1 | Continue monitoring with last CDM if data_age_s is within freshness
+    bound. If stale, go to M4.'
+
+    Only meaningful while ingest is down. With ingest up, a data_age_s beyond
+    the bound is the envelope guard's business (section 4.1), which blocks
+    staging rather than forcing a safehold.
+    """
+    name = "last_cdm_still_fresh"
+    values = {
+        "ingest_available": inputs.ingest_available,
+        "data_age_s": inputs.data_age_s,
+        "data_freshness_bound_s": inputs.data_freshness_bound_s,
+    }
+    if inputs.ingest_available:
+        return GuardResult(name, True, "ingest is available", values)
+    if inputs.data_age_s is None:
+        return GuardResult(
+            name, False, "ingest is unavailable and the CDM's age is unknown", values
+        )
+    if inputs.data_age_s > inputs.data_freshness_bound_s:
+        return GuardResult(
+            name, False,
+            f"ingest is unavailable and the last CDM is {inputs.data_age_s:.0f} s "
+            f"old, beyond the {inputs.data_freshness_bound_s:.0f} s bound",
+            values,
+        )
+    return GuardResult(
+        name, True, "ingest is unavailable but the last CDM is still fresh", values
+    )
+
+
 def guard_subsystem_healthy(inputs: GuardInputs) -> GuardResult:
     """Section 6.3: any partial subsystem failure goes to M4.
 
@@ -625,6 +661,12 @@ def _m1_escalation_guards(inputs: GuardInputs) -> Tuple[GuardResult, ...]:
     if not tca_guard.passed:
         results.append(tca_guard)
 
+    # Section 6.3, the ingest row. Not in the section 3 table, but the same
+    # destination for the same reason: a stale CDM cannot certify anything.
+    freshness = guard_last_cdm_still_fresh(inputs)
+    if not freshness.passed:
+        results.append(freshness)
+
     return tuple(results)
 
 
@@ -666,6 +708,95 @@ def _m2_escalation_guards(inputs: GuardInputs) -> Tuple[GuardResult, ...]:
 
 
 # ---------------------------------------------------------------------------
+# Section 6.1: comms gaps
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CommsGapStatus:
+    """What a comms gap means for the mode the spacecraft is already in.
+
+    Section 6.1 changes no mode by itself. What it does is say which behaviours
+    remain available during a gap, and the one that matters is the M2 L2 row:
+    'Continue veto countdown with onboard clock. Auto-execute at
+    veto_window_close_utc if no veto received. This is the intended L2
+    behaviour; autonomy was pre-granted for exactly this case.'
+
+    So this is a report, not a decision. The monitor's guards already produce
+    the right modes during a gap -- an L1 cannot execute because no approval can
+    arrive, an L2 can because it needs nothing from the ground -- and this makes
+    that explicit and auditable instead of merely emergent.
+    """
+
+    in_gap: bool
+    gap_s: float
+    mode: FlightMode
+    behaviour: str
+    may_auto_execute: bool
+    data_stale: bool
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "in_comms_gap": self.in_gap,
+            "comms_gap_s": self.gap_s,
+            "comms_gap_threshold_s": COMMS_GAP_THRESHOLD_S,
+            "behaviour": self.behaviour,
+            "may_auto_execute": self.may_auto_execute,
+            "data_stale": self.data_stale,
+        }
+
+
+_GAP_BEHAVIOUR = {
+    FlightMode.M0_NOMINAL: "continue monitoring; no action required",
+    FlightMode.M1_WATCH: "continue monitoring with the last known CDM",
+    FlightMode.M3_EXECUTING: "continue burn execution; report on restore",
+    FlightMode.M4_SAFE_HOLD: "hold safehold; the operator clears via ARBITER",
+}
+
+
+def comms_gap_status(
+    mode: Any,
+    *,
+    comms_gap_s: float,
+    authority_level: str = "",
+    data_age_s: Optional[float] = None,
+    data_freshness_bound_s: float = DATA_FRESHNESS_BOUND_S,
+) -> CommsGapStatus:
+    """Section 6.1's table, as a pure lookup."""
+    current = as_mode(mode)
+    in_gap = comms_gap_s > COMMS_GAP_THRESHOLD_S
+    stale = data_age_s is not None and data_age_s > data_freshness_bound_s
+
+    if current is FlightMode.M2_STAGED:
+        if authority_level == "L2":
+            behaviour = (
+                "continue the veto countdown on the onboard clock; auto-execute "
+                "at veto_window_close_utc if no veto arrives"
+            )
+            may_auto_execute = True
+        else:
+            behaviour = (
+                "hold staged; an L1 burn cannot execute without operator approval"
+            )
+            may_auto_execute = False
+    else:
+        behaviour = _GAP_BEHAVIOUR[current]
+        may_auto_execute = False
+
+    if not in_gap:
+        behaviour = "no comms gap"
+
+    return CommsGapStatus(
+        in_gap=in_gap,
+        gap_s=float(comms_gap_s),
+        mode=current,
+        behaviour=behaviour,
+        may_auto_execute=may_auto_execute and in_gap,
+        data_stale=stale,
+    )
+
+
+# ---------------------------------------------------------------------------
 # The monitor
 # ---------------------------------------------------------------------------
 
@@ -688,6 +819,10 @@ class MonitorDecision:
     conjunction_id: str = ""
     evaluated_at_utc: str = ""
     inputs: Optional[GuardInputs] = None
+    comms_gap: Optional["CommsGapStatus"] = None  # section 6.1
+    # Set only when this evaluation started from a persisted mode, i.e. the
+    # section 6.2 reboot path. None on a normal evaluation.
+    reboot_recovery: Optional[Any] = None
 
     @property
     def escalated(self) -> bool:
@@ -716,6 +851,10 @@ class MonitorDecision:
                 self.authorized_execution.to_dict()
                 if self.authorized_execution
                 else None
+            ),
+            "comms_gap": self.comms_gap.to_dict() if self.comms_gap else None,
+            "reboot_recovery": (
+                self.reboot_recovery.to_dict() if self.reboot_recovery else None
             ),
         }
 
@@ -931,9 +1070,27 @@ def evaluate_safety_monitor(inputs: GuardInputs) -> MonitorDecision:
     failure = guard_subsystem_healthy(inputs)
     if not failure.passed:
         if mode is FlightMode.M4_SAFE_HOLD:
-            return _decide(
+            decision = _decide(
                 inputs, None, "holding M4: awaiting operator clearance", (failure,)
             )
-        return _decide(inputs, FlightMode.M4_SAFE_HOLD, failure.detail, (failure,))
+        else:
+            decision = _decide(
+                inputs, FlightMode.M4_SAFE_HOLD, failure.detail, (failure,)
+            )
+    else:
+        decision = _MODE_EVALUATORS[mode](inputs)
 
-    return _MODE_EVALUATORS[mode](inputs)
+    # Section 6.1 changes no mode on its own; it reports which behaviours are
+    # available during a gap. Attached to the decision so the audit record shows
+    # that an L2 auto-execute during a gap was the pre-granted behaviour and not
+    # a monitor that lost track of the ground.
+    return replace(
+        decision,
+        comms_gap=comms_gap_status(
+            mode,
+            comms_gap_s=inputs.comms_gap_s,
+            authority_level=inputs.authority(),
+            data_age_s=inputs.data_age_s,
+            data_freshness_bound_s=inputs.data_freshness_bound_s,
+        ),
+    )

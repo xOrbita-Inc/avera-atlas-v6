@@ -14,6 +14,7 @@ maneuver: it has not shown that it may.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -30,6 +31,12 @@ from common.decision_state_machine import (
     GuardInputs,
     ManeuverCommand,
     as_mode,
+)
+from common.mode_persistence import (
+    ModeStore,
+    PersistedMode,
+    RebootRecovery,
+    recover_after_reboot,
 )
 from common.safety_monitor import MonitorDecision, evaluate_safety_monitor
 from common.validity_seam import ArcObservation, assess_validity_at_tca
@@ -290,24 +297,44 @@ def build_guard_inputs(
     )
 
 
-def resolve_current_mode(body: Dict[str, Any]) -> FlightMode:
-    """The mode this evaluation starts from.
+def resolve_current_mode(
+    body: Dict[str, Any],
+    store: Optional[ModeStore] = None,
+    sat_id: str = "",
+    t_now_utc: Optional[datetime] = None,
+) -> tuple[FlightMode, Optional[RebootRecovery]]:
+    """The mode this evaluation starts from, and any reboot recovery behind it.
 
-    A request that says nothing starts at M0, which is the honest reading of a
-    stateless call: no conjunction is being tracked yet. A request that names a
-    mode nobody recognises starts at M4 -- section 6.2 says the same thing about
-    a reboot whose persisted state cannot be read, and for the same reason. Not
-    knowing which mode the spacecraft is in is exactly the ambiguity section 1
-    escalates.
+    Precedence, and the reason for it:
+
+    1. An explicit monitor.current_mode in the request. Ground stating where the
+       spacecraft actually is beats anything this service remembers, because
+       this service is not the spacecraft. A mode nobody recognises starts at
+       M4: section 6.2 says the same about a reboot whose persisted state cannot
+       be read, and for the same reason.
+    2. A persisted mode, run through the section 6.2 recovery ladder. Reading a
+       persisted mode is exactly the reboot case -- this process did not make
+       that transition, so it cannot assume the burn window survived.
+    3. M0. The honest reading of a stateless call with nothing persisted: no
+       conjunction is being tracked yet.
     """
     monitor = body.get(MONITOR_KEY) or {}
     raw = monitor.get("current_mode")
-    if raw is None:
-        return FlightMode.M0_NOMINAL
-    try:
-        return as_mode(raw)
-    except ValueError:
-        return FlightMode.M4_SAFE_HOLD
+    if raw is not None:
+        try:
+            return as_mode(raw), None
+        except ValueError:
+            return FlightMode.M4_SAFE_HOLD, None
+
+    if store is not None and sat_id:
+        persisted = store.read(sat_id)
+        if persisted is not None:
+            recovery = recover_after_reboot(
+                persisted, t_now_utc or datetime.now(timezone.utc)
+            )
+            return recovery.mode, recovery
+
+    return FlightMode.M0_NOMINAL, None
 
 
 def evaluate_request(
@@ -320,12 +347,26 @@ def evaluate_request(
     covariance_source: str,
     current_mode: Optional[FlightMode] = None,
     t_now_utc: Optional[datetime] = None,
+    store: Optional[ModeStore] = None,
+    software_version: str = "",
 ) -> MonitorDecision:
-    """Run the safety monitor for one /v1/evaluate call.
+    """Run the safety monitor for one /v1/evaluate call, and persist the result.
 
-    The clock read lives here rather than in the monitor, which stays a pure
-    function of its inputs.
+    The clock read and the store live here rather than in the monitor, which
+    stays a pure function of its inputs.
+
+    Section 6.2 asks for the mode to be persisted 'before any transition'. On a
+    stateless HTTP service the closest honest reading is: persist the mode the
+    monitor decided on, as part of the same call that decided it, before the
+    response goes out. There is no window in which the caller has been told M3
+    and the store still says M2.
     """
+    now = t_now_utc or datetime.now(timezone.utc)
+    sat_id = str(getattr(artifact, "sat_id", "") or "")
+    recovery = None
+    if current_mode is None:
+        current_mode, recovery = resolve_current_mode(body, store, sat_id, now)
+
     inputs = build_guard_inputs(
         body=body,
         scoring=scoring,
@@ -333,7 +374,22 @@ def evaluate_request(
         policy=policy,
         cap=cap,
         covariance_source=covariance_source,
-        current_mode=current_mode or resolve_current_mode(body),
-        t_now_utc=t_now_utc or datetime.now(timezone.utc),
+        current_mode=current_mode,
+        t_now_utc=now,
     )
-    return evaluate_safety_monitor(inputs)
+    decision = evaluate_safety_monitor(inputs)
+    decision = replace(decision, reboot_recovery=recovery)
+
+    if store is not None and sat_id:
+        store.write(
+            PersistedMode(
+                sat_id=sat_id,
+                mode=decision.mode,
+                conjunction_id=decision.conjunction_id,
+                persisted_at_utc=decision.evaluated_at_utc,
+                command=inputs.command,
+                latest_burn_utc=inputs.latest_burn_utc,
+                software_version=software_version,
+            )
+        )
+    return decision

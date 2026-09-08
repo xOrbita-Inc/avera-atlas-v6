@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 
 import server
 from common.decision_state_machine import FlightMode
+from common.mode_persistence import InMemoryModeStore, NullModeStore, PersistedMode
 
 # The scenario is anchored to the real clock the adapter reads, because the
 # section 4.3 slew inequality and the section 3 four-hour TCA floor are both
@@ -409,3 +410,78 @@ class TestTransitionRecords:
 
         assert response.status_code == 200
         assert "decision_state_machine" in response.json()
+
+
+class TestModePersistenceThroughTheEndpoint:
+    """Section 6.2, through /v1/evaluate rather than in isolation."""
+
+    def test_nothing_is_persisted_by_default(self):
+        """The service is stateless unless MODE_STATE_DIR is configured."""
+        assert isinstance(server._MODE_STORE, NullModeStore)
+
+    def test_the_decided_mode_is_persisted(self):
+        store = InMemoryModeStore()
+        with patch.object(server, "_MODE_STORE", store):
+            response, _ = _evaluate(_live_body())
+
+        persisted = store.read("SAT-379")
+        assert persisted is not None
+        assert persisted.mode.value == (
+            response.json()["decision_state_machine"]["to_mode"]
+        )
+        assert persisted.conjunction_id == "test-conj-379"
+
+    def test_a_persisted_mode_is_recovered_on_the_next_call(self):
+        store = InMemoryModeStore()
+        staged = _live_body()
+        with patch.object(server, "_MODE_STORE", store):
+            _evaluate(staged)  # stages, and persists M2
+
+            # The next call carries no monitor block at all, so the persisted
+            # mode is what it starts from -- via the section 6.2 ladder, since
+            # this process did not make that transition itself.
+            follow_up = _live_body()
+            del follow_up["monitor"]
+            response, _ = _evaluate(follow_up)
+
+        decision = response.json()["decision_state_machine"]
+        assert decision["reboot_recovery"]["pre_reboot_mode"] == "M2"
+        assert decision["from_mode"] in ("M2", "M4")
+
+    def test_an_explicit_mode_in_the_request_beats_the_persisted_one(self):
+        store = InMemoryModeStore()
+        store.write(
+            PersistedMode(sat_id="SAT-379", mode="M2", latest_burn_utc=_NOW + timedelta(hours=1))
+        )
+        body = _live_body()
+        body["monitor"] = {"current_mode": "M0"}
+        with patch.object(server, "_MODE_STORE", store):
+            response, _ = _evaluate(body)
+
+        decision = response.json()["decision_state_machine"]
+        assert decision["from_mode"] == "M0"
+        assert decision["reboot_recovery"] is None
+
+    def test_a_reboot_with_a_closed_burn_window_recovers_into_safehold(self):
+        store = InMemoryModeStore()
+        store.write(
+            PersistedMode(
+                sat_id="SAT-379", mode="M2", latest_burn_utc=_NOW - timedelta(minutes=1)
+            )
+        )
+        body = _live_body()
+        del body["monitor"]
+        with patch.object(server, "_MODE_STORE", store):
+            response, _ = _evaluate(body)
+
+        decision = response.json()["decision_state_machine"]
+        assert decision["from_mode"] == FlightMode.M4_SAFE_HOLD.value
+        assert decision["to_mode"] == FlightMode.M4_SAFE_HOLD.value
+        assert decision["reboot_recovery"]["burn_window_open"] is False
+
+    def test_every_decision_reports_the_comms_gap_status(self):
+        response, _ = _evaluate(_base_body())
+
+        gap = response.json()["decision_state_machine"]["comms_gap"]
+        assert gap["in_comms_gap"] is False
+        assert gap["comms_gap_threshold_s"] == 600.0
