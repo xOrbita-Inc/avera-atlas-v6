@@ -99,13 +99,28 @@ class FlightMode:
 
 # MAF v2.0 section 8. The transitions the state machine defines.
 # Anything not in this set is undefined and escalates to M4 with a reason.
+#
+# SCRUM-379: completed against the authoritative transition table in
+# docs/scrum-333/state_machine_guards.md section 3. Four rows the earlier
+# transcription omitted are restored here: M1 to M0 (Pc below the monitor line
+# for two consecutive evaluations), M2 to M0 (event resolved before the burn),
+# M2 to M2 (the L2 re-veto self-loop) and M3 to M1 (post-burn replan required).
+# Without them the state machine would have had to record a legitimate,
+# specified transition as an undefined escalation to M4 -- the safe direction,
+# but the wrong answer, and one that would have safeholded a spacecraft whose
+# conjunction had simply resolved. No threshold or guard value is changed by
+# this; only which (from, to) pairs section 3 defines.
 DEFINED_TRANSITIONS: frozenset = frozenset({
     (FlightMode.M0_NOMINAL, FlightMode.M1_WATCH),
+    (FlightMode.M1_WATCH, FlightMode.M0_NOMINAL),
     (FlightMode.M1_WATCH, FlightMode.M2_STAGED),
     (FlightMode.M1_WATCH, FlightMode.M4_SAFE_HOLD),
+    (FlightMode.M2_STAGED, FlightMode.M0_NOMINAL),
+    (FlightMode.M2_STAGED, FlightMode.M2_STAGED),
     (FlightMode.M2_STAGED, FlightMode.M3_EXECUTING),
     (FlightMode.M2_STAGED, FlightMode.M4_SAFE_HOLD),
     (FlightMode.M3_EXECUTING, FlightMode.M0_NOMINAL),
+    (FlightMode.M3_EXECUTING, FlightMode.M1_WATCH),
     (FlightMode.M3_EXECUTING, FlightMode.M4_SAFE_HOLD),
     (FlightMode.M4_SAFE_HOLD, FlightMode.M0_NOMINAL),
 })
