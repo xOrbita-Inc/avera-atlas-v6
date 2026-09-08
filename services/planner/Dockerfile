@@ -29,6 +29,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # the image and /ready can verify it loads without a volume mount.
 # SCRUM-388: build context is the repository root so libs/ is reachable.
 COPY libs/aps_math/ /app/aps_math/
+# SCRUM-379: the decision state machine's validity seam calls the SCRUM-378
+# assessor, so the planner image needs it. Only the two runtime modules and the
+# package marker, not the service's tests or conftest.
+COPY services/validity/__init__.py services/validity/wrapper.py services/validity/routing.py /app/validity/
 COPY services/planner/avoid/   /app/avoid/
 COPY services/planner/common/  /app/common/
 COPY services/planner/config/  /app/config/
