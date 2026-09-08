@@ -237,6 +237,58 @@ def resolve_transition(
     )
 
 
+def hold(mode: Any, trigger: str) -> TransitionDecision:
+    """Stay in the current mode because no transition guard fired.
+
+    Not a transition, so it does not go through resolve_transition and is not
+    an undefined-transition escalation. Section 1's escalate rule is about a
+    transition that was attempted and is not in the table; declining to move is
+    the state machine working normally, and is the common case in M0.
+    """
+    origin = as_mode(mode)
+    return TransitionDecision(
+        from_mode=origin,
+        to_mode=origin,
+        requested_mode=origin,
+        trigger=trigger,
+        escalated=False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# The maneuver under consideration
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ManeuverCommand:
+    """The scorer's recommended burn, as the state machine sees it.
+
+    Straight off ManeuverScoringResult -- direction, dv_eci_km_s,
+    dv_magnitude_m_s, t_burn_utc -- and nothing else. The state machine never
+    recomputes a maneuver; it only decides whether this one may be executed.
+
+    A no-go evaluation has no command at all, which is why several guards
+    (the dv cap, slew feasibility) fail closed when command is None: there is
+    no burn to authorise.
+    """
+
+    dv_eci_km_s: Tuple[float, float, float]
+    dv_magnitude_m_s: float
+    t_burn_utc: datetime
+    direction: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "dv_eci_km_s", tuple(float(c) for c in self.dv_eci_km_s))
+        if len(self.dv_eci_km_s) != 3:
+            raise ValueError("dv_eci_km_s must be a 3-vector")
+        if self.t_burn_utc.tzinfo is None:
+            raise ValueError("t_burn_utc must be timezone-aware")
+        object.__setattr__(
+            self, "t_burn_utc", self.t_burn_utc.astimezone(timezone.utc)
+        )
+
+
 # ---------------------------------------------------------------------------
 # Guard inputs
 # ---------------------------------------------------------------------------
@@ -288,8 +340,8 @@ class GuardInputs:
     # monitor line, counting this one.
     consecutive_below_monitor: int = 0
 
-    # -- timing, section 4.3 ------------------------------------------------
-    t_burn_utc: Optional[datetime] = None
+    # -- the burn under consideration, and timing, section 4.3 --------------
+    command: Optional[ManeuverCommand] = None
     latest_burn_utc: Optional[datetime] = None
     t_ca_utc: Optional[datetime] = None
     min_hours_before_tca: float = MIN_HOURS_BEFORE_TCA
@@ -321,7 +373,8 @@ class GuardInputs:
     # not-satisfied signal.
     envelope_error: str = ""
     envelope_expired: bool = False
-    dv_magnitude_m_s: Optional[float] = None
+    # The effective cap for the granted authority level, straight off the
+    # compiled envelope (effective_l1_dv_cap_m_s or effective_l2_dv_cap_m_s).
     dv_cap_m_s: Optional[float] = None
     v_remaining_m_s: Optional[float] = None
     v_reserved_m_s: Optional[float] = None
@@ -359,7 +412,6 @@ class GuardInputs:
             )
         for name in (
             "t_now_utc",
-            "t_burn_utc",
             "latest_burn_utc",
             "t_ca_utc",
             "veto_window_close_utc",
@@ -416,3 +468,60 @@ def first_failure(results: Sequence[GuardResult]) -> Optional[GuardResult]:
         if not result.passed:
             return result
     return None
+
+
+# ---------------------------------------------------------------------------
+# The authorized-to-execute payload (SCRUM-379 to SCRUM-382)
+# ---------------------------------------------------------------------------
+
+# What "approval_basis" may say. Section 3's two M2 to M3 rows, and nothing
+# else: a burn is either operator-approved or its L2 veto window expired.
+APPROVAL_BASIS_L1_OPERATOR = "l1_operator_approval"
+APPROVAL_BASIS_L2_VETO_EXPIRED = "l2_veto_window_expired"
+
+
+@dataclass(frozen=True)
+class AuthorizedExecution:
+    """The signal and payload 379 emits on reaching M3, for SCRUM-382.
+
+    Deliberately small and flat. It carries the burn itself (the scorer's dv,
+    unchanged -- 379 never modifies a maneuver), the mode and authority context
+    that made it lawful, and the two provenance facts an operator would ask
+    about first: which covariance the decision rested on, and what the validity
+    gate said. 382 assembles the GNC command from this; it should not need to
+    reach back into the planner for anything else, and it should not have to
+    infer why the burn was authorised.
+
+    Nothing optional and nothing derived: a field that is not known at
+    authorisation time does not belong here, because a consumer cannot tell a
+    missing value from a real one.
+    """
+
+    conjunction_id: str
+    dv_eci_km_s: Tuple[float, float, float]
+    dv_magnitude_m_s: float
+    t_burn_utc: str
+    mode: str
+    authority_level: str
+    envelope_version: str
+    approval_basis: str
+    validity_status: str
+    validity_epsilon: float
+    covariance_source: str
+    authorized_at_utc: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "conjunction_id": self.conjunction_id,
+            "dv_eci_km_s": list(self.dv_eci_km_s),
+            "dv_magnitude_m_s": self.dv_magnitude_m_s,
+            "t_burn_utc": self.t_burn_utc,
+            "mode": self.mode,
+            "authority_level": self.authority_level,
+            "envelope_version": self.envelope_version,
+            "approval_basis": self.approval_basis,
+            "validity_status": self.validity_status,
+            "validity_epsilon": self.validity_epsilon,
+            "covariance_source": self.covariance_source,
+            "authorized_at_utc": self.authorized_at_utc,
+        }
