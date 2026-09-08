@@ -46,9 +46,10 @@ from avoid.decision_model import (
 from common.maneuver_scorer import evaluate_conjunction_v25, _policy_from_dict
 from common.evidence_record import (
     EvidenceRecord, RecordType, canonical_json, build_decision_record,
-    GENESIS_HASH,
+    build_transition_record, GENESIS_HASH,
 )
 from common.atlas_artifact import build_atlas_artifact, DecisionLog
+from common.monitor_adapter import evaluate_request as evaluate_decision_state_machine
 from common.satellite_capability import SatelliteCapability
 from common.logging_setup import build_logger, _POLICY_CONFIG_PATH, SERVICE_NAME, SERVICE_VERSION
 from common.operator_policy import OperatorPolicy, CovarianceSurrogate
@@ -486,6 +487,106 @@ def _post_evidence_record(artifact, decision_log, policy: Dict[str, Any]) -> Opt
         return record_id
     except Exception as exc:
         _note_audit_failure("evidence", record_id, str(exc))
+        return None
+
+
+def _transition_evidence_values(artifact, monitor, policy: Dict[str, Any]) -> Dict[str, Any]:
+    """Map one state transition onto the MAF section 10 catalogue.
+
+    SCRUM-379 owns event, from_mode, to_mode and trigger; SCRUM-378's
+    validity_evidence_values supplies the four validity fields, already under
+    the catalogue's own names; SCRUM-375's compiled envelope supplies the
+    authority fields. monitor_results carries every guard the monitor evaluated,
+    with the values it read, so a reviewer can see why a guard failed without
+    re-running the evaluation.
+
+    Only fields whose producer actually ran are included. A guard that could not
+    be evaluated leaves its field producer_not_implemented rather than present
+    and null, which is the distinction EvidenceRecord.build exists to keep.
+    """
+    inputs = monitor.inputs
+    values: Dict[str, Any] = {
+        "timestamp": monitor.evaluated_at_utc,
+        "monitor_results": [g.to_dict() for g in monitor.guards],
+        "policy_version": str(policy.get("policy_version", "")),
+        "model_version": SERVICE_VERSION,
+        "inputs_and_provenance": {
+            "sat_id": artifact.sat_id,
+            "operator_id": str(policy.get("operator_id", "")),
+            "evaluated_at": artifact.evaluated_at,
+            "pc_source": inputs.pc_source,
+            "covariance_source": inputs.covariance_source,
+            "requested_mode": monitor.transition.requested_mode.value,
+            "escalated": monitor.transition.escalated,
+        },
+    }
+    for name in ("validity_status", "validity_epsilon", "epsilon_threshold",
+                 "phenomenologies_used", "weak_directions"):
+        if name in inputs.validity_evidence:
+            values[name] = inputs.validity_evidence[name]
+    if inputs.authority_level:
+        values["authority_level"] = inputs.authority()
+    if inputs.envelope_version:
+        values["envelope_version"] = inputs.envelope_version
+    if inputs.envelope_approving_identity:
+        values["envelope_approving_identity"] = inputs.envelope_approving_identity
+    return values
+
+
+def _post_transition_record(artifact, monitor, policy: Dict[str, Any]) -> Optional[str]:
+    """Append one transition record to this satellite's evidence chain.
+
+    Section 7 of the guard doc: 'Every transition produces a tamper-evident
+    append-only log entry.' A hold is not a transition and is not recorded --
+    an M0 evaluation on a quiet sky would otherwise append a record per poll and
+    bury the transitions that matter. An escalation always is, including one
+    that lands in the mode it was already in.
+    """
+    if not monitor.changed_mode and not monitor.escalated:
+        return None
+
+    chain_id = artifact.sat_id or "UNKNOWN"
+    record_id = "?"
+    try:
+        head = http_requests.get(
+            f"{_ingest_url()}/store/evidence/{chain_id}/head", timeout=5.0
+        ).json()
+        record = build_transition_record(
+            chain_id=chain_id,
+            seq=int(head.get("next_seq", 0)),
+            prev_hash=head.get("content_hash", GENESIS_HASH),
+            from_mode=monitor.transition.from_mode.value,
+            to_mode=monitor.transition.to_mode.value,
+            trigger=monitor.transition.trigger,
+            conjunction_id=monitor.conjunction_id,
+            software_version=SERVICE_VERSION,
+            pc_at_transition=monitor.inputs.pc,
+            extra_values=_transition_evidence_values(artifact, monitor, policy),
+            recorded_at=monitor.evaluated_at_utc,
+        )
+        record_id = record.record_id
+        resp = http_requests.post(
+            f"{_ingest_url()}/evidence_record",
+            json={
+                "record": record.to_dict(),
+                "canonical_payload": canonical_json(record._hashable_payload()),
+            },
+            timeout=5.0,
+        )
+        if resp.status_code != 201:
+            _note_audit_failure(
+                "transition", record_id, f"status {resp.status_code}: {resp.text[:200]}"
+            )
+            return None
+        log.info(
+            "transition record appended",
+            extra={"event": "transition_record_appended", "record_id": record_id,
+                   "from_mode": monitor.transition.from_mode.value,
+                   "to_mode": monitor.transition.to_mode.value},
+        )
+        return record_id
+    except Exception as exc:
+        _note_audit_failure("transition", record_id, str(exc))
         return None
 
 
@@ -1066,9 +1167,12 @@ async def post_evaluate(request: Request):
                 v_post_km_s=v_post_km_s,
             )
             result["atlas_artifact"] = artifact.to_dict()
+            # Read once: both the decision-log block and the SCRUM-379 block
+            # below need it, and the second must not depend on the first having
+            # got that far.
+            _pol = body.get("policy", {})
             # --- DecisionLog (SCRUM-351): full audit record, retrievable by log_id ---
             try:
-                _pol = body.get("policy", {})
                 decision_log = DecisionLog.from_artifact(
                     artifact,
                     operator_id=str(_pol.get("operator_id", "")),
@@ -1082,6 +1186,45 @@ async def post_evaluate(request: Request):
                     result["evidence_record_id"] = _ev_id
             except Exception as exc:
                 log.warning("decision log build failed", extra={"event": "decision_log_build_failed", "exc": str(exc)})
+
+            # --- SCRUM-379: MAF section 8 decision state machine ------------
+            # Additive, exactly like the artifact and decision-log blocks above:
+            # a monitor failure is logged and the core evaluate still returns.
+            # Fail-closed lives inside the monitor, not here -- a request that
+            # supplies no IOD verdict and no observation arc gets a decision
+            # that declines to stage, not a missing decision.
+            try:
+                monitor = evaluate_decision_state_machine(
+                    body=body,
+                    scoring=scoring,
+                    artifact=artifact,
+                    policy=policy,
+                    cap=cap,
+                    covariance_source=covariance_source,
+                )
+                result["decision_state_machine"] = monitor.to_dict()
+                if monitor.authorized_execution is not None:
+                    # The signal SCRUM-382 consumes to assemble the GNC command.
+                    result["authorized_execution"] = monitor.authorized_execution.to_dict()
+                _post_transition_record(artifact, monitor, _pol)
+                log.info(
+                    "decision state machine evaluated",
+                    extra={
+                        "event": "decision_state_machine_evaluated",
+                        "conjunction_id": scoring.conjunction_id,
+                        "from_mode": monitor.transition.from_mode.value,
+                        "to_mode": monitor.mode.value,
+                        "trigger": monitor.transition.trigger,
+                        "escalated": monitor.escalated,
+                    },
+                )
+            except Exception as exc:
+                log.warning(
+                    "decision state machine evaluation failed",
+                    extra={"event": "decision_state_machine_failed", "exc": str(exc)},
+                )
+            # ----------------------------------------------------------------
+
             log.info("atlas artifact built", extra={"event": "artifact_built", "conjunction_id": scoring.conjunction_id, "summary": artifact.operator_summary()})
         except Exception as exc:
             log.warning("atlas artifact build failed", extra={"event": "artifact_build_failed", "conjunction_id": body.get("conjunction_id", "?"), "exc": str(exc)})

@@ -672,7 +672,14 @@ def _m2_escalation_guards(inputs: GuardInputs) -> Tuple[GuardResult, ...]:
 
 @dataclass(frozen=True)
 class MonitorDecision:
-    """The mode the spacecraft should be in, and the record of how it got there."""
+    """The mode the spacecraft should be in, and the record of how it got there.
+
+    inputs is the bundle the decision was made from, carried so an audit record
+    can be assembled from the decision alone. It is deliberately left out of
+    to_dict(): the guard results already carry the values each guard actually
+    read, and dumping the whole bundle would put unread inputs into the record
+    as though they had been part of the decision.
+    """
 
     mode: FlightMode
     transition: TransitionDecision
@@ -680,6 +687,7 @@ class MonitorDecision:
     authorized_execution: Optional[AuthorizedExecution] = None
     conjunction_id: str = ""
     evaluated_at_utc: str = ""
+    inputs: Optional[GuardInputs] = None
 
     @property
     def escalated(self) -> bool:
@@ -730,6 +738,7 @@ def _decide(
         authorized_execution=authorized_execution,
         conjunction_id=inputs.conjunction_id,
         evaluated_at_utc=_iso(inputs.t_now_utc),
+        inputs=inputs,
     )
 
 
