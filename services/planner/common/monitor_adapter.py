@@ -252,8 +252,8 @@ def build_guard_inputs(
         conjunction_id=scoring.conjunction_id,
         current_mode=current_mode,
         t_now_utc=t_now_utc,
-        # SCRUM-396: read the resolved Pc off the scoring result, not
-        # RiskSummary.pc_pre.
+        # The resolved Pc off the scoring result, which is where SCRUM-389 and
+        # SCRUM-396 resolve it, rather than off the artifact's summary of it.
         pc=getattr(scoring, "pc_pre", None),
         pc_source=str(getattr(scoring, "pc_source", "")),
         pc_monitor_threshold=policy.pc_monitor_threshold,

@@ -330,8 +330,11 @@ class GuardInputs:
 
     # -- risk, section 3 ----------------------------------------------------
     # pc is the resolved value from ManeuverScoringResult.pc_pre, with its
-    # pc_source travelling alongside it. Deliberately not RiskSummary.pc_pre,
-    # which only became reliable after SCRUM-396.
+    # pc_source travelling alongside it. Read from the scorer rather than from
+    # RiskSummary.pc_pre because the scorer is where the number is resolved and
+    # the artifact is a view of it. Since SCRUM-396 the two agree and either
+    # would work; taking the origin means a future change to how the artifact
+    # summarises risk cannot silently move the guard.
     pc: Optional[float] = None
     pc_source: str = ""
     pc_monitor_threshold: Optional[float] = None
