@@ -267,9 +267,23 @@ class TestUndefinedTransitionEscalates:
             assert not is_defined_transition(FlightMode.M4_SAFE_HOLD, target)
 
     def test_every_defined_transition_is_from_the_maf_section_8_table(self):
+        # Transcribed row by row from the transition table in
+        # docs/scrum-333/state_machine_guards.md section 3. The two M2 to M3
+        # rows (L1 approval, L2 veto expiry) are one pair here; they differ by
+        # guard, not by destination.
         assert DEFINED_TRANSITIONS == frozenset({
-            ("M0", "M1"), ("M1", "M2"), ("M1", "M4"), ("M2", "M3"),
-            ("M2", "M4"), ("M3", "M0"), ("M3", "M4"), ("M4", "M0"),
+            ("M0", "M1"),                                # Pc >= pc_monitor_threshold
+            ("M1", "M0"),                                # Pc below monitor, 2 evaluations
+            ("M1", "M2"),                                # the full AND of section 3
+            ("M1", "M4"),                                # IOD/validity/secondary/TCA
+            ("M2", "M0"),                                # event resolved before the burn
+            ("M2", "M2"),                                # L2 re-veto, fresh CDM still EARNED
+            ("M2", "M3"),                                # L1 approval, or L2 veto expiry
+            ("M2", "M4"),                                # slew, validity, envelope, watchdog
+            ("M3", "M0"),                                # NOMINAL and m2_post > m2_safe
+            ("M3", "M1"),                                # NOMINAL but replan required
+            ("M3", "M4"),                                # ABORTED or PARTIAL, Pc elevated
+            ("M4", "M0"),                                # ground clearance via ARBITER
         })
 
     def test_unknown_flight_mode_is_rejected(self):
