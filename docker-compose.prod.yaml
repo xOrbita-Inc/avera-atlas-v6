@@ -77,6 +77,10 @@ services:
     ports: ["8060:8060"]
     environment:
       - INGEST_SERVICE_URL=http://ingest:8000
+      - LEOLABS_ENABLED=${LEOLABS_ENABLED}
+      - LEOLABS_ACCESS_KEY=${LEOLABS_ACCESS_KEY}
+      - LEOLABS_SECRET_KEY=${LEOLABS_SECRET_KEY}
+      - LEOLABS_ASSET_NORADS=${LEOLABS_ASSET_NORADS}
     depends_on: [propagator]
     restart: unless-stopped
 
