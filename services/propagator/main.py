@@ -517,6 +517,10 @@ def propagate_and_screen():
         decision_urgencies=np.array(results['decision_urgencies']),
         propulsion_options=np.array(results['propulsion_options']),
         delta_v_estimates=np.array(results['delta_v_estimates']),
+        # SCRUM-383: preserve synthetic/live source provenance so ARBITER
+        # can add constructed MAF integration inputs only for the
+        # controlled demo scenario, never for live conjunctions.
+        source_metadata=data.get("metadata", ""),
         screening_params=json.dumps({
             'hbr_m': HBR_M, 'screening_threshold_km': SCREENING_THRESHOLD_KM,
             'pc_red_threshold': PC_RED_THRESHOLD, 'pc_amber_threshold': PC_AMBER_THRESHOLD,

@@ -480,6 +480,14 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
         <div class="item"><div class="k">Time to TCA</div><div class="v" id="dTCA">--</div></div>
         <div class="item"><div class="k">Burn Direction</div><div class="v" id="dDir">--</div></div>
         <div class="item"><div class="k">||dv||</div><div class="v" id="dDv">--</div></div>
+
+        <!-- SCRUM-383: explicit MAF authority-loop state. -->
+        <div class="item"><div class="k">MAF Mode</div><div class="v" id="dMafMode">--</div></div>
+        <div class="item"><div class="k">Pc</div><div class="v" id="dMafPc">--</div></div>
+        <div class="item"><div class="k">Validity</div><div class="v" id="dMafValidity">--</div></div>
+        <div class="item"><div class="k">Envelope</div><div class="v" id="dMafEnvelope">--</div></div>
+        <div class="item"><div class="k">Veto Countdown</div><div class="v" id="dMafVeto">--</div></div>
+        <div class="item"><div class="k">Decision</div><div class="v" id="dMafDecision">--</div></div>
       </div>
     </div>
     <div class="planner-section">
@@ -1248,6 +1256,53 @@ function showEvaluateError(msg){
   console.error('Planner call failed:', text);
 }
 
+// SCRUM-383 constructed authority-loop inputs for the controlled ARBITER
+// simulation only. These values are integration fixtures, not measured sensor
+// data and are never attached to live LeoLabs / Space-Track / UDL events.
+function mafDemoInputs(conj){
+  if(conj?.source!=='demo_scenario') return {};
+
+  const now=new Date();
+
+  // Match the observable range-and-angles construction used by the real
+  // SCRUM-379 /v1/evaluate integration tests.
+  const observations=[];
+  for(let i=0;i<8;i++){
+    observations.push({
+      epoch_utc:new Date(now.getTime()-5*(8-i)*60*1000).toISOString(),
+      r_observer_km:[6378.0,100.0*i,50.0*i],
+      ra_sigma_rad:1e-4,
+      dec_sigma_rad:1e-4,
+      range_sigma_km:0.001
+    });
+  }
+
+  return {
+    iod:{
+      proceeds_to_validity:true,
+      confidence_verdict:'CONFIDENT'
+    },
+    authorization:{
+      // The dashboard simulation demonstrates the autonomous L2 path.
+      // L0/L1/L2 matrix coverage remains in maf_policy_flip_demo.py.
+      authority_level:'L2'
+    },
+    validity:{
+      target_state:{
+        epoch_utc:now.toISOString(),
+        r_km:[7000.0,0.0,0.0],
+        v_km_s:[0.0,7.546,0.0]
+      },
+      observations:observations,
+      r_rel_km_at_tca:[0.5,-0.3,0.1],
+      v_rel_km_s_at_tca:[0.0,0.01,0.0]
+    },
+    monitor:{
+      current_mode:'M1'
+    }
+  };
+}
+
 async function evaluateConjunction(conj,idx){
   panX=0;panY=0;zoomLevel=2.5;
   document.getElementById('plannerDetails').innerHTML='<div class="empty-state"><span class="spinner"></span>Evaluating conjunction...</div>';
@@ -1290,7 +1345,8 @@ async function evaluateConjunction(conj,idx){
       // artifact does not carry object velocities.
       ...(conj.v_rel_km_s ? {v_rel_km_s: conj.v_rel_km_s} : {}),
       pc_precomputed:conj.pc>0?conj.pc:null},
-    policy:getPolicy()
+    policy:getPolicy(),
+    ...mafDemoInputs(conj)
   };
   updatePayloadModalIfOpen();
   let resp, result;
@@ -1398,6 +1454,132 @@ function covLabelLine(result){
   return 'COVARIANCE: Surrogate covariance (identity-scaled)';
 }
 
+// SCRUM-383: MAF authority-loop fields surfaced directly from the
+// SCRUM-379 decision-state-machine response. Guard values are authoritative for
+// validity, envelope and veto-window state because they are the values the
+// safety monitor actually read when making the transition.
+let mafVetoCountdownTimer = null;
+
+function mafGuard(result,name){
+  const guards=result?.decision_state_machine?.guards||[];
+  return guards.find(g=>g.guard===name)||null;
+}
+
+function stopMafVetoCountdown(){
+  if(mafVetoCountdownTimer!==null){
+    clearInterval(mafVetoCountdownTimer);
+    mafVetoCountdownTimer=null;
+  }
+}
+
+function renderMafVetoCountdown(result){
+  stopMafVetoCountdown();
+
+  const el=document.getElementById('dMafVeto');
+  if(!el)return;
+
+  const dsm=result?.decision_state_machine||{};
+  const authority=(
+    result?.authorized_execution?.authority_level||
+    mafGuard(result,'envelope_satisfied')?.values?.authority_level||
+    ''
+  );
+
+  if(authority && authority!=='L2'){
+    el.textContent='N/A';
+    return;
+  }
+
+  const vetoGuard=mafGuard(result,'l2_veto_window_expired');
+  const closeUtc=vetoGuard?.values?.veto_window_close_utc;
+
+  if(!closeUtc){
+    el.textContent=dsm.to_mode==='M3'?'CLOSED':'N/A';
+    return;
+  }
+
+  const closeMs=Date.parse(closeUtc);
+  if(!Number.isFinite(closeMs)){
+    el.textContent='--';
+    return;
+  }
+
+  const update=()=>{
+    const remaining=Math.max(0,Math.ceil((closeMs-Date.now())/1000));
+
+    if(remaining<=0){
+      el.textContent='CLOSED';
+      stopMafVetoCountdown();
+      return;
+    }
+
+    const min=Math.floor(remaining/60);
+    const sec=remaining%60;
+    el.textContent=min>0
+      ? min+'m '+String(sec).padStart(2,'0')+'s'
+      : sec+'s';
+  };
+
+  update();
+
+  if(closeMs>Date.now()){
+    mafVetoCountdownTimer=setInterval(update,1000);
+  }
+}
+
+function updateMafDecisionFields(result){
+  const dsm=result?.decision_state_machine||{};
+  const metrics=result?.metrics||{};
+  const recommendation=result?.recommendation||{};
+
+  const validityGuard=mafGuard(result,'validity_earned');
+  const envelopeGuard=mafGuard(result,'envelope_satisfied');
+
+  const validity=(
+    result?.authorized_execution?.validity_status||
+    validityGuard?.values?.validity_status||
+    validityGuard?.values?.validity_routing||
+    '--'
+  );
+
+  const envelope=(
+    result?.authorized_execution?.envelope_version||
+    envelopeGuard?.values?.envelope_version||
+    '--'
+  );
+
+  const mode=dsm.to_mode||dsm.mode||'--';
+
+  const pc=metrics.pc_pre;
+  const pcDisplay=(
+    pc!==null&&pc!==undefined&&Number.isFinite(Number(pc))
+      ? Number(pc).toExponential(2)
+      : '--'
+  );
+
+  const direction=recommendation.direction||'';
+  const decision=direction
+    ? (direction==='no-burn'?'NO-BURN':direction.toUpperCase())
+    : '--';
+
+  const modeEl=document.getElementById('dMafMode');
+  const pcEl=document.getElementById('dMafPc');
+  const validityEl=document.getElementById('dMafValidity');
+  const envelopeEl=document.getElementById('dMafEnvelope');
+  const decisionEl=document.getElementById('dMafDecision');
+
+  if(modeEl)modeEl.textContent=mode;
+  if(pcEl)pcEl.textContent=pcDisplay;
+  if(validityEl)validityEl.textContent=validity;
+  if(envelopeEl){
+    envelopeEl.textContent=envelope;
+    envelopeEl.title=envelope;
+  }
+  if(decisionEl)decisionEl.textContent=decision;
+
+  renderMafVetoCountdown(result);
+}
+
 function updateDecisionCard(result,conj){
   const dctx=evalDisplayCtx(result,conj);
   const card=document.getElementById('decisionCard'),status=document.getElementById('decisionStatus'),badge=document.getElementById('decisionBadge');
@@ -1416,6 +1598,10 @@ function updateDecisionCard(result,conj){
   const dir=result.recommendation?.direction||'--';
   document.getElementById('dDir').textContent=dir==='no-burn'?'NO-BURN':dir.toUpperCase();
   document.getElementById('dDv').textContent=dir==='no-burn'?'0.00 m/s':(result.recommendation?.dv_magnitude_m_s||0).toFixed(2)+' m/s';
+
+  // SCRUM-383: surface the real MAF authority-loop result beside the
+  // pre-existing maneuver presentation.
+  updateMafDecisionFields(result);
 }
 
 function updateCandidatesTable(candidates,bestDir,fuelCost){
@@ -1607,6 +1793,13 @@ function clearAll(){
   document.getElementById('decisionBadge').className='decision-badge badge-nogo';
   document.getElementById('decisionBadge').textContent='NO ACTION';
   document.getElementById('decisionCard').className='decision-card';
+
+  stopMafVetoCountdown();
+  ['dMafMode','dMafPc','dMafValidity','dMafEnvelope','dMafVeto','dMafDecision']
+    .forEach(id=>{
+      const el=document.getElementById(id);
+      if(el)el.textContent='--';
+    });
   ['dTarget','dTCA','dDir','dDv'].forEach(id=>document.getElementById(id).textContent='--');
   ['mTotal','mClosest','mMaxPc'].forEach(id=>document.getElementById(id).textContent='--');
   ['mRed','mAmber','mGreen'].forEach(id=>document.getElementById(id).textContent='0');
