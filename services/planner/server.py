@@ -886,51 +886,53 @@ async def post_evaluate(request: Request):
     leolabs_used = False
     if LEOLABS_ENABLED:
         ll_primary = (body.get("conjunction") or {}).get("primary_norad")
-        if not ll_primary:
-            return JSONResponse(
-                status_code=422,
-                content=error_response(
-                    "LEOLABS_ENABLED=true requires primary_norad in the conjunction block"
-                ),
+        # SCRUM-420: primary_norad is the switch between the two request modes.
+        # Present -> authoritative live LeoLabs fetch (below). Absent -> the caller
+        # supplied a self-contained conjunction block (e.g. the dashboard scenario
+        # presets, which carry their own surrogate covariance); fall through and
+        # evaluate that block directly. Enabling LeoLabs must not disable the
+        # surrogate/scenario path, so a missing primary_norad is not a 422 here --
+        # it simply means "evaluate what I gave you" and the response reports
+        # source=surrogate rather than leolabs.
+        if ll_primary:
+            try:
+                parsed_ll = fetch_leolabs_conjunction(int(ll_primary))
+            except Exception as exc:
+                log.warning(
+                    "LeoLabs fetch failed",
+                    extra={"event": "leolabs_fetch_failed", "primary_norad": ll_primary,
+                           "exc": str(exc)},
+                )
+                return JSONResponse(
+                    status_code=503,
+                    content=error_response(f"LeoLabs fetch failed: {exc}"),
+                )
+            if parsed_ll is None:
+                log.info(
+                    "LeoLabs returned no scorable conjunctions",
+                    extra={"event": "leolabs_no_conjunctions", "primary_norad": ll_primary},
+                )
+                return JSONResponse(
+                    status_code=200,
+                    content={
+                        "conjunction_id": None,
+                        "recommendation": {"direction": "no_maneuver_needed"},
+                        "source": "leolabs",
+                        "note": "LeoLabs returned no scorable conjunctions in the window. No maneuver needed.",
+                    },
+                )
+            sat_in = body.get("satellite", {}) or {}
+            pol_in = body.get("policy", {}) or {}
+            body = build_evaluate_request(
+                parsed_ll,
+                sat_id=str(sat_in.get("sat_id", ll_primary)),
+                v_remaining_m_s=float(sat_in.get("v_remaining_m_s", 0.0)),
+                t_burn_utc=sat_in.get("t_burn_utc"),
+                a_ref_km=sat_in.get("a_ref_km"),
+                policy=pol_in or None,
+                conjunction_id=body.get("conjunction_id"),
             )
-        try:
-            parsed_ll = fetch_leolabs_conjunction(int(ll_primary))
-        except Exception as exc:
-            log.warning(
-                "LeoLabs fetch failed",
-                extra={"event": "leolabs_fetch_failed", "primary_norad": ll_primary,
-                       "exc": str(exc)},
-            )
-            return JSONResponse(
-                status_code=503,
-                content=error_response(f"LeoLabs fetch failed: {exc}"),
-            )
-        if parsed_ll is None:
-            log.info(
-                "LeoLabs returned no scorable conjunctions",
-                extra={"event": "leolabs_no_conjunctions", "primary_norad": ll_primary},
-            )
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "conjunction_id": None,
-                    "recommendation": {"direction": "no_maneuver_needed"},
-                    "source": "leolabs",
-                    "note": "LeoLabs returned no scorable conjunctions in the window. No maneuver needed.",
-                },
-            )
-        sat_in = body.get("satellite", {}) or {}
-        pol_in = body.get("policy", {}) or {}
-        body = build_evaluate_request(
-            parsed_ll,
-            sat_id=str(sat_in.get("sat_id", ll_primary)),
-            v_remaining_m_s=float(sat_in.get("v_remaining_m_s", 0.0)),
-            t_burn_utc=sat_in.get("t_burn_utc"),
-            a_ref_km=sat_in.get("a_ref_km"),
-            policy=pol_in or None,
-            conjunction_id=body.get("conjunction_id"),
-        )
-        leolabs_used = True
+            leolabs_used = True
     # ----------------------------------------------------------------------
 
     # --- UDL live conjunction fetch (SCRUM-331 AC5) ----------------------
