@@ -145,13 +145,36 @@ def test_evaluate_leolabs_no_records_returns_no_maneuver(monkeypatch):
     assert data["recommendation"]["direction"] == "no_maneuver_needed"
 
 
-def test_evaluate_leolabs_requires_primary_norad(monkeypatch):
+def test_evaluate_leolabs_without_primary_norad_uses_surrogate(monkeypatch):
+    """SCRUM-420: LEOLABS_ENABLED=true with no primary_norad must NOT 422.
+
+    A request that omits primary_norad is a self-contained (surrogate) evaluate --
+    e.g. a dashboard scenario preset carrying its own covariance. It must evaluate
+    the supplied conjunction block directly, never attempt a live LeoLabs fetch,
+    and report source=surrogate. Enabling LeoLabs must not break the scenario path.
+    """
     monkeypatch.setattr(server, "LEOLABS_ENABLED", True)
-    monkeypatch.setattr(server, "fetch_leolabs_conjunction", lambda n: None)
+    fetch_called = {"hit": False}
+
+    def _spy(n):
+        fetch_called["hit"] = True
+        return None
+
+    monkeypatch.setattr(server, "fetch_leolabs_conjunction", _spy)
     body = _body()
     del body["conjunction"]["primary_norad"]
+    body["satellite"]["t_burn_utc"] = "2026-06-22T08:00:00Z"
+    # Self-contained surrogate conjunction block (no live fetch needed).
+    body["conjunction"].update({
+        "t_ca_utc": "2026-06-22T10:00:00Z",
+        "r_rel_km": [0.1, 0.2, 0.3],
+        "v_rel_km_s": [0.0, -0.5, 0.1],
+        "p_rel_km2": [1e-4, 0, 0, 0, 1e-4, 0, 0, 0, 1e-4],
+    })
     resp = TestClient(server.svc).post("/v1/evaluate", json=body)
-    assert resp.status_code == 422
+    assert resp.status_code == 200
+    assert resp.json()["source"] == "surrogate"
+    assert fetch_called["hit"] is False
 
 
 def test_evaluate_leolabs_fetch_failure_returns_503(monkeypatch):
