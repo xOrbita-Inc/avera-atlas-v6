@@ -40,6 +40,36 @@ PROP_ARTIFACT_PATH = os.path.join(DATA_DIR, "prop_multi.npz")
 
 templates = Jinja2Templates(directory="app/templates")
 
+# SCRUM-421: the Live Asset dropdown's source of truth.
+#
+# The LeoLabs Catalog Object Subscriptions available during the trial (10
+# objects, per the SCRUM-421 comment thread). NORAD ID is what the planner needs
+# as primary_norad; name is what the operator reads. Trial-scoped and expected to
+# change when the subscription set changes, which is why it lives here as one
+# named constant rather than as literals scattered through the template.
+#
+# Fast-follow swap point: replace the body of leolabs_subscribed_assets() with a
+# call to a LeoLabs subscriptions endpoint (the planner already builds an
+# AssetRegistry from list_subscribed_objects). Nothing in index.html changes --
+# it renders whatever this function returns.
+LEOLABS_SUBSCRIBED_ASSETS = [
+    {"name": "CRYOSAT 2",   "norad_id": 36508, "leolabs_catalog": "L2669"},
+    {"name": "GRACE-FO 1",  "norad_id": 43476, "leolabs_catalog": "L21219"},
+    {"name": "GRACE-FO 2",  "norad_id": 43477, "leolabs_catalog": "L21221"},
+    {"name": "LARETS",      "norad_id": 27944, "leolabs_catalog": "L2486"},
+    {"name": "SENTINEL 3A", "norad_id": 41335, "leolabs_catalog": "L1159"},
+    {"name": "SENTINEL 3B", "norad_id": 43437, "leolabs_catalog": "L21073"},
+    {"name": "STARLETTE",   "norad_id": 7646,  "leolabs_catalog": "L1768"},
+    {"name": "SWARM A",     "norad_id": 39452, "leolabs_catalog": "L3972"},
+    {"name": "SWARM B",     "norad_id": 39451, "leolabs_catalog": "L5429"},
+    {"name": "SWARM C",     "norad_id": 39453, "leolabs_catalog": "L3969"},
+]
+
+
+def leolabs_subscribed_assets():
+    """The subscribed assets the Live Asset dropdown offers."""
+    return LEOLABS_SUBSCRIBED_ASSETS
+
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
@@ -48,6 +78,7 @@ async def index(request: Request):
         {
             "request": request,
             "aps_version": APS_VERSION,
+            "leolabs_assets": leolabs_subscribed_assets(),
         },
     )
 
@@ -88,6 +119,41 @@ async def planner_batch(request: Request):
         })
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/planner/v1/leolabs/conjunctions")
+async def planner_leolabs_conjunctions(request: Request):
+    """Proxy the SCRUM-422 conjunction listing to the planner.
+
+    Deliberately relays the upstream status code verbatim, unlike the two status
+    proxies above which collapse any non-200 to 502. The dashboard has to tell
+    these apart: 404 means the asset is not in the LeoLabs subscription, 422
+    means the window was bad, and 503 means the feed is off -- which must not be
+    shown to an operator as "no conjunctions", because an empty sky and an
+    unavailable feed look identical once the distinction is lost.
+
+    Timeout matches the evaluate proxy: a cold registry build plus the CDM search
+    is the same round-trip cost.
+    """
+    try:
+        resp = requests.get(
+            f"{PLANNER_SERVICE_URL}/v1/leolabs/conjunctions",
+            params=dict(request.query_params),
+            timeout=60,
+        )
+    except requests.exceptions.ConnectionError:
+        return JSONResponse(status_code=503, content={
+            "error": "Planner service unavailable"
+        })
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    try:
+        return JSONResponse(status_code=resp.status_code, content=resp.json())
+    except ValueError:
+        return JSONResponse(status_code=502, content={
+            "error": f"planner conjunction list returned invalid JSON "
+                     f"(HTTP {resp.status_code})"
+        })
 
 
 @app.get("/api/planner/health")

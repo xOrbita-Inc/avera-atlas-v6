@@ -39,6 +39,16 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 .panel{margin:8px;border-radius:4px;background:var(--bg-card);border:1px solid var(--border)}
 .panel-hdr{padding:8px 12px;border-bottom:1px solid var(--border);font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--accent-dim);font-weight:500;display:flex;justify-content:space-between;align-items:center}
 .panel-body{padding:10px 12px}
+/* SCRUM-421: the data-source segmented control, at the action point. */
+.source-toggle{display:grid;grid-template-columns:1fr 1fr;gap:0;margin-bottom:8px;border:1px solid var(--border);border-radius:3px;overflow:hidden}
+.src-btn{padding:6px 4px;background:var(--bg-panel);border:none;color:var(--text-dim);font-family:inherit;font-size:9px;letter-spacing:1px;text-transform:uppercase;cursor:pointer;transition:all 0.2s}
+.src-btn:hover{color:var(--text)}
+.src-btn.active{background:var(--accent-glow);color:var(--accent)}
+.src-btn+.src-btn{border-left:1px solid var(--border)}
+.asset-select{width:100%;padding:7px 6px;background:var(--bg-panel);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:10px;border-radius:3px;cursor:pointer}
+.asset-select:focus{outline:none;border-color:var(--accent)}
+.source-hint{font-size:8px;color:var(--text-dim);letter-spacing:0.5px;margin-bottom:4px}
+.conj-source-note{font-size:8px;color:var(--text-dim);letter-spacing:0.4px;padding:4px 10px;border-bottom:1px solid var(--border)}
 .scenario-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
 .scenario-btn{padding:8px 6px;border:1px solid var(--border);background:var(--bg-panel);color:var(--text-dim);border-radius:3px;cursor:pointer;font-family:inherit;font-size:10px;text-align:center;transition:all 0.2s}
 .scenario-btn:hover{border-color:var(--accent-dim);color:var(--text)}
@@ -90,6 +100,10 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 .conj-table th{position:sticky;top:0;background:var(--bg-card)}
 .risk-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px}
 .risk-RED{background:var(--red);box-shadow:0 0 6px var(--red)}.risk-AMBER{background:var(--amber);box-shadow:0 0 6px var(--amber)}.risk-GREEN{background:var(--green)}.risk-NOMINAL{background:var(--text-dim)}
+/* SCRUM-421: a live row whose CDM carries no Pc. Deliberately its own class and
+   not risk-NOMINAL: NOMINAL is an assessment, this is the absence of one. Real
+   risk resolves when the row is scored. */
+.risk-UNKNOWN{background:#555;border:1px solid var(--border)}
 ::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:var(--bg-panel)}::-webkit-scrollbar-thumb{background:var(--border-accent);border-radius:2px}
 .empty-state{text-align:center;padding:20px;color:var(--text-dim);font-size:10px;letter-spacing:0.5px}
 .refresh-btn{background:none;border:1px solid var(--border);color:var(--text-dim);padding:2px 8px;border-radius:2px;cursor:pointer;font-family:inherit;font-size:9px}
@@ -323,14 +337,28 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
     <div class="panel" id="portlet-scenario" data-portlet data-portlet-title="Scenario">
       <div class="panel-hdr"><span class="panel-title">Scenario</span><div class="panel-ctrls"><button type="button" class="portlet-btn" data-portlet-action="minimize" title="Minimize">&#x2212;</button><button type="button" class="portlet-btn" data-portlet-action="maximize" title="Maximize">&#x26F6;</button><button type="button" class="portlet-btn portlet-info" data-portlet-action="info" title="Field reference" onclick="openPayloadModal()">&#x24D8;</button></div></div>
       <div class="panel-body">
-        <div class="scenario-grid">
+        <!-- SCRUM-421: the data source is an explicit choice, made at the point
+             of action. Scenario is surrogate covariance and needs no NORAD;
+             Live Asset is a LeoLabs fetch for one subscribed object. The table
+             and the drawn 2D always follow whichever is selected. -->
+        <div class="source-toggle" role="group" aria-label="Data source">
+          <button type="button" class="src-btn active" id="srcScenarioBtn" onclick="setDataSource('scenario')">Scenario</button>
+          <button type="button" class="src-btn" id="srcLiveBtn" onclick="setDataSource('live')">Live Asset</button>
+        </div>
+        <div class="scenario-grid" id="scenarioPresets">
           <button class="scenario-btn" data-scenario="nominal" onclick="selectScenario(this)">Nominal</button>
           <button class="scenario-btn" data-scenario="warning" onclick="selectScenario(this)">Warning</button>
           <button class="scenario-btn active" data-scenario="critical" onclick="selectScenario(this)">Critical</button>
           <button class="scenario-btn" data-scenario="mixed" onclick="selectScenario(this)">Mixed</button>
           <button class="scenario-btn" data-scenario="demo" onclick="selectScenario(this)">Demo</button>
         </div>
-        <button class="run-btn" id="runBtn" onclick="runScenario()">RUN SCENARIO</button>
+        <div id="liveAssetPicker" style="display:none">
+          <div class="source-hint">Subscribed LeoLabs asset</div>
+          <select class="asset-select" id="liveAssetSelect" onchange="onLiveAssetChange()">
+            <option value="">Select subscribed asset...</option>
+          </select>
+        </div>
+        <button class="run-btn" id="runBtn" onclick="runSourceAction()">RUN SCENARIO</button>
         <div style="text-align:center;margin-top:6px;font-size:9px;color:var(--text-dim)" id="scenarioMsg">Select scenario and run</div>
       </div>
     </div>
@@ -360,10 +388,18 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
       <div class="panel-hdr"><span class="panel-title">CDM Operations</span><div class="panel-ctrls"><button type="button" class="portlet-btn" data-portlet-action="minimize" title="Minimize">&#x2212;</button><button type="button" class="portlet-btn" data-portlet-action="maximize" title="Maximize">&#x26F6;</button><button type="button" class="portlet-btn portlet-info" data-portlet-action="info" title="Field reference" onclick="openCdmOpsInfoModal()">&#x24D8;</button></div></div>
       <div class="panel-body" style="padding:10px 14px">
         <div id="cdmSourceMode" style="display:flex;align-items:center;gap:6px;margin-bottom:8px;padding:4px 6px;border:1px solid var(--border);border-radius:3px;background:var(--bg-panel)"><span id="cdmSourceDot" style="width:6px;height:6px;border-radius:50%;background:var(--text-dim);flex-shrink:0"></span><span id="cdmSourceLabel" style="font-size:8px;letter-spacing:1px;text-transform:uppercase;color:var(--text-dim)">CHECKING SOURCE MODE...</span></div>
-        <div style="font-size:8px;color:var(--text-dim);letter-spacing:0.5px;margin-bottom:6px">Asset NORAD ID (leave blank for surrogate covariance)</div>
-        <div class="poll-row">
-          <input type="text" id="assetNoradInput" placeholder="e.g. 25544" maxlength="10" oninput="onNoradChange()">
-          <button class="poll-btn" id="pollBtn" onclick="triggerCdmPoll()" disabled>POLL</button>
+        <!-- SCRUM-421: this field polls Space-Track CDMs into the store. It is
+             NOT a run input any more: the evaluated conjunction now comes from
+             the Scenario | Live Asset selector, never from whatever is typed
+             here. Hidden in Scenario mode so it cannot read as one, and
+             auto-filled from the Live Asset dropdown so POLL follows the asset
+             actually selected. -->
+        <div id="cdmNoradRow" style="display:none">
+          <div style="font-size:8px;color:var(--text-dim);letter-spacing:0.5px;margin-bottom:6px">Asset NORAD ID (for Space-Track CDM poll)</div>
+          <div class="poll-row">
+            <input type="text" id="assetNoradInput" placeholder="e.g. 25544" maxlength="10" oninput="onNoradChange()">
+            <button class="poll-btn" id="pollBtn" onclick="triggerCdmPoll()" disabled>POLL</button>
+          </div>
         </div>
         <button class="poll-btn" id="injectExampleBtn" onclick="injectExampleCdm()" style="width:100%;margin-bottom:6px">INJECT EXAMPLE CDM (TIROS 4)</button>
         <div class="poll-status" id="pollStatus"></div>
@@ -531,8 +567,13 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
     <div class="planner-section" style="display:flex;flex-direction:column;flex-shrink:0">
       <div class="panel" id="portlet-conjunctions" data-portlet data-portlet-title="Active Conjunctions" style="display:flex;flex-direction:column">
         <div class="panel-hdr"><span class="panel-title">Active Conjunctions</span><div class="panel-ctrls"><button class="refresh-btn" onclick="clearAll()" style="margin-right:4px">CLEAR</button><button class="refresh-btn" onclick="refreshData()">REFRESH</button><button type="button" class="portlet-btn" data-portlet-action="minimize" title="Minimize">&#x2212;</button><button type="button" class="portlet-btn" data-portlet-action="maximize" title="Maximize">&#x26F6;</button><button type="button" class="portlet-btn portlet-info" data-portlet-action="info" title="Field reference" onclick="openConjunctionsInfoModal()">&#x24D8;</button></div></div>
+        <!-- SCRUM-421: says which source these rows came from, and whose Pc the
+             Pc column is. In live mode that is LeoLabs' CDM Pc, while the
+             decision card's Pc after scoring is APS-computed -- two different
+             numbers that must not read as one. -->
+        <div class="conj-source-note" id="conjSourceNote">SOURCE: SCENARIO &mdash; surrogate covariance</div>
         <div style="max-height:260px;overflow-y:auto;padding:0">
-          <table class="conj-table"><thead><tr><th>Object</th><th>Miss (m)</th><th>Pc</th><th>TCA</th><th>Risk</th></tr></thead>
+          <table class="conj-table"><thead><tr><th>Object</th><th>Miss (m)</th><th id="conjPcHdr">Pc</th><th>TCA</th><th>Risk</th></tr></thead>
           <tbody id="conjBody"><tr><td colspan="5" class="empty-state">No data - run a scenario</td></tr></tbody></table>
         </div>
       </div>
@@ -612,6 +653,148 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 
 let assetNoradId = '';
 let secondaryNoradId = '';
+
+// ---------------------------------------------------------------------------
+// SCRUM-421: the data source is an explicit choice
+// ---------------------------------------------------------------------------
+// Before this, the Active Conjunctions table showed surrogate rows while a set
+// Asset NORAD quietly turned every row click into one live LeoLabs conjunction:
+// the table and the drawn 2D came from different sources and every row produced
+// the same result. dataSource is now the single switch, and it governs the
+// table, the row click, the button, and the badges together.
+//
+// liveAssetNorad is the asset chosen in the Live Asset dropdown. It is the ONLY
+// value that may become primary_norad on an evaluate. The CDM Operations
+// assetNoradId is a Space-Track poll input and is never read by the evaluate
+// path, so there is no longer any way for a typed NORAD to hijack a scenario row.
+let dataSource = 'scenario';          // 'scenario' | 'live'
+let liveAssetNorad = '';
+let liveAssetName = '';
+
+// Seeded from LEOLABS_SUBSCRIBED_ASSETS in services/ui/app/main.py -- one
+// constant, injected at render. Swapping it for a live subscriptions endpoint is
+// a change in main.py only; nothing here needs to know where the list came from.
+const LEOLABS_ASSETS = {{ leolabs_assets | tojson }};
+
+function isLiveMode(){ return dataSource === 'live'; }
+
+function populateAssetDropdown(){
+  const sel = document.getElementById('liveAssetSelect');
+  if(!sel) return;
+  const opts = ['<option value="">Select subscribed asset...</option>'];
+  (LEOLABS_ASSETS || []).forEach(a => {
+    opts.push('<option value="'+a.norad_id+'" data-name="'+a.name+'">'+a.name+' — '+a.norad_id+'</option>');
+  });
+  sel.innerHTML = opts.join('');
+}
+
+function setDataSource(src){
+  if(src === dataSource) return;
+  dataSource = src;
+  const scenarioBtn=document.getElementById('srcScenarioBtn');
+  const liveBtn=document.getElementById('srcLiveBtn');
+  const presets=document.getElementById('scenarioPresets');
+  const picker=document.getElementById('liveAssetPicker');
+  const runBtn=document.getElementById('runBtn');
+  const msg=document.getElementById('scenarioMsg');
+  const cdmRow=document.getElementById('cdmNoradRow');
+
+  scenarioBtn.classList.toggle('active', src==='scenario');
+  liveBtn.classList.toggle('active', src==='live');
+  presets.style.display = src==='scenario' ? '' : 'none';
+  picker.style.display  = src==='live' ? '' : 'none';
+  // AC: the Asset NORAD input is not visible while Scenario is selected.
+  cdmRow.style.display  = src==='live' ? '' : 'none';
+  runBtn.textContent = src==='live' ? 'FETCH LIVE CONJUNCTIONS' : 'RUN SCENARIO';
+  msg.textContent = src==='live'
+    ? (liveAssetNorad ? 'Fetch live conjunctions for '+liveAssetName : 'Select a subscribed asset')
+    : 'Select scenario and run';
+
+  // Switching source clears the table rather than leaving the other source's
+  // rows on screen. Showing both at once is the exact confusion this removes.
+  clearConjunctionsForSourceSwitch();
+  updateConjSourceNote();
+}
+
+function onLiveAssetChange(){
+  const sel=document.getElementById('liveAssetSelect');
+  liveAssetNorad = sel.value || '';
+  liveAssetName = sel.selectedOptions[0]?.dataset.name || '';
+  const msg=document.getElementById('scenarioMsg');
+  msg.textContent = liveAssetNorad
+    ? 'Fetch live conjunctions for '+liveAssetName
+    : 'Select a subscribed asset';
+  // Convenience only: keep the CDM poll field pointed at the same asset. The
+  // evaluate path does not read this value.
+  const input=document.getElementById('assetNoradInput');
+  if(input){ input.value = liveAssetNorad; onNoradChange(); }
+  clearConjunctionsForSourceSwitch();
+  updateConjSourceNote();
+}
+
+function updateConjSourceNote(){
+  const note=document.getElementById('conjSourceNote');
+  const hdr=document.getElementById('conjPcHdr');
+  if(!note) return;
+  if(isLiveMode()){
+    note.innerHTML = 'SOURCE: LEOLABS LIVE — real_cdm covariance'
+      + (liveAssetName ? ' — ' + liveAssetName + ' (' + liveAssetNorad + ')' : '')
+      + '<br>Pc column is LeoLabs’ CDM Pc. The decision card Pc is APS-computed when a row is scored.';
+    if(hdr) hdr.textContent = 'Pc (LeoLabs)';
+  } else {
+    note.textContent = 'SOURCE: SCENARIO — surrogate covariance';
+    if(hdr) hdr.textContent = 'Pc';
+  }
+}
+
+function clearConjunctionsForSourceSwitch(){
+  conjunctionData=null;selectedConjunction=null;
+  const tbody=document.getElementById('conjBody');
+  if(tbody){
+    tbody.innerHTML='<tr><td colspan="5" class="empty-state">'
+      + (isLiveMode() ? 'Select an asset and fetch live conjunctions' : 'No data - run a scenario')
+      + '</td></tr>';
+  }
+  ['mTotal','mClosest','mMaxPc'].forEach(id=>{const e=document.getElementById(id);if(e)e.textContent='--'});
+  ['mRed','mAmber','mGreen'].forEach(id=>{const e=document.getElementById(id);if(e)e.textContent='0'});
+  // The AC is that the table and the drawn 2D always come from the same source.
+  // Clearing only the table would leave the previous source's encounter and
+  // decision card on screen beside the new source's rows -- which is the very
+  // mismatch this story exists to remove, just in a transient form.
+  clearScoredResultForSourceSwitch();
+}
+
+// Everything downstream of a single scored conjunction: the 2D, the decision
+// card, the candidates, the risk bar and the ATLAS artifact. Deliberately not
+// clearAll(), which also sets userCleared and resets the policy sliders -- a
+// source switch should not throw away the operator's policy.
+function clearScoredResultForSourceSwitch(){
+  currentPlannerResult=null;currentConj=null;currentCandidates=null;selectedCandidateDir=null;
+  zoomLevel=2.5;panX=0;panY=0;
+  const set=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v;};
+  const html=(id,v)=>{const e=document.getElementById(id);if(e)e.innerHTML=v;};
+  html('fuelRiskChart','');
+  html('candidatesBody','<tr><td colspan="4" class="empty-state">No evaluation yet</td></tr>');
+  html('plannerDetails','<div class="empty-state">'
+    +(isLiveMode()?'Fetch live conjunctions and select one':'Run a scenario to see planner output')+'</div>');
+  set('decisionStatus','MONITORING');
+  const badge=document.getElementById('decisionBadge');
+  if(badge){badge.className='decision-badge badge-nogo';badge.textContent='NO ACTION';}
+  const card=document.getElementById('decisionCard');
+  if(card)card.className='decision-card';
+  ['dTarget','dTCA','dDir','dDv','pcPre','pcPost','m2Pre','m2Post','utilBar'].forEach(id=>set(id,'--'));
+  const alert=document.getElementById('encounterAlert');
+  if(alert)alert.className='encounter-alert';
+  set('encounterTitleText','Encounter Geometry');
+  if(typeof encounterCtx!=='undefined'&&encounterCtx)drawEncounterEmpty();
+  if(typeof clearAtlasArtifact==='function')clearAtlasArtifact();
+}
+
+// The single run control dispatches on the selected source, so one button never
+// does two jobs invisibly -- its label always says which one it is about to do.
+function runSourceAction(){
+  return isLiveMode() ? fetchLiveConjunctions() : runScenario();
+}
 
 // SCRUM-351: DecisionLog retrieval by decision ID
 let lastEvaluatedDecisionLogId = '';
@@ -759,12 +942,17 @@ async function injectExampleCdm() {
       status.className = 'poll-status ok';
       status.textContent = 'Example CDM injected';
       lastResult.textContent = 'TIROS 4 (226) / IRIDIUM 33 DEB (35929) - real CCSDS 508.0-B-1 covariance loaded';
-      // Auto-populate the asset NORAD field so planner picks it up immediately
+      // SCRUM-421: this used to also make the planner adopt 226 as the primary
+      // on the next scenario row click, by way of the same primary_norad
+      // injection this story removes. A scenario evaluate is now NORAD-free, so
+      // the CDM lands in the store and is inspectable there, but it no longer
+      // silently reattributes a surrogate row to the TIROS 4 pair. The field is
+      // still populated so POLL and the store lookup target the same object.
       document.getElementById('assetNoradInput').value = '226';
       assetNoradId = '226';
       secondaryNoradId = '35929';
       document.getElementById('pollBtn').disabled = false;
-      lastResult.textContent = 'TIROS 4 (226) / IRIDIUM 33 DEB (35929) - real CCSDS 508.0-B-1 covariance loaded. Select any conjunction to evaluate with real CDM covariance.';
+      lastResult.textContent = 'TIROS 4 (226) / IRIDIUM 33 DEB (35929) - real CCSDS 508.0-B-1 covariance loaded into the CDM store. View it with VIEW CDM STORE.';
     } else {
       status.className = 'poll-status err';
       status.textContent = 'Inject failed: ' + (data.errors?.[0] || JSON.stringify(data));
@@ -785,7 +973,10 @@ function renderCovSourceBadge(covSource) {
   const isReal = covSource === 'real_cdm';
   el.innerHTML = '<div class="cov-badge ' + (isReal ? 'real' : 'surrogate') + '">' +
     '<span class="cov-dot"></span>' +
-    (isReal ? 'REAL CDM COVARIANCE' : 'SURROGATE COVARIANCE \u2014 SET ASSET NORAD ID TO FETCH REAL CDM') +
+    // SCRUM-421: the old surrogate hint told the operator to set an Asset NORAD
+    // ID, which is exactly the hidden coupling this story removes. Point at the
+    // source selector instead, which is now the honest way to get a real CDM.
+    (isReal ? 'REAL CDM COVARIANCE' : 'SURROGATE COVARIANCE \u2014 SWITCH TO LIVE ASSET FOR A REAL CDM') +
     '</div>';
 }
 
@@ -916,7 +1107,124 @@ async function runScenario(){
   }catch(e){msg.textContent='Error: '+e.message;btn.classList.remove('running');btn.textContent='RUN SCENARIO'}
 }
 
+// SCRUM-421: fetch an asset's live LeoLabs conjunctions and make them the table.
+// Replaces the surrogate rows outright; the two sources are never on screen
+// together.
+async function fetchLiveConjunctions(){
+  const btn=document.getElementById('runBtn'),msg=document.getElementById('scenarioMsg');
+  if(!liveAssetNorad){msg.textContent='Select a subscribed asset first';return}
+  userCleared=false;selectedCandidateDir=null;
+  btn.classList.add('running');btn.textContent='FETCHING...';
+  msg.textContent='Fetching LeoLabs conjunctions for '+liveAssetName+'...';
+  let resp,data;
+  try{
+    resp=await fetch('/api/planner/v1/leolabs/conjunctions?primary_norad='+encodeURIComponent(liveAssetNorad));
+    try{data=await resp.json();}catch(_){data={};}
+  }catch(e){
+    btn.classList.remove('running');btn.textContent='FETCH LIVE CONJUNCTIONS';
+    msg.textContent='Planner unreachable: '+e.message;return;
+  }
+  btn.classList.remove('running');btn.textContent='FETCH LIVE CONJUNCTIONS';
+
+  // Each status means something different to an operator, so each says something
+  // different. In particular 503 (feed off/unavailable) must never be shown as
+  // "no conjunctions", which would read as a clear sky.
+  if(resp.status===404){
+    setLiveTableMessage('NORAD not in LeoLabs subscription');
+    msg.textContent=liveAssetNorad+' is not in the LeoLabs subscription';return;
+  }
+  if(resp.status===422){
+    const detail=data.error||data.detail||'invalid request';
+    setLiveTableMessage('Request rejected: '+detail);
+    msg.textContent='Request rejected: '+detail;return;
+  }
+  if(resp.status===503){
+    setLiveTableMessage('LeoLabs feed unavailable or disabled');
+    msg.textContent='LeoLabs feed unavailable or disabled';return;
+  }
+  if(!resp.ok){
+    const detail=data.error||data.detail||('HTTP '+resp.status);
+    setLiveTableMessage('Fetch failed: '+detail);
+    msg.textContent='Fetch failed: '+detail;return;
+  }
+
+  const rows=(data.conjunctions||[]).map(liveRowToConj);
+  conjunctionData={conjunctions:rows,summary:liveSummary(rows),source:'leolabs'};
+  selectedConjunction=null;
+  updateMetrics(conjunctionData.summary);
+  updateConjunctionTable(rows);
+  updateConjSourceNote();
+  if(rows.length===0){
+    // A genuinely empty window, which is a real state of the world and not a
+    // failure. Worded so it cannot be mistaken for the feed being down.
+    setLiveTableMessage('No conjunctions in window');
+    msg.textContent='No conjunctions in the '+(data.window?.lookahead_days ?? 7)+'-day window';
+    return;
+  }
+  msg.textContent=rows.length+' live conjunction'+(rows.length===1?'':'s')+' — click a row to score it';
+}
+
+function setLiveTableMessage(text){
+  const tbody=document.getElementById('conjBody');
+  if(tbody) tbody.innerHTML='<tr><td colspan="5" class="empty-state">'+text+'</td></tr>';
+}
+
+// Normalise a SCRUM-422 row onto the shape the render path already speaks
+// (object_id, miss_distance_m, ...), while keeping the live-only fields the row
+// click needs. One object, so nothing downstream has to branch on source.
+function liveRowToConj(r){
+  const label=r.secondary_name||r.secondary_designator||(r.secondary_norad!=null?('NORAD '+r.secondary_norad):'UNKNOWN');
+  return {
+    object_id:label,
+    miss_distance_m:r.miss_distance_m,
+    miss_distance_km:r.miss_distance_km,
+    pc:r.pc,
+    pc_display:r.pc_display,
+    risk_level:r.risk_level,
+    time_to_tca_s:r.time_to_tca_s,
+    time_to_tca_min:r.time_to_tca_min,
+    // Live-only. The selector is what makes this row individually scorable.
+    live:true,
+    cdm_id:r.cdm_id,
+    event_id:r.event_id,
+    secondary_norad:r.secondary_norad,
+    secondary_designator:r.secondary_designator,
+    secondary_name:r.secondary_name,
+    tca_utc:r.tca_utc,
+    pc_source:r.pc_source
+  };
+}
+
+function liveSummary(rows){
+  const pcs=rows.map(r=>r.pc).filter(v=>typeof v==='number'&&v>0);
+  const misses=rows.map(r=>r.miss_distance_km).filter(v=>typeof v==='number');
+  return {
+    total_tracked:rows.length,
+    red_alerts:rows.filter(r=>r.risk_level==='RED').length,
+    amber_alerts:rows.filter(r=>r.risk_level==='AMBER').length,
+    green_alerts:rows.filter(r=>r.risk_level==='GREEN').length,
+    closest_approach_km:misses.length?Math.min(...misses):null,
+    highest_pc:pcs.length?Math.max(...pcs):0
+  };
+}
+
+// The row's selector for /v1/evaluate, most specific first: cdm_id names one
+// message, event_id one conjunction event, secondary_norad the object. The row
+// carries all three; sending the most specific one we have means a reissued CDM
+// cannot silently redirect the click to a different message.
+function liveRowSelector(conj){
+  if(conj.cdm_id!=null) return {cdm_id:conj.cdm_id};
+  if(conj.event_id!=null) return {event_id:conj.event_id};
+  if(conj.secondary_norad!=null) return {secondary_norad:conj.secondary_norad};
+  return {};
+}
+
 async function refreshData(){
+  // SCRUM-421: the 15s poll refreshes the surrogate propagator artifact. In live
+  // mode that would quietly overwrite the LeoLabs rows with surrogate ones --
+  // the table and the 2D drifting apart again, which is the bug this story is
+  // about. Live rows are refreshed by an explicit fetch, not by this poll.
+  if(isLiveMode())return;
   try{
     const resp=await fetch('/api/conjunctions');
     if(!resp.ok||!resp.headers.get('content-type')?.includes('application/json'))return;
@@ -940,12 +1248,26 @@ function updateMetrics(s){
   document.getElementById('mMaxPc').textContent=s.highest_pc>0?s.highest_pc.toExponential(1):'--';
 }
 
+// SCRUM-421: a live CDM can carry no Pc at all. That is the absence of an
+// assessment, not a NOMINAL one, so it gets its own neutral dot and reads "n/a"
+// rather than borrowing a risk band it has not earned. Real risk resolves when
+// the row is scored.
+function riskCell(c){
+  const unknown = c.pc==null || c.pc_display==='n/a';
+  if(unknown) return '<span class="risk-dot risk-UNKNOWN"></span>n/a';
+  return '<span class="risk-dot risk-'+c.risk_level+'"></span>'+c.risk_level;
+}
+
 function updateConjunctionTable(conjs){
   const tbody=document.getElementById('conjBody');
   if(!conjs||conjs.length===0){tbody.innerHTML='<tr><td colspan="5" class="empty-state">No conjunctions</td></tr>';return}
   tbody.innerHTML=conjs.map((c,i)=>{
-    const tcaMin=c.time_to_tca_min;const tcaD=tcaMin<60?tcaMin.toFixed(0)+'m':(tcaMin/60).toFixed(1)+'h';
-    return'<tr onclick="selectConj('+i+')" class="'+(selectedConjunction===i?'selected':'')+'"><td>'+c.object_id+'</td><td>'+c.miss_distance_m.toFixed(0)+'</td><td>'+c.pc_display+'</td><td>T+'+tcaD+'</td><td><span class="risk-dot risk-'+c.risk_level+'"></span>'+c.risk_level+'</td></tr>'
+    const tcaMin=c.time_to_tca_min;
+    const tcaD=(typeof tcaMin==='number')
+      ? (Math.abs(tcaMin)<60?tcaMin.toFixed(0)+'m':(tcaMin/60).toFixed(1)+'h')
+      : '--';
+    const miss=(typeof c.miss_distance_m==='number')?c.miss_distance_m.toFixed(0):'--';
+    return'<tr onclick="selectConj('+i+')" class="'+(selectedConjunction===i?'selected':'')+'"><td>'+c.object_id+'</td><td>'+miss+'</td><td>'+(c.pc_display||'--')+'</td><td>T+'+tcaD+'</td><td>'+riskCell(c)+'</td></tr>'
   }).join('');
 }
 
@@ -980,12 +1302,29 @@ async function evaluateConjunction(conj,idx){
   // orients the surrogate covariance in the asset's true orbital frame; fall
   // back to the legacy constant only when absent (non-demo conjunctions).
   const asset_v=conj.v_asset_km_s||[0.0,7.668,0.0];
-  const request={
+  // SCRUM-421: two sources, two request shapes, chosen explicitly.
+  //
+  // Live: the planner owns the geometry. It fetches the CDM the selector names
+  // and rebuilds the whole request from it, so sending our own r_rel/covariance
+  // would be inventing numbers it is about to replace. primary_norad comes from
+  // the Live Asset dropdown and nowhere else.
+  //
+  // Scenario: exactly the pre-421 surrogate request, minus the primary_norad
+  // injection that used to hijack it. A scenario evaluate is now NORAD-free,
+  // which is what SCRUM-420 made possible.
+  const live = isLiveMode() && liveAssetNorad;
+  const request = live ? {
+    conjunction_id:'leolabs-'+(conj.cdm_id!=null?conj.cdm_id:(conj.secondary_norad||'row')),
+    // t_burn_utc omitted on purpose: the planner defaults it to six hours before
+    // the CDM's TCA, which beats "now" for a conjunction days out.
+    satellite:{sat_id:'XORB-001',v_remaining_m_s:25.0},
+    conjunction:{primary_norad:liveAssetNorad, ...liveRowSelector(conj)},
+    policy:getPolicy()
+  } : {
     conjunction_id:'eval-'+conj.object_id,
     satellite:{sat_id:'XORB-001',r_sat_km:asset_r,v_sat_km_s:asset_v,a_ref_km:semiMajorAxisFromStateKm(asset_r,asset_v),
       t_burn_utc:new Date().toISOString(),v_remaining_m_s:25.0},
     conjunction:{obj_id:conj.object_id,
-      ...(assetNoradId ? {primary_norad: assetNoradId} : {}),
       ...(secondaryNoradId ? {secondary_norad: secondaryNoradId} : {}),
       t_ca_utc:new Date(Date.now()+conj.time_to_tca_s*1000).toISOString(),
       r_rel_km:conj.r_obj_km?[conj.r_obj_km[0]-asset_r[0],conj.r_obj_km[1]-asset_r[1],conj.r_obj_km[2]-asset_r[2]]:[conj.miss_distance_km,0.0,0.0],
@@ -1003,6 +1342,13 @@ async function evaluateConjunction(conj,idx){
     resp=await fetch('/api/planner/evaluate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)});
     try{result=await resp.json();}catch(_){result={};}
   }catch(e){showEvaluateError('planner unreachable: '+e.message);return;}
+  if(resp.status===404&&live){
+    // SCRUM-422 returns 404 when the selector matches nothing, rather than
+    // silently scoring a different conjunction. The row is stale, so say so and
+    // point at the fix instead of showing another object's numbers.
+    showEvaluateError('That conjunction is no longer in the LeoLabs window. Fetch live conjunctions again to refresh the list.');
+    return;
+  }
   if(!resp.ok||result.error){showEvaluateError(result.error||result.detail||('planner returned HTTP '+resp.status));return;}
   // Evaluate succeeded. A rendering error past this point is a display bug, not an
   // evaluate failure, so log it rather than falsely reporting EVALUATE FAILED.
@@ -1019,7 +1365,14 @@ async function evaluateConjunction(conj,idx){
     updateRiskBar(result,conj);
     drawEncounter(conj,result);
     if(result.atlas_artifact)renderAtlasArtifact(result.atlas_artifact);
-    updatePublishedPc(assetNoradId, secondaryNoradId);
+    // SCRUM-421: the Space-Track published-Pc lookup follows the source too --
+    // the live asset and the scored secondary in live mode, the CDM-ops pair
+    // otherwise.
+    if(live){
+      updatePublishedPc(liveAssetNorad, conj.secondary_norad || secondaryNoradId);
+    }else{
+      updatePublishedPc(assetNoradId, secondaryNoradId);
+    }
   }catch(e){console.error('Rendering the evaluate result failed:',e);}
 }
 
@@ -1047,7 +1400,9 @@ function evalDisplayCtx(result, conj){
     // SCRUM-417: name the secondary and use the CDM's RTN geometry when the
     // response carries the conjunction block; fall back to the 416 behavior.
     const cj = result.conjunction || null;
-    let label = assetNoradId ? ('NORAD ' + assetNoradId) : (conj.object_id || 'LIVE');
+    // SCRUM-421: fall back to the clicked row's own label, not to whatever
+    // NORAD happens to be typed in the CDM Operations panel.
+    let label = conj.object_id || (liveAssetNorad ? ('NORAD ' + liveAssetNorad) : 'LIVE');
     if(cj && cj.secondary){ label = conjObjectLabel(cj.secondary) || label; }
     const missM = (cj && cj.miss_distance_km != null) ? cj.miss_distance_km * 1000
                 : (rs.miss_distance_km != null) ? rs.miss_distance_km * 1000 : (conj.miss_distance_m || 0);
@@ -1056,9 +1411,18 @@ function evalDisplayCtx(result, conj){
     const tca = (cj && cj.tca_utc) || rs.tca_utc;
     if(tca){ const dm = (new Date(tca).getTime() - Date.now())/60000; if(isFinite(dm)) tcaMin = dm; }
     const rtn = (cj && cj.relative_position_rtn_m) || null;
-    return {live:true, risk, label, missM, pc, tcaMin, rtn};
+    // SCRUM-421: a live row has no relative velocity of its own -- the list
+    // endpoint does not carry one -- but the scored result does, as the CDM's
+    // RTN relative velocity in m/s. Use it rather than leaving the overlay to
+    // read a surrogate field that is not there.
+    const rv = (cj && cj.relative_velocity_rtn_m_s) || null;
+    const relVelKmS = (Array.isArray(rv) && rv.length===3)
+      ? Math.sqrt(rv[0]*rv[0]+rv[1]*rv[1]+rv[2]*rv[2])/1000
+      : (typeof conj.relative_velocity_km_s==='number' ? conj.relative_velocity_km_s : null);
+    return {live:true, risk, label, missM, pc, tcaMin, rtn, relVelKmS};
   }
-  return {live:false, risk:conj.risk_level, label:conj.object_id, missM:(conj.miss_distance_m||0), pc:(conj.pc||0), tcaMin:conj.time_to_tca_min, rtn:null};
+  return {live:false, risk:conj.risk_level, label:conj.object_id, missM:(conj.miss_distance_m||0), pc:(conj.pc||0), tcaMin:conj.time_to_tca_min, rtn:null,
+    relVelKmS:(typeof conj.relative_velocity_km_s==='number'?conj.relative_velocity_km_s:null)};
 }
 
 function covLabelLine(result){
@@ -1271,7 +1635,8 @@ function updateRiskBar(result,conj){
 function clearAll(){
   userCleared=true;
   conjunctionData=null;selectedConjunction=null;currentPlannerResult=null;currentConj=null;zoomLevel=2.5;panX=0;panY=0;selectedCandidateDir=null;currentCandidates=null;
-  document.getElementById('conjBody').innerHTML='<tr><td colspan="5" class="empty-state">No data - run a scenario</td></tr>';
+  document.getElementById('conjBody').innerHTML='<tr><td colspan="5" class="empty-state">'
+    +(isLiveMode()?'Select an asset and fetch live conjunctions':'No data - run a scenario')+'</td></tr>';
   document.getElementById('fuelRiskChart').innerHTML='';
   document.getElementById('candidatesBody').innerHTML='<tr><td colspan="4" class="empty-state">No evaluation yet</td></tr>';
   document.getElementById('plannerDetails').innerHTML='<div class="empty-state">Run a scenario to see planner output</div>';
@@ -1624,9 +1989,12 @@ function drawEncounter(conj,result){
   ctx.textAlign='right';ctx.font='9px "JetBrains Mono"';
   ctx.fillStyle='#6b6d8a';
   const lines=[
-    'APPROACH VEL: '+conj.relative_velocity_km_s.toFixed(2)+' km/s',
-    'TIME TO TCA: '+(dctx.tcaMin<60?dctx.tcaMin.toFixed(0)+' min':(dctx.tcaMin/60).toFixed(1)+' hr'),
-    'Pc: '+(dctx.live?dctx.pc.toExponential(2):conj.pc_display),
+    // SCRUM-421: every overlay value is guarded. A missing number reads "n/a"
+    // rather than throwing out of drawEncounter, which took the whole 2D render
+    // down for live rows while the decision card beside it looked fine.
+    'APPROACH VEL: '+(dctx.relVelKmS!=null?dctx.relVelKmS.toFixed(2)+' km/s':'n/a'),
+    'TIME TO TCA: '+(typeof dctx.tcaMin==='number'?(Math.abs(dctx.tcaMin)<60?dctx.tcaMin.toFixed(0)+' min':(dctx.tcaMin/60).toFixed(1)+' hr'):'n/a'),
+    'Pc: '+(dctx.live?(typeof dctx.pc==='number'?dctx.pc.toExponential(2):'n/a'):(conj.pc_display||'n/a')),
     'SCALE: 1px \u2248 '+(1/scale).toFixed(1)+'m',
     'HBR: 15m (combined)',
     covLabelLine(result),
@@ -2246,6 +2614,9 @@ function renderDetectionTable(detections){
 }
 
 document.addEventListener('DOMContentLoaded',async()=>{
+  // SCRUM-421: seed the Live Asset dropdown and put the source note in its
+  // Scenario default before anything renders.
+  populateAssetDropdown();updateConjSourceNote();
   initPortletControls();initEncounter();refreshPipeline();await refreshData();
   if(conjunctionData?.conjunctions?.length>0){const idx=selectedConjunction||0;evaluateConjunction(conjunctionData.conjunctions[idx]||conjunctionData.conjunctions[0],idx)}
   setInterval(refreshPipeline,10000);setInterval(refreshData,15000);
