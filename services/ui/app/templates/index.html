@@ -1317,7 +1317,7 @@ async function evaluateConjunction(conj,idx){
     conjunction_id:'leolabs-'+(conj.cdm_id!=null?conj.cdm_id:(conj.secondary_norad||'row')),
     // t_burn_utc omitted on purpose: the planner defaults it to six hours before
     // the CDM's TCA, which beats "now" for a conjunction days out.
-    satellite:{sat_id:'XORB-001',v_remaining_m_s:25.0},
+    satellite:{sat_id:liveAssetNorad,v_remaining_m_s:25.0},
     conjunction:{primary_norad:liveAssetNorad, ...liveRowSelector(conj)},
     policy:getPolicy()
   } : {
@@ -1980,7 +1980,7 @@ function drawEncounter(conj,result){
 
   // ---- LABELS ----
   ctx.fillStyle='#4ff8e8';ctx.font='bold 11px "JetBrains Mono"';ctx.textAlign='center';
-  ctx.fillText('XORB-001',cx,cy+30);
+  ctx.fillText((typeof isLiveMode==='function'&&isLiveMode()&&liveAssetNorad)?(liveAssetName?liveAssetName+' ('+liveAssetNorad+')':'NORAD '+liveAssetNorad):'XORB-001',cx,cy+30);
   ctx.fillStyle=rc;ctx.font='bold 10px "JetBrains Mono"';
   ctx.fillText(dctx.label,debX,debY-debR-8);  // SCRUM-417: name the scored secondary
 
