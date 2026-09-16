@@ -29,7 +29,7 @@ import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Iterator, List, Optional, Set
 
 from common.leolabs_asset_map import AssetRegistry
 from common.leolabs_cdm_parser import (
@@ -54,6 +54,13 @@ LEOLABS_ENABLED = os.environ.get("LEOLABS_ENABLED", "false").lower() == "true"
 # the total minTca..maxTca span at 30 days.
 _DEFAULT_LOOKAHEAD_DAYS = 7
 _DEFAULT_LOOKBACK_DAYS = 0
+
+# Public aliases, so a caller can state the window it asked for without reaching
+# for a private name. LeoLabs caps the total minTca..maxTca span at 30 days, so a
+# caller widening the window has to stay inside MAX_WINDOW_DAYS.
+DEFAULT_LOOKAHEAD_DAYS = _DEFAULT_LOOKAHEAD_DAYS
+DEFAULT_LOOKBACK_DAYS = _DEFAULT_LOOKBACK_DAYS
+MAX_WINDOW_DAYS = 30
 
 # Optional allow-list of our fleet's NORAD ids, comma-separated. When set, the
 # registry is restricted to these so we never treat an unrelated subscribed
@@ -154,26 +161,40 @@ def _risk_key(cdm: Dict[str, Any]):
     return (-pc, tca)
 
 
-def fetch_leolabs_conjunction(
-    primary_norad: int,
-    *,
-    client: Optional[LeoLabsClient] = None,
-    registry: Optional[AssetRegistry] = None,
-    now: Optional[datetime] = None,
+def conjunction_window(
+    now: datetime,
     lookback_days: int = _DEFAULT_LOOKBACK_DAYS,
     lookahead_days: int = _DEFAULT_LOOKAHEAD_DAYS,
-) -> Optional[ParsedLeoLabsCDM]:
-    """Fetch and parse the highest-risk LeoLabs CDM for a subscribed sat.
+) -> tuple[str, str]:
+    """The (min_tca, max_tca) TCA window a fetch searches, as LeoLabs strings.
 
-    Maps the NORAD id to its LeoLabs catalog number via the registry, searches
-    CDMs filtered to the LeoLabs source in the TCA window, and returns the
-    highest-risk CDM that parses and passes the parser's guards. CDMs that fail a
-    guard (e.g. a non-CALCULATED covariance from an 18th Space CDM that slipped
-    through) are skipped, not fatal.
+    Returned as well as used so a listing response can state the window its rows
+    came from; an empty table means something different over one hour than over
+    seven days, and the caller should not have to guess which it asked for.
+    """
+    return (
+        (now - timedelta(days=lookback_days)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        (now + timedelta(days=lookahead_days)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
 
-    Returns None when there are no scorable CDMs in the window. Raises
-    LeoLabsRuntimeError when the primary is not in our subscribed registry, and
-    propagates LeoLabsError subclasses on transport/auth failures.
+
+def _scorable_in_risk_order(
+    primary_norad: int,
+    client: Optional[LeoLabsClient],
+    registry: Optional[AssetRegistry],
+    now: datetime,
+    lookback_days: int,
+    lookahead_days: int,
+) -> Iterator[ParsedLeoLabsCDM]:
+    """Yield every scorable CDM for a subscribed sat, highest risk first.
+
+    A generator on purpose. The singular fetch takes the first item and stops, so
+    it still parses only as far as it needs to -- the same lazy behaviour it had
+    before SCRUM-422 split this out -- while the list fetch drains it. One code
+    path, two consumption patterns, no duplicated fetch/sort/skip logic.
+
+    CDMs that fail a guard (e.g. a non-CALCULATED covariance from an 18th Space
+    CDM that slipped through) are skipped, not fatal.
     """
     global _last_fetch_utc
 
@@ -187,9 +208,7 @@ def fetch_leolabs_conjunction(
             f"registry; it cannot be screened on this account."
         )
 
-    now = now or datetime.now(timezone.utc)
-    min_tca = (now - timedelta(days=lookback_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    max_tca = (now + timedelta(days=lookahead_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    min_tca, max_tca = conjunction_window(now, lookback_days, lookahead_days)
 
     cdms = client.search_conjunction_cdms(
         object1=catalog, min_tca=min_tca, max_tca=max_tca, cdm_source="LeoLabs"
@@ -200,8 +219,9 @@ def fetch_leolabs_conjunction(
             extra={"event": "leolabs_no_cdms", "catalog": catalog,
                    "primary_norad": primary_norad},
         )
-        return None
+        return
 
+    yielded = 0
     for cdm in sorted(cdms, key=_risk_key):
         try:
             our_id = registry.resolve_our_catalog_id(cdm)
@@ -214,20 +234,85 @@ def fetch_leolabs_conjunction(
             )
             continue
         _last_fetch_utc = now.isoformat().replace("+00:00", "Z")
+        yielded += 1
+        yield parsed
+
+    if yielded == 0:
+        log.info(
+            "no scorable LeoLabs CDMs after guards",
+            extra={"event": "leolabs_no_scorable_cdms", "catalog": catalog},
+        )
+
+
+def fetch_leolabs_conjunctions(
+    primary_norad: int,
+    *,
+    client: Optional[LeoLabsClient] = None,
+    registry: Optional[AssetRegistry] = None,
+    now: Optional[datetime] = None,
+    lookback_days: int = _DEFAULT_LOOKBACK_DAYS,
+    lookahead_days: int = _DEFAULT_LOOKAHEAD_DAYS,
+) -> List[ParsedLeoLabsCDM]:
+    """Fetch and parse every scorable LeoLabs CDM for a subscribed sat.
+
+    SCRUM-422. The search was always fetching the whole window; SCRUM-412 simply
+    discarded everything below the top. This returns the lot, ordered highest Pc
+    first with earliest TCA as the tie-break -- the same ordering the UDL path
+    selects on, so a table sorted by this list and a single evaluate agree about
+    which conjunction is worst.
+
+    Returns an empty list when there are no scorable CDMs in the window; an empty
+    window is a real and unremarkable state of the world, not an error. Raises
+    LeoLabsRuntimeError when the primary is not in our subscribed registry, and
+    propagates LeoLabsError subclasses on transport/auth failures.
+
+    Note that this is one entry per CDM. LeoLabs reissues CDMs for the same event
+    as the solution refines, so a caller rendering a table should pass the result
+    through leolabs_conjunction_list.dedupe_by_event first.
+    """
+    now = now or datetime.now(timezone.utc)
+    return list(
+        _scorable_in_risk_order(
+            primary_norad, client, registry, now, lookback_days, lookahead_days
+        )
+    )
+
+
+def fetch_leolabs_conjunction(
+    primary_norad: int,
+    *,
+    client: Optional[LeoLabsClient] = None,
+    registry: Optional[AssetRegistry] = None,
+    now: Optional[datetime] = None,
+    lookback_days: int = _DEFAULT_LOOKBACK_DAYS,
+    lookahead_days: int = _DEFAULT_LOOKAHEAD_DAYS,
+) -> Optional[ParsedLeoLabsCDM]:
+    """Fetch and parse the highest-risk LeoLabs CDM for a subscribed sat.
+
+    The first item of fetch_leolabs_conjunctions, and nothing more. Unchanged
+    behaviour from SCRUM-412: same window, same ordering, same skipping of
+    guard-failing CDMs, and still stops parsing as soon as one CDM is scorable.
+
+    Returns None when there are no scorable CDMs in the window. Raises
+    LeoLabsRuntimeError when the primary is not in our subscribed registry, and
+    propagates LeoLabsError subclasses on transport/auth failures.
+    """
+    now = now or datetime.now(timezone.utc)
+    parsed = next(
+        _scorable_in_risk_order(
+            primary_norad, client, registry, now, lookback_days, lookahead_days
+        ),
+        None,
+    )
+    if parsed is not None:
         log.info(
             "LeoLabs conjunction selected",
-            extra={"event": "leolabs_conjunction_selected", "catalog": catalog,
+            extra={"event": "leolabs_conjunction_selected",
                    "primary_norad": primary_norad,
                    "cdm_id": parsed.provenance.get("cdm_id"),
                    "event_id": parsed.provenance.get("event_id")},
         )
-        return parsed
-
-    log.info(
-        "no scorable LeoLabs CDMs after guards",
-        extra={"event": "leolabs_no_scorable_cdms", "catalog": catalog},
-    )
-    return None
+    return parsed
 
 
 # ---------------------------------------------------------------------------

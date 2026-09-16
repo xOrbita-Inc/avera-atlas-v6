@@ -29,6 +29,7 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -57,7 +58,18 @@ from common.operator_policy import OperatorPolicy, CovarianceSurrogate
 from common.spacetrack_tle import fetch_catalog_objects
 from common.udl_client import UDL_ENABLED, get_conjunctions, get_credential_validity
 from common import leolabs_runtime
-from common.leolabs_runtime import LEOLABS_ENABLED, fetch_leolabs_conjunction
+from common.leolabs_runtime import (
+    LEOLABS_ENABLED,
+    LeoLabsRuntimeError,
+    fetch_leolabs_conjunction,
+    fetch_leolabs_conjunctions,
+)
+from common.leolabs_conjunction_list import (
+    conjunction_row,
+    dedupe_by_event,
+    select_conjunction,
+    selector_from_conjunction_block,
+)
 from common.leolabs_evaluate import build_evaluate_request
 
 # ---------------------------------------------------------------------------
@@ -853,6 +865,108 @@ async def leolabs_status() -> Dict[str, Any]:
         }
 
 
+@svc.get("/v1/leolabs/conjunctions")
+async def leolabs_conjunctions(
+    primary_norad: int,
+    lookahead_days: int = leolabs_runtime.DEFAULT_LOOKAHEAD_DAYS,
+    lookback_days: int = leolabs_runtime.DEFAULT_LOOKBACK_DAYS,
+) -> JSONResponse:
+    """SCRUM-422: list a subscribed asset's live LeoLabs conjunctions.
+
+    A read, not a scoring run. It returns one row per conjunction event in the
+    TCA window, ordered highest Pc first with earliest TCA as the tie-break, so
+    the dashboard's Active Conjunctions table (SCRUM-421) can render an asset's
+    real close approaches without paying for an evaluate per row. Each row
+    carries a selector (cdm_id / event_id / secondary_norad) that POST
+    /v1/evaluate accepts, which is what makes a row individually clickable.
+
+    The Pc on a row is LeoLabs' own, labelled pc_source="leolabs_cdm". The
+    planner's Pc for a row comes from scoring it.
+
+    Status codes, and why each is what it is:
+      200  A listing, possibly empty. An empty window is a real state of the
+           world -- the asset has nothing coming up -- not an error.
+      404  The NORAD id is not in this account's subscribed-objects registry, so
+           there is nothing to list and never will be until it is subscribed.
+      422  The requested window is wider than the LeoLabs 30-day cap.
+      503  LeoLabs is disabled, or the fetch failed. Deliberately not an empty
+           200: "the feed is off" and "the sky is clear" must not look alike on
+           an operator's screen.
+    """
+    if not LEOLABS_ENABLED:
+        return JSONResponse(
+            status_code=503,
+            content=error_response(
+                "LEOLABS_ENABLED=false; the live conjunction list is unavailable"
+            ),
+        )
+
+    if lookback_days < 0 or lookahead_days < 0:
+        return JSONResponse(
+            status_code=422,
+            content=error_response("lookback_days and lookahead_days must be >= 0"),
+        )
+    if lookback_days + lookahead_days > leolabs_runtime.MAX_WINDOW_DAYS:
+        return JSONResponse(
+            status_code=422,
+            content=error_response(
+                f"requested window spans {lookback_days + lookahead_days} days; "
+                f"LeoLabs caps minTca..maxTca at {leolabs_runtime.MAX_WINDOW_DAYS}"
+            ),
+        )
+
+    now = datetime.now(timezone.utc)
+    try:
+        parsed = fetch_leolabs_conjunctions(
+            int(primary_norad),
+            now=now,
+            lookback_days=lookback_days,
+            lookahead_days=lookahead_days,
+        )
+    except LeoLabsRuntimeError as exc:
+        return JSONResponse(status_code=404, content=error_response(str(exc)))
+    except Exception as exc:
+        log.warning(
+            "LeoLabs conjunction list failed",
+            extra={"event": "leolabs_list_failed",
+                   "primary_norad": primary_norad, "exc": str(exc)},
+        )
+        return JSONResponse(
+            status_code=503,
+            content=error_response(f"LeoLabs fetch failed: {exc}"),
+        )
+
+    events = dedupe_by_event(parsed)
+    min_tca, max_tca = leolabs_runtime.conjunction_window(
+        now, lookback_days, lookahead_days
+    )
+    log.info(
+        "LeoLabs conjunction list served",
+        extra={"event": "leolabs_list_served", "primary_norad": primary_norad,
+               "cdm_count": len(parsed), "count": len(events)},
+    )
+    return JSONResponse(
+        status_code=200,
+        content={
+            "primary_norad": int(primary_norad),
+            "source": "leolabs",
+            "count": len(events),
+            # Rows are deduped to one per conjunction event; cdm_count is how
+            # many CDMs those events were distilled from, so a caller can see
+            # that reissues were collapsed rather than dropped.
+            "cdm_count": len(parsed),
+            "window": {
+                "min_tca_utc": min_tca,
+                "max_tca_utc": max_tca,
+                "lookback_days": lookback_days,
+                "lookahead_days": lookahead_days,
+            },
+            "fetched_at_utc": now.isoformat().replace("+00:00", "Z"),
+            "conjunctions": [conjunction_row(p, now=now) for p in events],
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # Single conjunction (unchanged from 9.6 except logging converted to JSON)
 # ---------------------------------------------------------------------------
@@ -895,8 +1009,41 @@ async def post_evaluate(request: Request):
         # it simply means "evaluate what I gave you" and the response reports
         # source=surrogate rather than leolabs.
         if ll_primary:
+            # SCRUM-422: an operator clicking a row in the live Active
+            # Conjunctions table sends that row's selector back, and we score
+            # that conjunction instead of whatever is currently top of the list.
+            # With no selector this is byte-for-byte the SCRUM-412 call, so the
+            # existing single-evaluate path is untouched rather than merely
+            # equivalent.
+            ll_selector = selector_from_conjunction_block(
+                body.get("conjunction") or {}
+            )
             try:
-                parsed_ll = fetch_leolabs_conjunction(int(ll_primary))
+                if ll_selector:
+                    parsed_ll = select_conjunction(
+                        fetch_leolabs_conjunctions(int(ll_primary)), ll_selector
+                    )
+                    if parsed_ll is None:
+                        # The row is gone from the window, or never existed.
+                        # Silently scoring the highest-risk conjunction instead
+                        # would label another object's numbers as the one the
+                        # operator clicked, so this is a 404 and the dashboard
+                        # re-reads the list.
+                        log.info(
+                            "LeoLabs selector matched no conjunction",
+                            extra={"event": "leolabs_selector_no_match",
+                                   "primary_norad": ll_primary,
+                                   "selector": ll_selector},
+                        )
+                        return JSONResponse(
+                            status_code=404,
+                            content=error_response(
+                                f"no LeoLabs conjunction in the current window matches "
+                                f"{ll_selector}; re-read /v1/leolabs/conjunctions"
+                            ),
+                        )
+                else:
+                    parsed_ll = fetch_leolabs_conjunction(int(ll_primary))
             except Exception as exc:
                 log.warning(
                     "LeoLabs fetch failed",
