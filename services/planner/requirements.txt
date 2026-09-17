@@ -6,3 +6,4 @@ pyyaml>=6.0
 sgp4>=2.22
 scipy==1.11.4        # SCRUM-388: required by libs/aps_math.pc_utils (matches propagator pin)
 astropy>=6.0,<8.0  # SCRUM-381: TEME to J2000 ECI normalization
+jsonschema>=4.0  # SCRUM-382: validates GNC command/ack/report round-trips against openapi/gnc_interface.yaml in tests
