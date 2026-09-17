@@ -52,6 +52,17 @@ from common.evidence_record import (
 from common.atlas_artifact import build_atlas_artifact, DecisionLog
 from common.monitor_adapter import evaluate_request as evaluate_decision_state_machine
 from common.mode_persistence import build_mode_store
+from common import gnc_client
+from common.gnc_client import emit_gnc_command
+from common.gnc_command import GNCCommandContext, build_gnc_command
+from common.gnc_operator import (
+    OperatorCommandStore,
+    approval_ack,
+    record_approval,
+    record_veto,
+    veto_ack,
+)
+from common.gnc_report import assess_post_burn, build_report_ack
 from common.satellite_capability import SatelliteCapability
 from common.logging_setup import build_logger, _POLICY_CONFIG_PATH, SERVICE_NAME, SERVICE_VERSION
 from common.operator_policy import OperatorPolicy, CovarianceSurrogate
@@ -350,6 +361,12 @@ def _post_planner_output(
 # silently retained modes between unrelated requests would be worse than none,
 # because a mode left over from another event would read as this one's.
 _MODE_STORE = build_mode_store()
+
+# SCRUM-382: the latest operator approve/veto per conjunction, so an operator
+# decision reaches the state machine that acts on it. Process-local, same
+# posture as the mode store's default; an explicit flag on the evaluate request
+# still wins, so this never becomes a hidden source of authority.
+_OPERATOR_COMMANDS = OperatorCommandStore()
 
 # SCRUM-377: audit writes must not fail silently. A missing evidence record is
 # as damaging as a modified one, and the old fire-and-forget path swallowed
@@ -878,6 +895,327 @@ async def leolabs_status() -> Dict[str, Any]:
         }
 
 
+@svc.get("/gnc-status")
+async def gnc_status() -> Dict[str, Any]:
+    """SCRUM-382: GNC emission mode for the dashboard badge.
+
+    Mirrors /leolabs-status and /udl-status. record_only is the normal state
+    today: no GNC service exists yet, so commands are built and recorded rather
+    than emitted, and they carry no acknowledgement.
+    """
+    try:
+        return gnc_client.get_status()
+    except Exception as exc:
+        log.warning(
+            "gnc status probe raised unexpectedly",
+            extra={"event": "gnc_status_error", "exc": str(exc)},
+        )
+        return {"enabled": False, "mode": "disabled", "label": "GNC DISABLED",
+                "note": f"status probe failed: {exc}"}
+
+
+def _persisted_for_conjunction(conjunction_id: str):
+    """The persisted mode record matching a conjunction, or None.
+
+    The mode store is keyed by satellite, and an operator command arrives keyed
+    by conjunction, so this walks the one to find the other. Returns None rather
+    than guessing when the store holds a different conjunction: acking an
+    approval against the wrong event would be worse than refusing it.
+    """
+    store = _MODE_STORE
+    reader = getattr(store, "_states", None)
+    candidates = list(reader.values()) if isinstance(reader, dict) else []
+    for state in candidates:
+        if state.conjunction_id == conjunction_id:
+            return state
+    return None
+
+
+@svc.post("/v1/gnc/approve")
+async def gnc_approve(request: Request) -> JSONResponse:
+    """SCRUM-382: operator approval for a staged L1 burn (contract: approveGNCCommand).
+
+    Records the approval against its conjunction so the next /v1/evaluate carries
+    it into the state machine's approval inputs, and returns the contract's
+    GNCApprovalAck. The approval is permission; the burn itself is still the
+    state machine's decision on the next evaluation, where every M2 guard is
+    re-checked.
+    """
+    try:
+        command: Dict[str, Any] = await request.json()
+    except Exception:
+        return JSONResponse(status_code=422, content=error_response("Invalid JSON body"))
+
+    missing = [
+        f for f in ("command_id", "conjunction_id", "issued_by", "issued_at_utc")
+        if not command.get(f)
+    ]
+    if missing:
+        return JSONResponse(
+            status_code=422,
+            content=error_response(
+                f"GNCApprovalCommand is missing required field(s): {missing}"
+            ),
+        )
+
+    persisted = _persisted_for_conjunction(str(command["conjunction_id"]))
+    ack = approval_ack(
+        command,
+        current_mode=persisted.mode if persisted else None,
+        has_staged_command=bool(persisted and persisted.command is not None),
+    )
+    try:
+        record_approval(_OPERATOR_COMMANDS, command, ack["approval_accepted"])
+    except Exception as exc:
+        log.warning(
+            "operator approval could not be recorded",
+            extra={"event": "gnc_approval_record_failed", "exc": str(exc)},
+        )
+    log.info(
+        "operator approval received",
+        extra={"event": "gnc_approval_received",
+               "command_id": ack["command_id"],
+               "conjunction_id": ack["conjunction_id"],
+               "approval_accepted": ack["approval_accepted"],
+               "issued_by": command.get("issued_by")},
+    )
+    return JSONResponse(status_code=200, content=ack)
+
+
+@svc.post("/v1/gnc/veto")
+async def gnc_veto(request: Request) -> JSONResponse:
+    """SCRUM-382: operator veto of a committed L2 burn (contract: vetoGNCCommand).
+
+    A veto inside the window is accepted and re-stages per section 3's M2 to M2
+    row. A veto after veto_window_close_utc is not accepted and the burn
+    proceeds, with the reason in late_veto_note, per the contract.
+    """
+    try:
+        command: Dict[str, Any] = await request.json()
+    except Exception:
+        return JSONResponse(status_code=422, content=error_response("Invalid JSON body"))
+
+    missing = [
+        f for f in ("command_id", "conjunction_id", "issued_by", "issued_at_utc")
+        if not command.get(f)
+    ]
+    if missing:
+        return JSONResponse(
+            status_code=422,
+            content=error_response(
+                f"GNCVetoCommand is missing required field(s): {missing}"
+            ),
+        )
+
+    persisted = _persisted_for_conjunction(str(command["conjunction_id"]))
+    window_closed = bool(command.get("window_closed", False))
+    ack = veto_ack(
+        command,
+        current_mode=persisted.mode if persisted else None,
+        window_closed=window_closed,
+    )
+    try:
+        record_veto(_OPERATOR_COMMANDS, command, ack["veto_accepted"])
+    except Exception as exc:
+        log.warning(
+            "operator veto could not be recorded",
+            extra={"event": "gnc_veto_record_failed", "exc": str(exc)},
+        )
+    log.info(
+        "operator veto received",
+        extra={"event": "gnc_veto_received",
+               "command_id": ack["command_id"],
+               "conjunction_id": ack["conjunction_id"],
+               "veto_accepted": ack["veto_accepted"],
+               "issued_by": command.get("issued_by")},
+    )
+    return JSONResponse(status_code=200, content=ack)
+
+
+@svc.post("/v1/gnc/report")
+async def gnc_report_endpoint(request: Request) -> JSONResponse:
+    """SCRUM-382: the post-burn execution report, GNC to APS (receiveGNCReport).
+
+    Re-evaluates the risk on the state the burn actually produced, assembles the
+    MAF section 10 producers SCRUM-382 owns, records them on the SCRUM-377
+    evidence trail next to the decision that authorised the burn, and returns the
+    contract's GNCReportAck.
+
+    The post-maneuver Pc is computed by maneuver_scorer.compute_pc_post; the
+    ExecutionError block is SCRUM-365's and is carried through unchanged.
+    """
+    try:
+        report: Dict[str, Any] = await request.json()
+    except Exception:
+        return JSONResponse(status_code=422, content=error_response("Invalid JSON body"))
+
+    missing = [
+        f for f in ("command_id", "conjunction_id", "execution_status")
+        if not report.get(f)
+    ]
+    if missing:
+        return JSONResponse(
+            status_code=422,
+            content=error_response(
+                f"GNCReport is missing required field(s): {missing}"
+            ),
+        )
+
+    risk = report.get("aps_risk_context") or {}
+    try:
+        assessment = assess_post_burn(
+            report,
+            commanded_dv_m_s=risk.get("commanded_dv_m_s"),
+            commanded_dv_rtn_m_s=risk.get("commanded_dv_rtn_m_s"),
+            r_rel_km_at_tca=risk.get("r_rel_km_at_tca"),
+            v_rel_km_s_at_tca=risk.get("v_rel_km_s_at_tca"),
+            p_pre_km2=risk.get("p_pre_km2"),
+            hbr_m=risk.get("hbr_m"),
+            pc_pre=risk.get("pc_pre"),
+            pc_monitor_threshold=risk.get(
+                "pc_monitor_threshold", OperatorPolicy.__dataclass_fields__[
+                    "pc_monitor_threshold"].default
+            ),
+        )
+    except Exception as exc:
+        log.error(
+            "GNC report could not be assessed",
+            extra={"event": "gnc_report_assess_failed",
+                   "command_id": report.get("command_id"), "exc": str(exc)},
+        )
+        return JSONResponse(
+            status_code=500,
+            content=error_response(f"report assessment failed: {exc}"),
+        )
+
+    # Additive, like every other audit write on this service: a failed evidence
+    # append is logged and counted, and the ack still goes back to GNC. A GNC
+    # layer left waiting on an ack because our audit store was down would be a
+    # worse failure than a gap we can see in the chain.
+    _post_gnc_report_record(assessment, report)
+
+    log.info(
+        "GNC report consumed",
+        extra={"event": "gnc_report_consumed",
+               "command_id": assessment.command_id,
+               "execution_status": assessment.execution_status,
+               "pc_post": assessment.pc_post,
+               "replan_required": assessment.replan_required},
+    )
+    return JSONResponse(status_code=200, content=build_report_ack(assessment))
+
+
+def _emit_to_gnc(result, monitor, scoring, artifact, sat_dict) -> None:
+    """SCRUM-382: assemble the GNCCommand for an authorised burn and emit it.
+
+    Additive throughout. When GNC is disabled nothing is attached and the
+    evaluate response is byte-identical to its pre-382 shape; when GNC is in
+    record-only mode the command is attached but carries no ack, because nothing
+    acknowledged it.
+    """
+    if gnc_client.emission_mode() == gnc_client.MODE_DISABLED:
+        return
+
+    authorized = monitor.authorized_execution
+    inputs = monitor.inputs
+    risk = artifact.risk_summary
+
+    context = GNCCommandContext(
+        approving_identity=str(inputs.envelope_approving_identity or "unattributed"),
+        r_sat_km=tuple(float(v) for v in sat_dict.get("r_sat_km", (0.0, 0.0, 0.0))),
+        v_sat_km_s=tuple(float(v) for v in sat_dict.get("v_sat_km_s", (0.0, 0.0, 0.0))),
+        direction=str(scoring.direction),
+        # The scorer models an impulsive burn, so there is no computed duration.
+        # Reported as zero rather than as a fabricated non-zero: a made-up burn
+        # duration is a number GNC would plan a slew around.
+        burn_duration_s=float(sat_dict.get("burn_duration_s", 0.0)),
+        epsilon_threshold=float(
+            inputs.validity_evidence.get("epsilon_threshold", 0.20)
+        ),
+        pc_computed=float(authorized.validity_epsilon if scoring.pc_pre is None
+                          else scoring.pc_pre),
+        m2_pre=float(scoring.m2_pre),
+        data_age_s=float(inputs.data_age_s if inputs.data_age_s is not None else 0.0),
+        t_ca_utc=str(risk.tca_utc or ""),
+        latest_burn_utc=(
+            inputs.latest_burn_utc.isoformat().replace("+00:00", "Z")
+            if inputs.latest_burn_utc else authorized.t_burn_utc
+        ),
+        veto_window_open_utc=authorized.authorized_at_utc,
+        veto_window_close_utc=(
+            inputs.veto_window_close_utc.isoformat().replace("+00:00", "Z")
+            if inputs.veto_window_close_utc else ""
+        ),
+        # The contract requires a safe-action reference. Passive hold is the
+        # honest default: APS has no canned nudge defined, and naming one that
+        # does not exist would tell GNC it has a fallback it does not have.
+        safe_action_id=f"passive-hold-{authorized.conjunction_id}",
+        safe_action_type="passive_hold",
+        weak_directions=tuple(inputs.validity_evidence.get("weak_directions", ()) or ()),
+        phenomenologies_used=tuple(
+            inputs.validity_evidence.get("phenomenologies_used", ()) or ()
+        ),
+        dv_return_m_s=getattr(scoring, "dv_return_m_s", None),
+    )
+    gnc_command = build_gnc_command(authorized, context)
+    emission = emit_gnc_command(gnc_command)
+
+    result["gnc_command"] = gnc_command
+    result["gnc_emission"] = emission.to_dict()
+    log.info(
+        "GNC command assembled",
+        extra={"event": "gnc_command_assembled",
+               "command_id": gnc_command["command_id"],
+               "mode": emission.mode,
+               "acknowledged": emission.acknowledged},
+    )
+
+
+def _post_gnc_report_record(assessment, report: Dict[str, Any]) -> Optional[str]:
+    """Append the post-burn outcome to this satellite's evidence chain."""
+    chain_id = str(report.get("sat_id") or assessment.conjunction_id or "UNKNOWN")
+    record_id = "?"
+    try:
+        head = http_requests.get(
+            f"{_ingest_url()}/store/evidence/{chain_id}/head", timeout=5.0
+        ).json()
+        values = {
+            "conjunction_id": assessment.conjunction_id,
+            "timestamp": report.get("reported_at_utc")
+            or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "software_version": SERVICE_VERSION,
+            **assessment.evidence_values(),
+        }
+        record = build_decision_record(
+            chain_id=chain_id,
+            seq=int(head.get("next_seq", 0)),
+            prev_hash=head.get("content_hash", GENESIS_HASH),
+            values=values,
+        )
+        record_id = record.record_id
+        resp = http_requests.post(
+            f"{_ingest_url()}/evidence_record",
+            json={
+                "record": record.to_dict(),
+                "canonical_payload": canonical_json(record._hashable_payload()),
+            },
+            timeout=5.0,
+        )
+        if resp.status_code != 201:
+            _note_audit_failure(
+                "gnc_report", record_id, f"status {resp.status_code}"
+            )
+            return None
+        log.info(
+            "GNC report record appended",
+            extra={"event": "gnc_report_record_appended", "record_id": record_id},
+        )
+        return record_id
+    except Exception as exc:
+        _note_audit_failure("gnc_report", record_id, str(exc))
+        return None
+
+
 @svc.get("/v1/leolabs/conjunctions")
 async def leolabs_conjunctions(
     primary_norad: int,
@@ -1378,6 +1716,18 @@ async def post_evaluate(request: Request):
                 if monitor.authorized_execution is not None:
                     # The signal SCRUM-382 consumes to assemble the GNC command.
                     result["authorized_execution"] = monitor.authorized_execution.to_dict()
+                    # SCRUM-382: build and emit. Nested try/except of its own so
+                    # a GNC problem cannot cost us the decision record either --
+                    # the authorisation stands whether or not it reached GNC.
+                    try:
+                        _emit_to_gnc(result, monitor, scoring, artifact, sat_dict)
+                    except Exception as exc:
+                        log.warning(
+                            "GNC emission failed",
+                            extra={"event": "gnc_emission_failed",
+                                   "conjunction_id": scoring.conjunction_id,
+                                   "exc": str(exc)},
+                        )
                 _post_transition_record(artifact, monitor, _pol)
                 log.info(
                     "decision state machine evaluated",
