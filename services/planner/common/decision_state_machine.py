@@ -446,6 +446,31 @@ class GuardInputs:
         if self.t_now_utc is None:
             raise ValueError("t_now_utc is required")
 
+        # SCRUM-380, MAF v2.0 section 6: the locked floors are not negotiable.
+        #
+        # SCRUM-379 made these fields with locked defaults, which stops an
+        # accident but not an argument: a caller passing min_hours_before_tca=1.0
+        # or m2_safe_threshold=1.0 would have been honoured, and the floor would
+        # have been loosened by the request it was meant to constrain.
+        #
+        # Clamped in one direction only. A caller may be MORE cautious than the
+        # floor -- a longer TCA lead, a stricter separation, a shorter freshness
+        # window -- and that value is kept. Anything laxer is discarded and the
+        # locked value stands. A genuine threshold change is an escalation to
+        # Minh, not a field on a request.
+        object.__setattr__(
+            self, "min_hours_before_tca",
+            max(float(self.min_hours_before_tca), MIN_HOURS_BEFORE_TCA),
+        )
+        object.__setattr__(
+            self, "m2_safe_threshold",
+            max(float(self.m2_safe_threshold), M2_SAFE_MAHALANOBIS),
+        )
+        object.__setattr__(
+            self, "data_freshness_bound_s",
+            min(float(self.data_freshness_bound_s), DATA_FRESHNESS_BOUND_S),
+        )
+
     # -- derived quantities, all pure --------------------------------------
 
     def hours_to_tca(self) -> Optional[float]:

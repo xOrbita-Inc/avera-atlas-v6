@@ -571,13 +571,17 @@ class TestM1ToM2:
             "authority_l1_or_l2",
         ]
 
-    def test_the_section_3_seven_are_followed_by_the_scrum_380_baseline_floor(self):
-        """SCRUM-380 adds the ground-validated-baseline floor to the AND. It is
-        a MAF section 6 floor layered on top of the section 3 row, not one of
-        its seven, so it sits after them rather than being interleaved."""
+    def test_the_section_3_seven_are_followed_by_the_scrum_380_floors(self):
+        """SCRUM-380 adds MAF section 6 floors to the AND. They are layered on
+        top of the section 3 row, not among its seven, so they sit after them
+        rather than being interleaved."""
         names = [g.name for g in m1_to_m2_guards(staged_inputs())]
 
-        assert names[7:] == ["authority_baseline_validated"]
+        assert names[7:] == [
+            "authority_baseline_validated",
+            "cdm_record_usable",
+            "l3_pre_verified_safe_action",
+        ]
 
     def test_the_baseline_event_satisfies_every_guard_and_stages(self):
         decision = evaluate_safety_monitor(staged_inputs())

@@ -16,7 +16,7 @@ implementation.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 import pytest
 
@@ -29,7 +29,7 @@ from common.mode_persistence import (
 from common.safety_floors import ABORT_EVENT, ABORT_TRIGGER, GroundAbortCommand
 from common.safety_monitor import evaluate_safety_monitor
 
-from test_safety_monitor import T_NOW, a_command, staged_inputs
+from test_safety_monitor import T_NOW, staged_inputs
 
 ABORT = GroundAbortCommand(
     abort_reason="conjunction superseded by a closer event",

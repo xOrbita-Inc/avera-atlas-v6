@@ -49,7 +49,6 @@ from common.safety_floors import (
     BASELINE_TRIGGER,
     L3_TRIGGER,
     RECORD_QUALITY_TRIGGER,
-    baseline_change_reason,
     l3_refusal_reason,
 )
 
@@ -518,6 +517,49 @@ def guard_last_cdm_still_fresh(inputs: GuardInputs) -> GuardResult:
     )
 
 
+def guard_cdm_record_usable(inputs: GuardInputs) -> GuardResult:
+    """SCRUM-380, MAF v2.0 section 6: degraded or zero-filled records are
+    rejected, not parsed.
+
+    The freshness guard asks how old the record is. This asks whether there is a
+    record at all. A zero-filled covariance does not mean "no uncertainty", it
+    means the record carries no covariance, and scoring it yields a
+    confident-looking Pc computed from nothing -- worse than having no record,
+    because it looks like an answer.
+
+    Deliberately not the artifact's covariance_quality, which reads 'degraded'
+    or 'dilution_region' for a real covariance in an awkward geometry. Those are
+    legitimate, scorable conjunctions.
+    """
+    name = "cdm_record_usable"
+    reason = inputs.cdm_record_rejected_reason
+    values = {"cdm_record_rejected_reason": reason or None}
+    if not reason:
+        return GuardResult(name, True, "CDM record is structurally usable", values)
+    return GuardResult(name, False, f"{RECORD_QUALITY_TRIGGER}: {reason}", values)
+
+
+def guard_l3_pre_verified_action(inputs: GuardInputs) -> GuardResult:
+    """SCRUM-380: an L3 authorization is refused without a pre-verified safe
+    action.
+
+    Guard doc section 5 gates L3 to a later phase. The only part of L3 that
+    exists today is this refusal; nothing here executes an L3 maneuver, and a
+    passing check is not permission to -- it only means the floor did not fire.
+    """
+    name = "l3_pre_verified_safe_action"
+    reason = l3_refusal_reason(inputs.authority(), inputs.pre_verified_safe_action)
+    values = {
+        "requested_authority": inputs.authority() or None,
+        "pre_verified_safe_action": inputs.pre_verified_safe_action or None,
+    }
+    if not reason:
+        return GuardResult(
+            name, True, "L3 refusal floor does not apply to this request", values
+        )
+    return GuardResult(name, False, f"{L3_TRIGGER}: {reason}", values)
+
+
 def guard_no_ground_abort(inputs: GuardInputs) -> GuardResult:
     """SCRUM-380, MAF v2.0 section 6: no ground-commanded abort is standing.
 
@@ -707,9 +749,12 @@ def m1_to_m2_guards(inputs: GuardInputs) -> Tuple[GuardResult, ...]:
         guard_secondary_clear(inputs),
         guard_slew_feasible(inputs),
         guard_authority_l1_or_l2(inputs),
-        # SCRUM-380: the configuration ground validated. Last in the tuple
-        # because it is an addition to the section 3 row, not one of its seven.
+        # SCRUM-380: floors layered on top of the section 3 row, not among its
+        # seven, so they sit after them. A hollow record blocks staging here
+        # (holding M1); a staged event with one escalates via the M2 set.
         guard_authority_baseline_validated(inputs),
+        guard_cdm_record_usable(inputs),
+        guard_l3_pre_verified_action(inputs),
     )
 
 
@@ -782,6 +827,13 @@ def _m2_escalation_guards(inputs: GuardInputs) -> Tuple[GuardResult, ...]:
     results: List[GuardResult] = [
         result for result in m2_continuous_guards(inputs) if not result.passed
     ]
+
+    # SCRUM-380. Staged is past the point where blocking is enough: a burn is
+    # loaded against a record that turns out to be hollow, so it escalates.
+    for guard in (guard_cdm_record_usable, guard_authority_baseline_validated):
+        result = guard(inputs)
+        if not result.passed:
+            results.append(result)
 
     if inputs.approval_command_received and inputs.approval_accepted is False:
         results.append(guard_l1_approval_accepted(inputs))

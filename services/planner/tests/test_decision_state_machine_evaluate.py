@@ -129,7 +129,7 @@ _DISTANT_CATALOG = [
 ]
 
 
-def _ingest_get(cdm_available: bool = True):
+def _ingest_get(cdm_available: bool = True, cdm_zero_filled: bool = False):
     """Stand in for the two ingest reads /v1/evaluate makes.
 
     The CDM read has to return a real RTN covariance, or the planner falls back
@@ -146,10 +146,17 @@ def _ingest_get(cdm_available: bool = True):
             if not cdm_available:
                 return MagicMock(status_code=404, ok=False)
             response = MagicMock(status_code=200, ok=True)
+            # SCRUM-380: a zero-filled CDM is what the record-quality floor is
+            # for. It reaches the guard as a real_cdm covariance of all zeros,
+            # which is how a hollow record actually arrives -- from the store,
+            # not from the caller, whose covariance the adapter replaces.
+            cov = (
+                np.zeros((3, 3)) if cdm_zero_filled else np.diag([1e-4, 1e-4, 1e-4])
+            )
             response.json.return_value = {
                 "id": 4242,
                 "covariance_source": "real_cdm",
-                "covariance_combined_rtn": np.diag([1e-4, 1e-4, 1e-4]).tolist(),
+                "covariance_combined_rtn": cov.tolist(),
             }
             return response
         response = MagicMock(status_code=200, ok=True)
@@ -159,13 +166,15 @@ def _ingest_get(cdm_available: bool = True):
     return _get
 
 
-def _evaluate(body: dict, catalog=None, cdm_available: bool = True):
+def _evaluate(body: dict, catalog=None, cdm_available: bool = True,
+              cdm_zero_filled: bool = False):
     posts = MagicMock(return_value=MagicMock(status_code=201))
     with patch.object(server, "UDL_ENABLED", False), \
          patch.object(server, "fetch_catalog_objects",
                       return_value=list(_DISTANT_CATALOG if catalog is None else catalog)), \
          patch.object(server.http_requests, "post", posts), \
-         patch.object(server.http_requests, "get", side_effect=_ingest_get(cdm_available)):
+         patch.object(server.http_requests, "get",
+                      side_effect=_ingest_get(cdm_available, cdm_zero_filled)):
         response = TestClient(server.svc).post("/v1/evaluate", json=body)
     return response, posts
 
@@ -485,3 +494,97 @@ class TestModePersistenceThroughTheEndpoint:
         gap = response.json()["decision_state_machine"]["comms_gap"]
         assert gap["in_comms_gap"] is False
         assert gap["comms_gap_threshold_s"] == 600.0
+
+
+class TestScrum380FloorsThroughTheEndpoint:
+    """SCRUM-380 -- the abort and the L0 demotion reach /v1/evaluate, and a
+    failure in either still cannot break the core evaluate."""
+
+    def _abort_body(self):
+        body = _live_body()
+        body["monitor"] = {
+            "current_mode": "M2",
+            "veto_window_close_utc": _iso(_NOW - timedelta(seconds=1)),
+            "ground_abort": {
+                "abort_reason": "pass aborted by ground",
+                "operator_id": "ops-jhavera",
+                "command_id": "abort-42",
+            },
+        }
+        return body
+
+    def test_a_ground_abort_forces_m4_and_blocks_the_execute(self):
+        response, _ = _evaluate(self._abort_body())
+
+        decision = response.json()["decision_state_machine"]
+        assert decision["to_mode"] == FlightMode.M4_SAFE_HOLD.value
+        assert decision["aborted"] is True
+        assert decision["abort"]["operator_id"] == "ops-jhavera"
+        assert "authorized_execution" not in response.json()
+
+    def test_the_abort_is_recorded_on_the_evidence_chain(self):
+        _, posts = _evaluate(self._abort_body())
+
+        transitions = [
+            call.kwargs["json"]["record"] for call in posts.call_args_list
+            if "/evidence_record" in str(call[0])
+            and call.kwargs["json"]["record"]["record_type"] == "transition"
+        ]
+        assert transitions, "an abort is a transition and must be recorded"
+        provenance = transitions[0]["fields"]["inputs_and_provenance"]["value"]
+        assert provenance["ground_abort"]["abort_reason"] == "pass aborted by ground"
+        assert provenance["ground_abort"]["operator_id"] == "ops-jhavera"
+
+    def test_a_malformed_abort_block_does_not_break_the_evaluate(self):
+        """Additive discipline: the monitor may refuse the request, the core
+        evaluate still returns."""
+        body = _live_body()
+        body["monitor"] = {"ground_abort": {"operator_id": "ops-jhavera"}}
+        response, _ = _evaluate(body)
+
+        assert response.status_code == 200
+        assert "recommendation" in response.json()
+        assert "decision_state_machine" not in response.json()
+
+    def test_a_drifted_baseline_clamps_authority_to_l0_end_to_end(self):
+        body = _live_body()
+        body["monitor"] = {
+            "current_mode": "M2",
+            "veto_window_close_utc": _iso(_NOW - timedelta(seconds=1)),
+            "ground_validated_baseline": {
+                "envelope_version": "env-v1-sha256-somethingelse",
+                "monitor_logic_hash": "0" * 64,
+                "validated_by": "ground-ops",
+            },
+        }
+        response, _ = _evaluate(body)
+
+        decision = response.json()["decision_state_machine"]
+        assert decision["authority_effective"] == "L0"
+        assert decision["to_mode"] != FlightMode.M3_EXECUTING.value
+        assert "authorized_execution" not in response.json()
+
+    def test_no_baseline_leaves_the_live_path_working_as_before(self):
+        """The floor is change detection; an unbaselined caller is unaffected."""
+        body = _live_body()
+        body["monitor"] = {
+            "current_mode": "M2",
+            "veto_window_close_utc": _iso(_NOW - timedelta(seconds=1)),
+        }
+        response, _ = _evaluate(body)
+
+        assert response.json()["decision_state_machine"]["authority_effective"] == "L2"
+        assert "authorized_execution" in response.json()
+
+    def test_a_zero_filled_cdm_is_refused_rather_than_scored(self):
+        """A hollow record arrives from the store, not the caller: the planner
+        replaces whatever covariance a request supplies."""
+        body = _base_body()
+        body["monitor"] = {"current_mode": "M1"}
+        response, _ = _evaluate(body, cdm_zero_filled=True)
+
+        assert response.status_code == 200
+        guards = {
+            g["guard"]: g for g in response.json()["decision_state_machine"]["guards"]
+        }
+        assert guards["cdm_record_usable"]["passed"] is False

@@ -538,8 +538,21 @@ def _transition_evidence_values(artifact, monitor, policy: Dict[str, Any]) -> Di
             "covariance_source": inputs.covariance_source,
             "requested_mode": monitor.transition.requested_mode.value,
             "escalated": monitor.transition.escalated,
+            # SCRUM-380: the granted level and the level actually acted on. They
+            # differ when a baseline drift clamped authority to L0, and an
+            # auditor should not have to infer that from a declined execution.
+            "authority_granted": inputs.authority(),
+            "authority_effective": inputs.effective_authority(),
+            "authority_demotion_reason": inputs.authority_demotion(),
+            "post_burn_feasible": monitor.post_burn_feasible,
         },
     }
+    # SCRUM-380: the section 7 abort entry rides in the same tamper-evident
+    # record as the transition it caused, so the chain carries who commanded the
+    # stop and why, not merely that the mode changed.
+    abort_entry = monitor.abort_audit_entry()
+    if abort_entry is not None:
+        values["inputs_and_provenance"]["ground_abort"] = abort_entry
     for name in ("validity_status", "validity_epsilon", "epsilon_threshold",
                  "phenomenologies_used", "weak_directions"):
         if name in inputs.validity_evidence:
