@@ -30,6 +30,12 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 from common.authorization_envelope import LOCKED_MIN_TCA_HOURS
 from common.evidence_record import DEFINED_TRANSITIONS
 from common.evidence_record import FlightMode as EvidenceFlightMode
+from common.safety_floors import (
+    DEMOTED_AUTHORITY,
+    AuthorityBaseline,
+    GroundAbortCommand,
+    authority_demotion_reason,
+)
 
 # ---------------------------------------------------------------------------
 # Modes
@@ -410,6 +416,20 @@ class GuardInputs:
     subsystem_failure: str = ""
     operator_clearance_received: bool = False
 
+    # -- SCRUM-380 safety floors, MAF v2.0 section 6 ------------------------
+    # A ground abort. The highest-priority input here: evaluated before any
+    # guard so it can interrupt a staged or executing sequence during a pass.
+    ground_abort: Optional[GroundAbortCommand] = None
+    # The configuration ground last validated, and what is running now. A
+    # mismatch clamps authority to L0 until an explicit ground re-validate.
+    ground_validated_baseline: Optional[AuthorityBaseline] = None
+    monitor_logic_hash: str = ""
+    # Non-empty when the CDM record was refused outright as degraded or
+    # zero-filled. Reject-not-parse: a hollow record never reaches the guards.
+    cdm_record_rejected_reason: str = ""
+    # L3 is gated to a later phase; the only part that exists is the refusal.
+    pre_verified_safe_action: str = ""
+
     def __post_init__(self) -> None:
         object.__setattr__(self, "current_mode", as_mode(self.current_mode))
         if self.validity_routing is not None:
@@ -426,6 +446,31 @@ class GuardInputs:
         if self.t_now_utc is None:
             raise ValueError("t_now_utc is required")
 
+        # SCRUM-380, MAF v2.0 section 6: the locked floors are not negotiable.
+        #
+        # SCRUM-379 made these fields with locked defaults, which stops an
+        # accident but not an argument: a caller passing min_hours_before_tca=1.0
+        # or m2_safe_threshold=1.0 would have been honoured, and the floor would
+        # have been loosened by the request it was meant to constrain.
+        #
+        # Clamped in one direction only. A caller may be MORE cautious than the
+        # floor -- a longer TCA lead, a stricter separation, a shorter freshness
+        # window -- and that value is kept. Anything laxer is discarded and the
+        # locked value stands. A genuine threshold change is an escalation to
+        # Minh, not a field on a request.
+        object.__setattr__(
+            self, "min_hours_before_tca",
+            max(float(self.min_hours_before_tca), MIN_HOURS_BEFORE_TCA),
+        )
+        object.__setattr__(
+            self, "m2_safe_threshold",
+            max(float(self.m2_safe_threshold), M2_SAFE_MAHALANOBIS),
+        )
+        object.__setattr__(
+            self, "data_freshness_bound_s",
+            min(float(self.data_freshness_bound_s), DATA_FRESHNESS_BOUND_S),
+        )
+
     # -- derived quantities, all pure --------------------------------------
 
     def hours_to_tca(self) -> Optional[float]:
@@ -434,11 +479,39 @@ class GuardInputs:
         return (self.t_ca_utc - self.t_now_utc).total_seconds() / 3600.0
 
     def authority(self) -> str:
-        """Authority as a bare string, '' when the envelope granted none."""
+        """The authority the envelope states, before any SCRUM-380 clamp.
+
+        Recorded alongside effective_authority() so an audit entry can show that
+        the envelope said L2 and the machine acted at L0, rather than leaving a
+        reader to wonder why an L2 asset declined to execute.
+        """
         level = self.authority_level
         if level is None:
             return ""
         return getattr(level, "value", str(level))
+
+    def authority_demotion(self) -> str:
+        """Why authority is clamped to L0, or '' when it is not. SCRUM-380."""
+        return authority_demotion_reason(
+            self.ground_validated_baseline,
+            self.envelope_version,
+            self.monitor_logic_hash,
+        )
+
+    def effective_authority(self) -> str:
+        """The authority the machine may actually act on. SCRUM-380.
+
+        Clamped to L0 whenever the envelope version or the monitor logic differs
+        from the last ground-validated baseline. L0 is advisory only (section 5),
+        so one clamp here blocks every autonomous execution path without each
+        guard having to know about baselines.
+
+        A floor, not a preference: no input raises the clamp. Only a ground
+        re-validate, which changes the baseline itself.
+        """
+        if self.authority_demotion():
+            return DEMOTED_AUTHORITY
+        return self.authority()
 
 
 # ---------------------------------------------------------------------------

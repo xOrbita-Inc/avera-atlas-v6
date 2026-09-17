@@ -44,6 +44,13 @@ from common.decision_state_machine import (
     resolve_transition,
     slew_lead_time_s,
 )
+from common.safety_floors import (
+    ABORT_TRIGGER,
+    BASELINE_TRIGGER,
+    L3_TRIGGER,
+    RECORD_QUALITY_TRIGGER,
+    l3_refusal_reason,
+)
 
 
 def _iso(value: datetime) -> str:
@@ -275,13 +282,64 @@ def guard_slew_feasible(inputs: GuardInputs) -> GuardResult:
     )
 
 
+def guard_authority_baseline_validated(inputs: GuardInputs) -> GuardResult:
+    """SCRUM-380, MAF v2.0 section 6: the running configuration is the one
+    ground validated.
+
+    SCRUM-379's envelope guard checks the envelope is cryptographically valid
+    and unexpired. It does not notice that the envelope, or the monitor software
+    itself, has CHANGED since ground last signed off. This is that floor. A
+    drift clamps authority to L0 and holds there until an explicit ground
+    re-validate, which is what unblocks SCRUM-384's tamper case.
+    """
+    name = "authority_baseline_validated"
+    reason = inputs.authority_demotion()
+    baseline = inputs.ground_validated_baseline
+    values = {
+        "baseline_enforced": baseline is not None,
+        "baseline_envelope_version": baseline.envelope_version if baseline else None,
+        "running_envelope_version": inputs.envelope_version,
+        "baseline_validated_by": baseline.validated_by if baseline else None,
+        "authority_granted": inputs.authority() or None,
+        "authority_effective": inputs.effective_authority() or None,
+    }
+    if not reason:
+        return GuardResult(
+            name, True,
+            "no ground-validated baseline on record; floor not armed"
+            if baseline is None
+            else "running configuration matches the ground-validated baseline",
+            values,
+        )
+    return GuardResult(
+        name, False,
+        f"{BASELINE_TRIGGER}: {reason}; authority clamped to "
+        f"{inputs.effective_authority()} until ground re-validates",
+        values,
+    )
+
+
 def guard_authority_l1_or_l2(inputs: GuardInputs) -> GuardResult:
-    """Section 3: authority L1 or L2. L0 is advisory only (section 5)."""
+    """Section 3: authority L1 or L2. L0 is advisory only (section 5).
+
+    Reads the EFFECTIVE authority, so a SCRUM-380 clamp to L0 blocks staging
+    here without this guard needing to know why it was clamped.
+    """
     name = "authority_l1_or_l2"
-    level = inputs.authority()
-    values = {"authority_level": level or None}
+    level = inputs.effective_authority()
+    values = {
+        "authority_level": level or None,
+        "authority_granted": inputs.authority() or None,
+    }
     if level in AUTONOMOUS_AUTHORITY_LEVELS:
         return GuardResult(name, True, f"authority {level} may stage a maneuver", values)
+    granted = inputs.authority()
+    if granted and granted != level:
+        return GuardResult(
+            name, False,
+            f"authority {granted} was granted but is clamped to {level}",
+            values,
+        )
     return GuardResult(
         name, False,
         f"authority {level or 'none granted'} is not L1 or L2",
@@ -459,6 +517,73 @@ def guard_last_cdm_still_fresh(inputs: GuardInputs) -> GuardResult:
     )
 
 
+def guard_cdm_record_usable(inputs: GuardInputs) -> GuardResult:
+    """SCRUM-380, MAF v2.0 section 6: degraded or zero-filled records are
+    rejected, not parsed.
+
+    The freshness guard asks how old the record is. This asks whether there is a
+    record at all. A zero-filled covariance does not mean "no uncertainty", it
+    means the record carries no covariance, and scoring it yields a
+    confident-looking Pc computed from nothing -- worse than having no record,
+    because it looks like an answer.
+
+    Deliberately not the artifact's covariance_quality, which reads 'degraded'
+    or 'dilution_region' for a real covariance in an awkward geometry. Those are
+    legitimate, scorable conjunctions.
+    """
+    name = "cdm_record_usable"
+    reason = inputs.cdm_record_rejected_reason
+    values = {"cdm_record_rejected_reason": reason or None}
+    if not reason:
+        return GuardResult(name, True, "CDM record is structurally usable", values)
+    return GuardResult(name, False, f"{RECORD_QUALITY_TRIGGER}: {reason}", values)
+
+
+def guard_l3_pre_verified_action(inputs: GuardInputs) -> GuardResult:
+    """SCRUM-380: an L3 authorization is refused without a pre-verified safe
+    action.
+
+    Guard doc section 5 gates L3 to a later phase. The only part of L3 that
+    exists today is this refusal; nothing here executes an L3 maneuver, and a
+    passing check is not permission to -- it only means the floor did not fire.
+    """
+    name = "l3_pre_verified_safe_action"
+    reason = l3_refusal_reason(inputs.authority(), inputs.pre_verified_safe_action)
+    values = {
+        "requested_authority": inputs.authority() or None,
+        "pre_verified_safe_action": inputs.pre_verified_safe_action or None,
+    }
+    if not reason:
+        return GuardResult(
+            name, True, "L3 refusal floor does not apply to this request", values
+        )
+    return GuardResult(name, False, f"{L3_TRIGGER}: {reason}", values)
+
+
+def guard_no_ground_abort(inputs: GuardInputs) -> GuardResult:
+    """SCRUM-380, MAF v2.0 section 6: no ground-commanded abort is standing.
+
+    Written the positive way like every other guard -- it passes while no abort
+    is in force -- but it is not consulted like the others. evaluate_safety_monitor
+    checks it before the transition table so an abort can interrupt a staged or
+    executing sequence mid-pass, which is the whole point of the command.
+    """
+    name = "no_ground_abort"
+    abort = inputs.ground_abort
+    if abort is None:
+        return GuardResult(name, True, "no ground abort standing", {})
+    return GuardResult(
+        name, False,
+        f"ground abort from {abort.operator_id}: {abort.abort_reason}",
+        {
+            "abort_reason": abort.abort_reason,
+            "operator_id": abort.operator_id,
+            "issued_at_utc": abort.issued_at_utc,
+            "command_id": abort.command_id,
+        },
+    )
+
+
 def guard_subsystem_healthy(inputs: GuardInputs) -> GuardResult:
     """Section 6.3: any partial subsystem failure goes to M4.
 
@@ -624,6 +749,12 @@ def m1_to_m2_guards(inputs: GuardInputs) -> Tuple[GuardResult, ...]:
         guard_secondary_clear(inputs),
         guard_slew_feasible(inputs),
         guard_authority_l1_or_l2(inputs),
+        # SCRUM-380: floors layered on top of the section 3 row, not among its
+        # seven, so they sit after them. A hollow record blocks staging here
+        # (holding M1); a staged event with one escalates via the M2 set.
+        guard_authority_baseline_validated(inputs),
+        guard_cdm_record_usable(inputs),
+        guard_l3_pre_verified_action(inputs),
     )
 
 
@@ -696,6 +827,13 @@ def _m2_escalation_guards(inputs: GuardInputs) -> Tuple[GuardResult, ...]:
     results: List[GuardResult] = [
         result for result in m2_continuous_guards(inputs) if not result.passed
     ]
+
+    # SCRUM-380. Staged is past the point where blocking is enough: a burn is
+    # loaded against a record that turns out to be hollow, so it escalates.
+    for guard in (guard_cdm_record_usable, guard_authority_baseline_validated):
+        result = guard(inputs)
+        if not result.passed:
+            results.append(result)
 
     if inputs.approval_command_received and inputs.approval_accepted is False:
         results.append(guard_l1_approval_accepted(inputs))
@@ -824,6 +962,35 @@ class MonitorDecision:
     # section 6.2 reboot path. None on a normal evaluation.
     reboot_recovery: Optional[Any] = None
 
+    # -- SCRUM-380 ----------------------------------------------------------
+
+    @property
+    def aborted(self) -> bool:
+        """Whether a ground abort drove this decision."""
+        return bool(self.inputs is not None and self.inputs.ground_abort is not None)
+
+    def abort_audit_entry(self) -> Optional[Dict[str, Any]]:
+        """The section 7 abort entry for the tamper-evident chain, or None."""
+        if not self.aborted:
+            return None
+        return self.inputs.ground_abort.audit_entry(
+            from_mode=self.transition.from_mode.value,
+            conjunction_id=self.conjunction_id,
+        )
+
+    @property
+    def post_burn_feasible(self) -> Optional[bool]:
+        """The section 4.5 post-burn feasibility flag, or None if not evaluated.
+
+        Surfaced as its own field so a post-burn residual failure shows up in the
+        evidence package as a feasibility result, not only as a mode change that
+        a reader has to interpret.
+        """
+        for guard in self.guards:
+            if guard.name == "m2_post_above_safe_threshold":
+                return guard.passed
+        return None
+
     @property
     def escalated(self) -> bool:
         return self.transition.escalated
@@ -855,6 +1022,19 @@ class MonitorDecision:
             "comms_gap": self.comms_gap.to_dict() if self.comms_gap else None,
             "reboot_recovery": (
                 self.reboot_recovery.to_dict() if self.reboot_recovery else None
+            ),
+            # SCRUM-380
+            "aborted": self.aborted,
+            "abort": (
+                self.inputs.ground_abort.to_dict()
+                if self.aborted else None
+            ),
+            "post_burn_feasible": self.post_burn_feasible,
+            "authority_granted": (
+                self.inputs.authority() if self.inputs else ""
+            ),
+            "authority_effective": (
+                self.inputs.effective_authority() if self.inputs else ""
             ),
         }
 
@@ -891,7 +1071,7 @@ def _authorize(inputs: GuardInputs, approval_basis: str) -> AuthorizedExecution:
         dv_magnitude_m_s=command.dv_magnitude_m_s,
         t_burn_utc=_iso(command.t_burn_utc),
         mode=FlightMode.M3_EXECUTING.value,
-        authority_level=inputs.authority(),
+        authority_level=inputs.effective_authority(),
         envelope_version=inputs.envelope_version or "",
         approval_basis=approval_basis,
         validity_status=str(inputs.validity_evidence.get("validity_status", "")),
@@ -949,7 +1129,7 @@ def _evaluate_m2(inputs: GuardInputs) -> MonitorDecision:
             return _decide(inputs, FlightMode.M2_STAGED, restage.name, (restage,))
         return _decide(inputs, FlightMode.M4_SAFE_HOLD, restage.name, (restage,))
 
-    authority = inputs.authority()
+    authority = inputs.effective_authority()
 
     # Reached only when no escalation fired, so these three have passed. They
     # are recorded on the transition because they are what makes the burn
@@ -1067,6 +1247,40 @@ def evaluate_safety_monitor(inputs: GuardInputs) -> MonitorDecision:
     """
     mode = inputs.current_mode
 
+    # SCRUM-380, MAF v2.0 section 6. The ground abort is resolved before the
+    # transition table, before the subsystem check, before anything. That
+    # ordering is the feature: an abort that waited its turn behind the normal
+    # guards could not interrupt an L2 whose veto window closes on this very
+    # evaluation, which is exactly the case a ground operator issues it for.
+    abort = guard_no_ground_abort(inputs)
+    if not abort.passed:
+        if mode is FlightMode.M4_SAFE_HOLD:
+            # Already safeheld. Hold, and do not let a clearance arriving in the
+            # same evaluation lift a still-standing abort: section 1 escalates
+            # the ambiguous case rather than resuming flight on it.
+            decision = _decide(
+                inputs, None,
+                f"holding M4: {ABORT_TRIGGER} still standing "
+                f"({inputs.ground_abort.abort_reason})",
+                (abort,),
+            )
+        else:
+            decision = _decide(
+                inputs, FlightMode.M4_SAFE_HOLD,
+                f"{ABORT_TRIGGER}: {inputs.ground_abort.abort_reason}",
+                (abort,),
+            )
+        return replace(
+            decision,
+            comms_gap=comms_gap_status(
+                mode,
+                comms_gap_s=inputs.comms_gap_s,
+                authority_level=inputs.effective_authority(),
+                data_age_s=inputs.data_age_s,
+                data_freshness_bound_s=inputs.data_freshness_bound_s,
+            ),
+        )
+
     failure = guard_subsystem_healthy(inputs)
     if not failure.passed:
         if mode is FlightMode.M4_SAFE_HOLD:
@@ -1089,7 +1303,7 @@ def evaluate_safety_monitor(inputs: GuardInputs) -> MonitorDecision:
         comms_gap=comms_gap_status(
             mode,
             comms_gap_s=inputs.comms_gap_s,
-            authority_level=inputs.authority(),
+            authority_level=inputs.effective_authority(),
             data_age_s=inputs.data_age_s,
             data_freshness_bound_s=inputs.data_freshness_bound_s,
         ),
