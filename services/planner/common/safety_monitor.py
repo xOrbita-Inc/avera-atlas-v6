@@ -283,13 +283,64 @@ def guard_slew_feasible(inputs: GuardInputs) -> GuardResult:
     )
 
 
+def guard_authority_baseline_validated(inputs: GuardInputs) -> GuardResult:
+    """SCRUM-380, MAF v2.0 section 6: the running configuration is the one
+    ground validated.
+
+    SCRUM-379's envelope guard checks the envelope is cryptographically valid
+    and unexpired. It does not notice that the envelope, or the monitor software
+    itself, has CHANGED since ground last signed off. This is that floor. A
+    drift clamps authority to L0 and holds there until an explicit ground
+    re-validate, which is what unblocks SCRUM-384's tamper case.
+    """
+    name = "authority_baseline_validated"
+    reason = inputs.authority_demotion()
+    baseline = inputs.ground_validated_baseline
+    values = {
+        "baseline_enforced": baseline is not None,
+        "baseline_envelope_version": baseline.envelope_version if baseline else None,
+        "running_envelope_version": inputs.envelope_version,
+        "baseline_validated_by": baseline.validated_by if baseline else None,
+        "authority_granted": inputs.authority() or None,
+        "authority_effective": inputs.effective_authority() or None,
+    }
+    if not reason:
+        return GuardResult(
+            name, True,
+            "no ground-validated baseline on record; floor not armed"
+            if baseline is None
+            else "running configuration matches the ground-validated baseline",
+            values,
+        )
+    return GuardResult(
+        name, False,
+        f"{BASELINE_TRIGGER}: {reason}; authority clamped to "
+        f"{inputs.effective_authority()} until ground re-validates",
+        values,
+    )
+
+
 def guard_authority_l1_or_l2(inputs: GuardInputs) -> GuardResult:
-    """Section 3: authority L1 or L2. L0 is advisory only (section 5)."""
+    """Section 3: authority L1 or L2. L0 is advisory only (section 5).
+
+    Reads the EFFECTIVE authority, so a SCRUM-380 clamp to L0 blocks staging
+    here without this guard needing to know why it was clamped.
+    """
     name = "authority_l1_or_l2"
-    level = inputs.authority()
-    values = {"authority_level": level or None}
+    level = inputs.effective_authority()
+    values = {
+        "authority_level": level or None,
+        "authority_granted": inputs.authority() or None,
+    }
     if level in AUTONOMOUS_AUTHORITY_LEVELS:
         return GuardResult(name, True, f"authority {level} may stage a maneuver", values)
+    granted = inputs.authority()
+    if granted and granted != level:
+        return GuardResult(
+            name, False,
+            f"authority {granted} was granted but is clamped to {level}",
+            values,
+        )
     return GuardResult(
         name, False,
         f"authority {level or 'none granted'} is not L1 or L2",
@@ -656,6 +707,9 @@ def m1_to_m2_guards(inputs: GuardInputs) -> Tuple[GuardResult, ...]:
         guard_secondary_clear(inputs),
         guard_slew_feasible(inputs),
         guard_authority_l1_or_l2(inputs),
+        # SCRUM-380: the configuration ground validated. Last in the tuple
+        # because it is an addition to the section 3 row, not one of its seven.
+        guard_authority_baseline_validated(inputs),
     )
 
 
@@ -965,7 +1019,7 @@ def _authorize(inputs: GuardInputs, approval_basis: str) -> AuthorizedExecution:
         dv_magnitude_m_s=command.dv_magnitude_m_s,
         t_burn_utc=_iso(command.t_burn_utc),
         mode=FlightMode.M3_EXECUTING.value,
-        authority_level=inputs.authority(),
+        authority_level=inputs.effective_authority(),
         envelope_version=inputs.envelope_version or "",
         approval_basis=approval_basis,
         validity_status=str(inputs.validity_evidence.get("validity_status", "")),
@@ -1023,7 +1077,7 @@ def _evaluate_m2(inputs: GuardInputs) -> MonitorDecision:
             return _decide(inputs, FlightMode.M2_STAGED, restage.name, (restage,))
         return _decide(inputs, FlightMode.M4_SAFE_HOLD, restage.name, (restage,))
 
-    authority = inputs.authority()
+    authority = inputs.effective_authority()
 
     # Reached only when no escalation fired, so these three have passed. They
     # are recorded on the transition because they are what makes the burn
@@ -1197,7 +1251,7 @@ def evaluate_safety_monitor(inputs: GuardInputs) -> MonitorDecision:
         comms_gap=comms_gap_status(
             mode,
             comms_gap_s=inputs.comms_gap_s,
-            authority_level=inputs.authority(),
+            authority_level=inputs.effective_authority(),
             data_age_s=inputs.data_age_s,
             data_freshness_bound_s=inputs.data_freshness_bound_s,
         ),
