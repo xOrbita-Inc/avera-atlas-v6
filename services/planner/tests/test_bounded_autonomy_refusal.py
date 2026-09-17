@@ -20,9 +20,12 @@ directly rather than assuming coverage:
   precise mode assertion for those two cases, plus the two genuinely
   untested stale-CDM sub-cases.
 
-Envelope tampering (the fifth case in the original ticket) is explicitly
-held per John: the full tamper-to-L0-until-ground-re-validates floor is
-SCRUM-380's, not built yet.
+Envelope tampering (the fifth case in the original ticket) is unblocked
+now that SCRUM-380 landed (guard_authority_baseline_validated). Per John:
+it fits the same M4-escalate vs M1-block framing as the other four, keyed
+to the starting mode, not a special shape. Simulated as a
+ground_validated_baseline on record plus a drifted envelope_version,
+reusing baselined() from test_authority_baseline.py.
 
 Reuses staged_inputs() from test_safety_monitor.py rather than redefining
 the baseline, so this file cannot silently drift from what "everything
@@ -35,6 +38,7 @@ from datetime import timedelta
 from common.decision_state_machine import FlightMode
 from common.safety_monitor import evaluate_safety_monitor
 
+from test_authority_baseline import ENVELOPE, baselined
 from test_safety_monitor import T_NOW, staged_inputs
 
 
@@ -124,3 +128,61 @@ class TestStaleCdmSplitsOnIngestAvailability:
         assert "last_cdm_still_fresh" in [
             g.name for g in decision.guards if not g.passed
         ]
+
+
+class TestTamperedOrUnsignedEnvelope:
+    """SCRUM-384's fifth case, unblocked by SCRUM-380's authority-baseline
+    floor. Per John: a tampered or unsigned envelope reads as a
+    configuration that differs from the last ground-validated baseline,
+    which clamps effective authority to L0. Fits the same M4-escalate vs
+    M1-block framing as the other four, keyed to the starting mode, not a
+    special shape.
+
+    Simulated the same way test_authority_baseline.py itself does: a
+    ground_validated_baseline on record, then an envelope_version that no
+    longer matches it. Reuses baselined() from that file rather than
+    redefining the baseline fixture here.
+    """
+
+    DRIFTED_ENVELOPE = "env-v1-sha256-999999999999"  # != ENVELOPE (the baseline's)
+
+    def test_from_m1_it_blocks_staging_not_m4(self):
+        decision = evaluate_safety_monitor(
+            baselined(
+                current_mode="M1",
+                authority_level="L2",
+                envelope_version=self.DRIFTED_ENVELOPE,
+            )
+        )
+
+        assert decision.mode is FlightMode.M1_WATCH
+        assert decision.mode is not FlightMode.M4_SAFE_HOLD
+
+        failing = [g.name for g in decision.guards if not g.passed]
+        assert "authority_baseline_validated" in failing
+        assert "authority_l1_or_l2" in failing  # effective L0, not granted L2
+
+        payload = decision.to_dict()
+        assert payload["authority_granted"] == "L2"
+        assert payload["authority_effective"] == "L0"
+        assert decision.authorized_execution is None
+
+    def test_from_m2_staged_it_escalates_to_m4(self):
+        decision = evaluate_safety_monitor(
+            baselined(
+                current_mode="M2",
+                authority_level="L2",
+                envelope_version=self.DRIFTED_ENVELOPE,
+                veto_window_close_utc=T_NOW - timedelta(seconds=1),
+            )
+        )
+
+        assert decision.mode is FlightMode.M4_SAFE_HOLD
+
+        failing = [g.name for g in decision.guards if not g.passed]
+        assert "authority_baseline_validated" in failing
+
+        payload = decision.to_dict()
+        assert payload["authority_granted"] == "L2"
+        assert payload["authority_effective"] == "L0"
+        assert decision.authorized_execution is None
