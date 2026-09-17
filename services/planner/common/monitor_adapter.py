@@ -32,6 +32,12 @@ from common.decision_state_machine import (
     ManeuverCommand,
     as_mode,
 )
+from common.safety_floors import (
+    AuthorityBaseline,
+    GroundAbortCommand,
+    cdm_record_rejection_reason,
+    monitor_logic_hash,
+)
 from common.mode_persistence import (
     ModeStore,
     PersistedMode,
@@ -232,8 +238,14 @@ def build_guard_inputs(
     covariance_source: str,
     current_mode: FlightMode,
     t_now_utc: datetime,
+    standing_abort: Optional[GroundAbortCommand] = None,
 ) -> GuardInputs:
-    """Map one /v1/evaluate call onto the section 3 and 4 guard inputs."""
+    """Map one /v1/evaluate call onto the section 3 and 4 guard inputs.
+
+    standing_abort is an abort already in force from a previous evaluation, read
+    back out of the mode store. A ground abort holds until ground clearance, so
+    it has to outlive the single request that issued it.
+    """
     conjunction = body.get("conjunction") or {}
     authorization = body.get(AUTHORIZATION_KEY) or {}
     iod = body.get(IOD_KEY) or {}
@@ -242,6 +254,13 @@ def build_guard_inputs(
 
     tca_utc = parse_utc(conjunction.get("t_ca_utc"))
     performed, clear = _secondary_check(artifact)
+
+    # SCRUM-380: an abort on this request, otherwise one already standing. A
+    # ground clearance is the only thing that lifts it, and that is handled by
+    # the M4 to M0 row rather than by the abort simply going absent.
+    ground_abort = (
+        GroundAbortCommand.from_dict(monitor.get("ground_abort")) or standing_abort
+    )
     envelope_fields = _envelope_fields(policy, cap, authorization)
     validity_fields = _validity_fields(validity_block, tca_utc)
     validity_fields.pop("validity_assessment", None)
@@ -289,6 +308,23 @@ def build_guard_inputs(
         residual_pc_elevated=monitor.get("residual_pc_elevated"),
         comms_gap_s=float(monitor.get("comms_gap_s", 0.0)),
         subsystem_failure=str(monitor.get("subsystem_failure", "")),
+        # SCRUM-380. A ground abort may arrive on this request, or may already
+        # be standing from an earlier one -- a persisted abort stays in force
+        # until ground clearance, so a later evaluate that carries no abort
+        # block must not read as the abort having been lifted.
+        ground_abort=ground_abort,
+        ground_validated_baseline=AuthorityBaseline.from_dict(
+            monitor.get("ground_validated_baseline")
+        ),
+        monitor_logic_hash=monitor_logic_hash(),
+        cdm_record_rejected_reason=cdm_record_rejection_reason(
+            conjunction.get("p_rel_km2"),
+            conjunction.get("r_rel_km"),
+            declared_degraded=bool(conjunction.get("degraded", False)),
+        ),
+        pre_verified_safe_action=str(
+            authorization.get("pre_verified_safe_action", "")
+        ),
         operator_clearance_received=bool(
             monitor.get("operator_clearance_received", False)
         ),
@@ -367,6 +403,13 @@ def evaluate_request(
     if current_mode is None:
         current_mode, recovery = resolve_current_mode(body, store, sat_id, now)
 
+    # SCRUM-380: an abort persisted by an earlier evaluation is still in force.
+    standing_abort = None
+    if store is not None and sat_id:
+        persisted = store.read(sat_id)
+        if persisted is not None:
+            standing_abort = persisted.ground_abort
+
     inputs = build_guard_inputs(
         body=body,
         scoring=scoring,
@@ -376,6 +419,7 @@ def evaluate_request(
         covariance_source=covariance_source,
         current_mode=current_mode,
         t_now_utc=now,
+        standing_abort=standing_abort,
     )
     decision = evaluate_safety_monitor(inputs)
     decision = replace(decision, reboot_recovery=recovery)
@@ -390,6 +434,14 @@ def evaluate_request(
                 command=inputs.command,
                 latest_burn_utc=inputs.latest_burn_utc,
                 software_version=software_version,
+                # SCRUM-380: the abort persists until ground clears it, which
+                # is precisely the M4 to M0 transition. Clearing it on any other
+                # exit would let a mode change lift a ground stop.
+                ground_abort=(
+                    None
+                    if decision.mode is FlightMode.M0_NOMINAL
+                    else inputs.ground_abort
+                ),
             )
         )
     return decision

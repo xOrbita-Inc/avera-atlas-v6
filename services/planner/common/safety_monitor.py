@@ -44,6 +44,14 @@ from common.decision_state_machine import (
     resolve_transition,
     slew_lead_time_s,
 )
+from common.safety_floors import (
+    ABORT_TRIGGER,
+    BASELINE_TRIGGER,
+    L3_TRIGGER,
+    RECORD_QUALITY_TRIGGER,
+    baseline_change_reason,
+    l3_refusal_reason,
+)
 
 
 def _iso(value: datetime) -> str:
@@ -459,6 +467,30 @@ def guard_last_cdm_still_fresh(inputs: GuardInputs) -> GuardResult:
     )
 
 
+def guard_no_ground_abort(inputs: GuardInputs) -> GuardResult:
+    """SCRUM-380, MAF v2.0 section 6: no ground-commanded abort is standing.
+
+    Written the positive way like every other guard -- it passes while no abort
+    is in force -- but it is not consulted like the others. evaluate_safety_monitor
+    checks it before the transition table so an abort can interrupt a staged or
+    executing sequence mid-pass, which is the whole point of the command.
+    """
+    name = "no_ground_abort"
+    abort = inputs.ground_abort
+    if abort is None:
+        return GuardResult(name, True, "no ground abort standing", {})
+    return GuardResult(
+        name, False,
+        f"ground abort from {abort.operator_id}: {abort.abort_reason}",
+        {
+            "abort_reason": abort.abort_reason,
+            "operator_id": abort.operator_id,
+            "issued_at_utc": abort.issued_at_utc,
+            "command_id": abort.command_id,
+        },
+    )
+
+
 def guard_subsystem_healthy(inputs: GuardInputs) -> GuardResult:
     """Section 6.3: any partial subsystem failure goes to M4.
 
@@ -824,6 +856,35 @@ class MonitorDecision:
     # section 6.2 reboot path. None on a normal evaluation.
     reboot_recovery: Optional[Any] = None
 
+    # -- SCRUM-380 ----------------------------------------------------------
+
+    @property
+    def aborted(self) -> bool:
+        """Whether a ground abort drove this decision."""
+        return bool(self.inputs is not None and self.inputs.ground_abort is not None)
+
+    def abort_audit_entry(self) -> Optional[Dict[str, Any]]:
+        """The section 7 abort entry for the tamper-evident chain, or None."""
+        if not self.aborted:
+            return None
+        return self.inputs.ground_abort.audit_entry(
+            from_mode=self.transition.from_mode.value,
+            conjunction_id=self.conjunction_id,
+        )
+
+    @property
+    def post_burn_feasible(self) -> Optional[bool]:
+        """The section 4.5 post-burn feasibility flag, or None if not evaluated.
+
+        Surfaced as its own field so a post-burn residual failure shows up in the
+        evidence package as a feasibility result, not only as a mode change that
+        a reader has to interpret.
+        """
+        for guard in self.guards:
+            if guard.name == "m2_post_above_safe_threshold":
+                return guard.passed
+        return None
+
     @property
     def escalated(self) -> bool:
         return self.transition.escalated
@@ -855,6 +916,19 @@ class MonitorDecision:
             "comms_gap": self.comms_gap.to_dict() if self.comms_gap else None,
             "reboot_recovery": (
                 self.reboot_recovery.to_dict() if self.reboot_recovery else None
+            ),
+            # SCRUM-380
+            "aborted": self.aborted,
+            "abort": (
+                self.inputs.ground_abort.to_dict()
+                if self.aborted else None
+            ),
+            "post_burn_feasible": self.post_burn_feasible,
+            "authority_granted": (
+                self.inputs.authority() if self.inputs else ""
+            ),
+            "authority_effective": (
+                self.inputs.effective_authority() if self.inputs else ""
             ),
         }
 
@@ -1066,6 +1140,40 @@ def evaluate_safety_monitor(inputs: GuardInputs) -> MonitorDecision:
        An ambiguous evaluation escalates rather than staging or executing.
     """
     mode = inputs.current_mode
+
+    # SCRUM-380, MAF v2.0 section 6. The ground abort is resolved before the
+    # transition table, before the subsystem check, before anything. That
+    # ordering is the feature: an abort that waited its turn behind the normal
+    # guards could not interrupt an L2 whose veto window closes on this very
+    # evaluation, which is exactly the case a ground operator issues it for.
+    abort = guard_no_ground_abort(inputs)
+    if not abort.passed:
+        if mode is FlightMode.M4_SAFE_HOLD:
+            # Already safeheld. Hold, and do not let a clearance arriving in the
+            # same evaluation lift a still-standing abort: section 1 escalates
+            # the ambiguous case rather than resuming flight on it.
+            decision = _decide(
+                inputs, None,
+                f"holding M4: {ABORT_TRIGGER} still standing "
+                f"({inputs.ground_abort.abort_reason})",
+                (abort,),
+            )
+        else:
+            decision = _decide(
+                inputs, FlightMode.M4_SAFE_HOLD,
+                f"{ABORT_TRIGGER}: {inputs.ground_abort.abort_reason}",
+                (abort,),
+            )
+        return replace(
+            decision,
+            comms_gap=comms_gap_status(
+                mode,
+                comms_gap_s=inputs.comms_gap_s,
+                authority_level=inputs.effective_authority(),
+                data_age_s=inputs.data_age_s,
+                data_freshness_bound_s=inputs.data_freshness_bound_s,
+            ),
+        )
 
     failure = guard_subsystem_healthy(inputs)
     if not failure.passed:

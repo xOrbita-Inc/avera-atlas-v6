@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from common.safety_floors import GroundAbortCommand
 from common.decision_state_machine import (
     FlightMode,
     ManeuverCommand,
@@ -67,6 +68,9 @@ class PersistedMode:
     command: Optional[ManeuverCommand] = None
     latest_burn_utc: Optional[datetime] = None
     software_version: str = ""
+    # SCRUM-380: a ground abort has to survive a reboot mid-sequence, or a
+    # spacecraft could come back up and resume the burn ground just stopped.
+    ground_abort: Optional[GroundAbortCommand] = None
 
     def __post_init__(self) -> None:
         # Normalised here rather than at each call site, so a record read back
@@ -99,6 +103,7 @@ class PersistedMode:
                 if self.command
                 else None
             ),
+            "ground_abort": self.ground_abort.to_dict() if self.ground_abort else None,
         }
 
     @classmethod
@@ -122,6 +127,7 @@ class PersistedMode:
             command=command,
             latest_burn_utc=_parse(payload.get("latest_burn_utc")),
             software_version=str(payload.get("software_version", "")),
+            ground_abort=GroundAbortCommand.from_dict(payload.get("ground_abort")),
         )
 
 
@@ -275,6 +281,21 @@ def recover_after_reboot(
         raise ValueError("t_now_utc must be timezone-aware")
     now = t_now_utc.astimezone(timezone.utc)
     previous = persisted.mode
+
+    # SCRUM-380: a standing ground abort outranks the whole section 6.2 ladder.
+    # Without this, step 4 would re-enter M2 for a burn window that is still
+    # open -- resuming, on the strength of a reboot, exactly the sequence ground
+    # commanded stopped.
+    if persisted.ground_abort is not None:
+        return RebootRecovery(
+            mode=FlightMode.M4_SAFE_HOLD,
+            pre_reboot_mode=previous,
+            reason=(
+                "a ground abort was standing before the reboot "
+                f"({persisted.ground_abort.abort_reason}); holding M4 until "
+                "ground clearance"
+            ),
+        )
 
     if previous in (FlightMode.M0_NOMINAL, FlightMode.M4_SAFE_HOLD):
         return RebootRecovery(
