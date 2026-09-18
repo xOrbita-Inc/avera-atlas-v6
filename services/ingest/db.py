@@ -55,7 +55,7 @@ class CdmRecord(Base):
     secondary_norad = Column(String, nullable=False)
     tca             = Column(String, nullable=False)   # ISO 8601 UTC text
     miss_distance_m = Column(Float,  nullable=False)   # metres
-    pc_space_track  = Column(Float,  nullable=True)    # Space-Track published Pc; null if absent
+    pc_space_track  = Column(Float,  nullable=True)    # published Pc from the CDM; null if absent
 
     # Primary object RTN covariance elements (m²)
     cr_r   = Column(Float, nullable=False)
@@ -73,7 +73,7 @@ class CdmRecord(Base):
     cn_t_sec = Column(Float, nullable=False)
     cn_n_sec = Column(Float, nullable=False)
 
-    source      = Column(String, nullable=False)  # 'space_track' or 'synthetic'
+    source      = Column(String, nullable=False)  # 'reference_cdm' or 'synthetic'
     ingested_at = Column(String, nullable=False)  # ISO 8601 UTC text
 
 
@@ -213,7 +213,12 @@ def save_cdm_record(cdm: dict[str, Any]) -> None:
         cn_r_sec = _get_float("OBJECT2_CN_R"),
         cn_t_sec = _get_float("OBJECT2_CN_T"),
         cn_n_sec = _get_float("OBJECT2_CN_N"),
-        source      = "space_track",
+        # SCRUM-431: Space-Track is retired. A stored real CDM now reports its
+        # actual origin -- the offline reference store -- rather than a source
+        # the system no longer has. The pc_space_track COLUMN keeps its name:
+        # that is the published Pc from the original CDM and renaming it is a
+        # migration, out of scope here.
+        source      = "reference_cdm",
         ingested_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     )
 

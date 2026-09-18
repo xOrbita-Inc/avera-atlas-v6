@@ -375,6 +375,11 @@ class GuardInputs:
     # never performed is NOT CLEAR.
     secondary_check_performed: bool = False
     secondary_conjunction_clear: bool = False
+    # SCRUM-431: the screen is deferred pending the LeoLabs covariance-backed
+    # rebuild. Distinct from not-performed, which section 4.2 fails closed on:
+    # deferred means the check is out of scope for this build, so it is omitted
+    # from the staging AND rather than failing it.
+    secondary_screen_deferred: bool = False
 
     # -- envelope, section 4.1 ----------------------------------------------
     authority_level: Optional[str] = None

@@ -256,6 +256,35 @@ class SecondaryConflictCheck:
     closest_approach_km: Optional[float] = None
     closest_object_id: Optional[str] = None
     screening_epoch_utc: Optional[str] = None
+    # SCRUM-431. Deliberately its own flag rather than reusing
+    # secondary_check_performed=False. "Not performed" means the screen should
+    # have run and could not, which section 4.2 treats as NOT CLEAR and fails
+    # closed on. "Deferred" means the screen is out of scope for this build
+    # pending the LeoLabs covariance-backed rebuild, so it must not fail a
+    # verification or block a decision. Collapsing the two would make a
+    # deliberate deferral indistinguishable from a broken catalog.
+    screen_deferred: bool = False
+
+
+SECONDARY_SCREEN_DEFERRED_NOTE = (
+    "Secondary screen deferred, LeoLabs covariance integration pending."
+)
+
+
+def _deferred_secondary_check() -> "SecondaryConflictCheck":
+    """The SCRUM-431 deferred state.
+
+    Not performed and not clear, as a factual matter -- no screen ran -- but
+    flagged deferred so the verification builder and the safety monitor can
+    tell a deliberate deferral from a screen that failed to run.
+    """
+    return SecondaryConflictCheck(
+        secondary_check_performed=False,
+        secondary_conjunction_clear=False,
+        flagged_objects=[],
+        operator_note=SECONDARY_SCREEN_DEFERRED_NOTE,
+        screen_deferred=True,
+    )
 
 
 def _run_secondary_conflict_check(
@@ -498,11 +527,17 @@ def _build_verification_result(
             "No-burn baseline would have been equally or more optimal."
         )
 
+    # SCRUM-431: a deferred screen is not a failed one. It did not run because
+    # it is out of scope for this build, not because safety could not be
+    # established, so it contributes no failure and is excluded from the tally.
+    # Its note is surfaced below as an informational line instead. A screen that
+    # was ENABLED and could not run still fails closed, exactly as before.
+    secondary_deferred = secondary.screen_deferred
     secondary_clear = (
         secondary.secondary_check_performed
         and secondary.secondary_conjunction_clear
     )
-    if not secondary_clear:
+    if not secondary_clear and not secondary_deferred:
         if not secondary.secondary_check_performed:
             failures.append(
                 "Secondary conjunction screen was not performed; safety could not "
@@ -547,6 +582,11 @@ def _build_verification_result(
             f"VERIFICATION FAILED ({len(failures)} check(s)): "
             + " | ".join(failures)
         )
+
+    if secondary_deferred:
+        # Informational, appended after the pass/fail verdict so it cannot be
+        # read as a failure reason.
+        note += " " + secondary.operator_note
 
     if scoring.execution_error_modelled:
         note += (
@@ -912,6 +952,7 @@ def build_atlas_artifact(
     known_objects: Optional[List[Dict[str, Any]]] = None,
     r_post_km: Optional[List[float]] = None,
     v_post_km_s: Optional[List[float]] = None,
+    secondary_screen_enabled: bool = False,
 ) -> ATLASManeuverArtifact:
     """Assemble a complete ATLASManeuverArtifact from a ManeuverScoringResult.
 
@@ -970,14 +1011,24 @@ def build_atlas_artifact(
     )
 
     # --- Secondary conflict check ---
-    secondary = _run_secondary_conflict_check(
-        r_post_km,
-        known_objects,
-        scoring.t_burn_utc,
-        v_post_km_s=v_post_km_s,
-        policy=policy,
-        cap=cap,
-    )
+    # SCRUM-431: default off. The SCRUM-381 screen ran on a Space-Track TLE
+    # catalog, which carries no covariance, so it could only ever produce an
+    # assumed-covariance answer -- and with Space-Track retired there is no
+    # catalog at all, so it failed closed and showed VERIFICATION FAILED on
+    # every evaluate. Deferred rather than deleted: flip the flag when the
+    # LeoLabs-backed screen ships and the fail-closed path below returns
+    # unchanged.
+    if secondary_screen_enabled:
+        secondary = _run_secondary_conflict_check(
+            r_post_km,
+            known_objects,
+            scoring.t_burn_utc,
+            v_post_km_s=v_post_km_s,
+            policy=policy,
+            cap=cap,
+        )
+    else:
+        secondary = _deferred_secondary_check()
 
     # --- A4: PostManeuverProjection ---
     post_maneuver: Optional[PostManeuverProjection] = None

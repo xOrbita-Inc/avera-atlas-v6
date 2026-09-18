@@ -1,12 +1,7 @@
 # AVERA-ATLAS Ingest Service
-# Polls Space-Track for CDMs and persists to SQLite.
-# Requires Kubernetes Secret: spacetrack-credentials
-#
-# Create secret before deploying:
-#   kubectl create secret generic spacetrack-credentials \
-#     --from-literal=user=YOUR_USER \
-#     --from-literal=pass=YOUR_PASS \
-#     -n avera-system
+# Holds the CDM store and serves the reference CDM path.
+# SCRUM-431: Space-Track is retired; the poll, its client and the
+# spacetrack-credentials secret are gone. No secret is required.
 #
 apiVersion: apps/v1
 kind: Deployment
@@ -32,16 +27,6 @@ spec:
         env:
         - name: OUTPUT_DIR
           value: "/data/planner_artifacts"
-        - name: SPACETRACK_USER
-          valueFrom:
-            secretKeyRef:
-              name: spacetrack-credentials
-              key: user
-        - name: SPACETRACK_PASS
-          valueFrom:
-            secretKeyRef:
-              name: spacetrack-credentials
-              key: pass
         volumeMounts:
         - name: planner-data
           mountPath: /data/planner_artifacts

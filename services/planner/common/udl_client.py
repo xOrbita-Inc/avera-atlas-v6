@@ -506,7 +506,7 @@ def get_elsets(
 
     The response contains line1 and line2 TLE fields which are assembled
     into raw TLE text and returned. This text is compatible with
-    _parse_and_propagate_tle() in spacetrack_tle.py -- no new propagation
+    the retired spacetrack_tle._parse_and_propagate_tle (SCRUM-431) -- no new propagation
     code required.
 
     Parameters
@@ -605,7 +605,7 @@ def get_elsets(
 
     # Assemble TLE text from line1/line2 fields.
     # Format: optional name line + line1 + line2 per object.
-    # Compatible with spacetrack_tle._parse_and_propagate_tle().
+    # Same convention the retired spacetrack_tle helper used (SCRUM-431).
     tle_lines = []
     skipped = 0
     for record in records:
