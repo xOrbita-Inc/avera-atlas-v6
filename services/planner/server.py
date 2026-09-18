@@ -1,4 +1,4 @@
-﻿"""
+"""
 AVERA-ATLAS Planner Service — FastAPI wrapper for decision_model.py
 APS 2.5 / 9.6 + SCRUM-341 container hardening.
 
