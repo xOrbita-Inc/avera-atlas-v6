@@ -388,23 +388,13 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
       <div class="panel-hdr"><span class="panel-title">CDM Operations</span><div class="panel-ctrls"><button type="button" class="portlet-btn" data-portlet-action="minimize" title="Minimize">&#x2212;</button><button type="button" class="portlet-btn" data-portlet-action="maximize" title="Maximize">&#x26F6;</button><button type="button" class="portlet-btn portlet-info" data-portlet-action="info" title="Field reference" onclick="openCdmOpsInfoModal()">&#x24D8;</button></div></div>
       <div class="panel-body" style="padding:10px 14px">
         <div id="cdmSourceMode" style="display:flex;align-items:center;gap:6px;margin-bottom:8px;padding:4px 6px;border:1px solid var(--border);border-radius:3px;background:var(--bg-panel)"><span id="cdmSourceDot" style="width:6px;height:6px;border-radius:50%;background:var(--text-dim);flex-shrink:0"></span><span id="cdmSourceLabel" style="font-size:8px;letter-spacing:1px;text-transform:uppercase;color:var(--text-dim)">CHECKING SOURCE MODE...</span></div>
-        <!-- SCRUM-421: this field polls Space-Track CDMs into the store. It is
-             NOT a run input any more: the evaluated conjunction now comes from
-             the Scenario | Live Asset selector, never from whatever is typed
-             here. Hidden in Scenario mode so it cannot read as one, and
-             auto-filled from the Live Asset dropdown so POLL follows the asset
-             actually selected. -->
-        <div id="cdmNoradRow" style="display:none">
-          <div style="font-size:8px;color:var(--text-dim);letter-spacing:0.5px;margin-bottom:6px">Asset NORAD ID (for Space-Track CDM poll)</div>
-          <div class="poll-row">
-            <input type="text" id="assetNoradInput" placeholder="e.g. 25544" maxlength="10" oninput="onNoradChange()">
-            <button class="poll-btn" id="pollBtn" onclick="triggerCdmPoll()" disabled>POLL</button>
-          </div>
-        </div>
+        <!-- SCRUM-419: the Space-Track poll control is retired. LeoLabs is the
+             live source and the planner fetches it during /v1/evaluate; this
+             panel is the offline reference CDM and the audit tooling. -->
         <button class="poll-btn" id="injectExampleBtn" onclick="injectExampleCdm()" style="width:100%;margin-bottom:6px">INJECT EXAMPLE CDM (TIROS 4)</button>
         <div class="poll-status" id="pollStatus"></div>
-        <div style="font-size:8px;color:var(--text-dim);letter-spacing:0.5px;margin-bottom:4px">Last CDM fetch</div>
-        <div style="font-size:9px;color:var(--text-dim)" id="pollLastResult">No poll run yet</div>
+        <div style="font-size:8px;color:var(--text-dim);letter-spacing:0.5px;margin-bottom:4px">Last reference CDM injected</div>
+        <div style="font-size:9px;color:var(--text-dim)" id="pollLastResult">No reference CDM injected yet</div>
         <button class="poll-btn" onclick="openStoreModal()" style="width:100%;margin-top:8px">VIEW CDM STORE</button>
         <button class="poll-btn" onclick="runTiros4SmokeTest()" style="width:100%;margin-top:6px;border-color:var(--accent-dim);color:var(--accent-dim)">RUN TIROS 4 E2E TEST</button>
         <div style="border-top:1px solid var(--border);margin-top:10px;padding-top:8px">
@@ -664,9 +654,10 @@ let secondaryNoradId = '';
 // table, the row click, the button, and the badges together.
 //
 // liveAssetNorad is the asset chosen in the Live Asset dropdown. It is the ONLY
-// value that may become primary_norad on an evaluate. The CDM Operations
-// assetNoradId is a Space-Track poll input and is never read by the evaluate
-// path, so there is no longer any way for a typed NORAD to hijack a scenario row.
+// value that may become primary_norad on an evaluate. SCRUM-419 retired the
+// Space-Track poll that used to set assetNoradId from a text field; it is now
+// set only by the TIROS 4 inject and read only by updatePublishedPc, so there is
+// no typed NORAD that could hijack a scenario row.
 let dataSource = 'scenario';          // 'scenario' | 'live'
 let liveAssetNorad = '';
 let liveAssetName = '';
@@ -697,14 +688,11 @@ function setDataSource(src){
   const picker=document.getElementById('liveAssetPicker');
   const runBtn=document.getElementById('runBtn');
   const msg=document.getElementById('scenarioMsg');
-  const cdmRow=document.getElementById('cdmNoradRow');
 
   scenarioBtn.classList.toggle('active', src==='scenario');
   liveBtn.classList.toggle('active', src==='live');
   presets.style.display = src==='scenario' ? '' : 'none';
   picker.style.display  = src==='live' ? '' : 'none';
-  // AC: the Asset NORAD input is not visible while Scenario is selected.
-  cdmRow.style.display  = src==='live' ? '' : 'none';
   runBtn.textContent = src==='live' ? 'FETCH LIVE CONJUNCTIONS' : 'RUN SCENARIO';
   msg.textContent = src==='live'
     ? (liveAssetNorad ? 'Fetch live conjunctions for '+liveAssetName : 'Select a subscribed asset')
@@ -724,10 +712,6 @@ function onLiveAssetChange(){
   msg.textContent = liveAssetNorad
     ? 'Fetch live conjunctions for '+liveAssetName
     : 'Select a subscribed asset';
-  // Convenience only: keep the CDM poll field pointed at the same asset. The
-  // evaluate path does not read this value.
-  const input=document.getElementById('assetNoradInput');
-  if(input){ input.value = liveAssetNorad; onNoradChange(); }
   clearConjunctionsForSourceSwitch();
   updateConjSourceNote();
 }
@@ -845,46 +829,9 @@ function downloadDecisionLog(){
   URL.revokeObjectURL(url);
 }
 
-function onNoradChange() {
-  const val = document.getElementById('assetNoradInput').value.trim();
-  assetNoradId = val;
-  const btn = document.getElementById('pollBtn');
-  btn.disabled = !/^\d{4,9}$/.test(val);
-}
-
-async function triggerCdmPoll() {
-  const btn = document.getElementById('pollBtn');
-  const status = document.getElementById('pollStatus');
-  const lastResult = document.getElementById('pollLastResult');
-  if (!assetNoradId) return;
-  btn.disabled = true;
-  status.className = 'poll-status busy';
-  status.textContent = 'Polling Space-Track...';
-  try {
-    const resp = await fetch('/api/ingest/poll', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({norad_id: parseInt(assetNoradId), days_lookahead: 7})
-    });
-    const data = await resp.json();
-    if (resp.ok) {
-      status.className = 'poll-status ok';
-      status.textContent = 'Poll complete';
-      const saved = data.saved || 0;
-      const skipped = data.skipped || 0;
-      lastResult.textContent = saved + ' CDMs saved, ' + skipped + ' skipped - ' + new Date().toISOString().substr(11,8) + ' UTC';
-    } else {
-      status.className = 'poll-status err';
-      status.textContent = 'Poll failed: ' + (data.error || resp.status);
-      lastResult.textContent = 'Error - check ingest service logs';
-    }
-  } catch(e) {
-    status.className = 'poll-status err';
-    status.textContent = 'Ingest service unreachable';
-    lastResult.textContent = 'Connection error';
-  }
-  btn.disabled = false;
-}
+// SCRUM-419: onNoradChange and triggerCdmPoll are gone with the Space-Track
+// poll control. assetNoradId survives because the TIROS 4 inject sets it and
+// updatePublishedPc reads it; nothing types into it any more.
 
 async function injectExampleCdm() {
   const btn = document.getElementById('injectExampleBtn');
@@ -941,17 +888,13 @@ async function injectExampleCdm() {
     if (resp.ok && data.saved > 0) {
       status.className = 'poll-status ok';
       status.textContent = 'Example CDM injected';
-      lastResult.textContent = 'TIROS 4 (226) / IRIDIUM 33 DEB (35929) - real CCSDS 508.0-B-1 covariance loaded';
-      // SCRUM-421: this used to also make the planner adopt 226 as the primary
-      // on the next scenario row click, by way of the same primary_norad
-      // injection this story removes. A scenario evaluate is now NORAD-free, so
-      // the CDM lands in the store and is inspectable there, but it no longer
-      // silently reattributes a surrogate row to the TIROS 4 pair. The field is
-      // still populated so POLL and the store lookup target the same object.
-      document.getElementById('assetNoradInput').value = '226';
+      // SCRUM-421: injecting the reference CDM no longer reattributes a
+      // scenario row to the TIROS 4 pair; a scenario evaluate is NORAD-free.
+      // SCRUM-419: the pair is still recorded here because updatePublishedPc
+      // reads it to look the published Pc up in the store. There is no longer a
+      // NORAD field or a POLL button to keep in sync.
       assetNoradId = '226';
       secondaryNoradId = '35929';
-      document.getElementById('pollBtn').disabled = false;
       lastResult.textContent = 'TIROS 4 (226) / IRIDIUM 33 DEB (35929) - real CCSDS 508.0-B-1 covariance loaded into the CDM store. View it with VIEW CDM STORE.';
     } else {
       status.className = 'poll-status err';
@@ -982,11 +925,19 @@ function renderCovSourceBadge(covSource) {
 
 // SCRUM-411 AC6 (lands the dormant SCRUM-348 AC3 LIVE branch): the data-source
 // badge reflects the source each evaluate actually used, not a static label.
-// leolabs/udl/spacetrack are live (green LIVE); surrogate is amber.
+// leolabs and udl are live sources (green LIVE); a real CDM out of the store
+// and a surrogate covariance are both amber.
+//
+// SCRUM-419: the spacetrack tier is no longer a LIVE tier. The planner still
+// returns source "spacetrack" for any real_cdm covariance -- that naming is
+// backend and out of scope for this UI-only change -- but with Space-Track
+// retired as a data source, a real CDM reaching an evaluate came from the
+// reference store via the TIROS 4 inject, not from a live poll. Labelled for
+// what it now is, so this line can no longer claim a Space-Track live tier.
 const _SOURCE_BADGE={
   leolabs:{live:true,label:'LEOLABS LIVE'},
   udl:{live:true,label:'UDL LIVE'},
-  spacetrack:{live:true,label:'SPACE-TRACK LIVE'},
+  spacetrack:{live:false,label:'REFERENCE CDM (REAL COVARIANCE)'},
   surrogate:{live:false,label:'SURROGATE COVARIANCE'},
 };
 function renderEvaluateSourceBadge(source){
@@ -1069,19 +1020,24 @@ async function loadSourceMode(){
       }
     } catch(e){}
 
-    // Fall back to Space-Track / reference CDM source mode (SCRUM-329 AC5)
-    const resp=await fetch('/api/ingest/cdm/source_mode');
-    if(!resp.ok)return;
-    const data=await resp.json();
-    if(data.mode==='live'){
-      dot.style.background='var(--green)';dot.style.boxShadow='0 0 6px var(--green)';
-      label.style.color='var(--green)';
-    } else {
-      dot.style.background='var(--amber)';dot.style.boxShadow='0 0 6px var(--amber)';
-      label.style.color='var(--amber)';
+    // SCRUM-419: the Space-Track live tier is retired. With no live source
+    // reporting, this panel is the offline reference CDM, and it says so
+    // whatever the ingest gate reports -- the label is set here rather than
+    // echoed, because ingest still answers "LIVE SPACE-TRACK POLLING" when its
+    // own gate is on and that tier no longer exists as far as the UI is
+    // concerned. The live evaluate source is LeoLabs, shown by the top badge.
+    dot.style.background='var(--amber)';dot.style.boxShadow='0 0 6px var(--amber)';
+    label.style.color='var(--amber)';
+    label.textContent='REFERENCE CDM (TIROS 4)';
+  } catch(e){
+    const dot=document.getElementById('cdmSourceDot');
+    const label=document.getElementById('cdmSourceLabel');
+    if(dot&&label){
+      dot.style.background='var(--text-dim)';
+      label.style.color='var(--text-dim)';
+      label.textContent='REFERENCE CDM';
     }
-    label.textContent=data.label;
-  } catch(e){}
+  }
 }
 loadSourceMode();
 
@@ -2155,8 +2111,18 @@ document.addEventListener('keydown', function(e){
 });
 
 function openCdmOpsInfoModal(){
+  // SCRUM-419: this reference was an unfilled placeholder, so there was no
+  // Space-Track poll description to delete. Filled in instead with what the
+  // panel actually is after the retirement, since a placeholder is how the old
+  // architecture would quietly survive in an operator's mental model.
   openInfoModal('CDM Operations \u2014 Field Reference',[
-    {label:'Placeholder',description:'Content to be supplied.'}
+    {label:'What this panel is',description:'Offline reference CDM and audit tooling. It is not the live conjunction source. Live conjunctions come from LeoLabs, fetched by the planner during an evaluate, and are shown by the LEOLABS LIVE badge at the top of the dashboard and by the Live Asset source selector.'},
+    {label:'Source mode line',description:'Reports the live conjunction source when one is reporting, otherwise REFERENCE CDM (TIROS 4) for the offline store. There is no Space-Track polling tier: Space-Track is retired as a data source.'},
+    {label:'INJECT EXAMPLE CDM (TIROS 4)',description:'Loads the TIROS 4 / IRIDIUM 33 DEB reference pair into the CDM store, with its real CCSDS 508.0-B-1 covariance. Offline, repeatable, and independent of any live feed. It records the pair so the published Space-Track Pc for that conjunction can be looked up in the store for comparison; it does not change which conjunction an evaluate scores.'},
+    {label:'Last reference CDM injected',description:'Result of the most recent inject. Nothing polls on a schedule.'},
+    {label:'VIEW CDM STORE',description:'Everything currently in the CDM store (ADR-008), whatever put it there.'},
+    {label:'RUN TIROS 4 E2E TEST',description:'End-to-end check over the reference pair: inject, score, and confirm the planner consumed the real CDM covariance rather than a surrogate.'},
+    {label:'Decision Log Lookup',description:'Retrieves a full DecisionLog by its decision ID (SCRUM-351), for auditing a past evaluate. IDs are shown under the decision card after each evaluate.'}
   ]);
 }
 
