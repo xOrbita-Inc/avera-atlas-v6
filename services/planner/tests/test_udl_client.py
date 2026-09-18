@@ -408,7 +408,7 @@ class TestFullPipeline:
 
 class TestGetElsets:
     """AC3: get_elsets() returns TLE text compatible with
-    _parse_and_propagate_tle() in spacetrack_tle.py."""
+    the retired spacetrack_tle._parse_and_propagate_tle (SCRUM-431)."""
 
     def _make_elset_record(self, sat_no=25544, line1=None, line2=None):
         line1 = line1 or "1 25544U 98067A   24001.50000000  .00010000  00000-0  17814-3 0  9990"

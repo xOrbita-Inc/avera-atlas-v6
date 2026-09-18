@@ -115,18 +115,11 @@ def _live_body() -> dict:
     return body
 
 
-# A single catalog object in a far-away orbit, so the SCRUM-381 horizon screen
-# runs for real and comes back CLEAR. Without a catalog the screen is 'not
-# performed', which section 4.2 treats as NOT CLEAR -- correct, but it would
-# stop every scenario here at the secondary guard and hide everything after it.
-_DISTANT_CATALOG = [
-    {
-        "obj_id": "FAR-1",
-        "r_km": [0.0, 0.0, 8000.0],
-        "v_km_s": [0.0, 7.06, 0.0],
-        "position_sigma_m": 100.0,
-    }
-]
+# SCRUM-431: these tests used to patch a distant catalog object in so the
+# SCRUM-381 horizon screen would run and come back CLEAR, because otherwise the
+# not-performed screen blocked staging and hid everything after it. The screen
+# is now deferred by default, so it neither runs nor blocks, and no catalog is
+# needed at all.
 
 
 def _ingest_get(cdm_available: bool = True, cdm_zero_filled: bool = False):
@@ -166,12 +159,10 @@ def _ingest_get(cdm_available: bool = True, cdm_zero_filled: bool = False):
     return _get
 
 
-def _evaluate(body: dict, catalog=None, cdm_available: bool = True,
+def _evaluate(body: dict, cdm_available: bool = True,
               cdm_zero_filled: bool = False):
     posts = MagicMock(return_value=MagicMock(status_code=201))
     with patch.object(server, "UDL_ENABLED", False), \
-         patch.object(server, "fetch_catalog_objects",
-                      return_value=list(_DISTANT_CATALOG if catalog is None else catalog)), \
          patch.object(server.http_requests, "post", posts), \
          patch.object(server.http_requests, "get",
                       side_effect=_ingest_get(cdm_available, cdm_zero_filled)):

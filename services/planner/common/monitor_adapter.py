@@ -88,19 +88,21 @@ def _maneuver_command(scoring: Any) -> Optional[ManeuverCommand]:
     )
 
 
-def _secondary_check(artifact: Any) -> tuple[bool, bool]:
-    """Section 4.2's two booleans, straight off the SCRUM-381 gate.
+def _secondary_check(artifact: Any) -> tuple[bool, bool, bool]:
+    """Section 4.2's two booleans plus the SCRUM-431 deferred flag.
 
     A no-go artifact has no post_maneuver block and therefore no screen, which
-    is 'not performed' and so NOT CLEAR.
+    is 'not performed' and so NOT CLEAR -- and not deferred, because a missing
+    projection is not a deliberate deferral.
     """
     post = getattr(artifact, "post_maneuver", None)
     check = getattr(post, "secondary_conflict", None) if post is not None else None
     if check is None:
-        return False, False
+        return False, False, False
     return (
         bool(check.secondary_check_performed),
         bool(check.secondary_conjunction_clear),
+        bool(getattr(check, "screen_deferred", False)),
     )
 
 
@@ -253,7 +255,7 @@ def build_guard_inputs(
     monitor = body.get(MONITOR_KEY) or {}
 
     tca_utc = parse_utc(conjunction.get("t_ca_utc"))
-    performed, clear = _secondary_check(artifact)
+    performed, clear, deferred = _secondary_check(artifact)
 
     # SCRUM-380: an abort on this request, otherwise one already standing. A
     # ground clearance is the only thing that lifts it, and that is handled by
@@ -286,6 +288,7 @@ def build_guard_inputs(
         iod_confidence_verdict=str(iod.get("confidence_verdict", "")),
         secondary_check_performed=performed,
         secondary_conjunction_clear=clear,
+        secondary_screen_deferred=deferred,
         covariance_source=covariance_source,
         operator_ack_surrogate_covariance=bool(
             authorization.get("operator_ack_surrogate_covariance", False)

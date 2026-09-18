@@ -34,11 +34,6 @@ from common.atlas_artifact import (
     _build_verification_result,
 )
 from common.secondary_horizon import _find_object_tca, screen_secondary_catalog
-from common.spacetrack_tle import (
-    _parse_and_propagate_tle,
-    fetch_catalog_objects,
-    _DEFAULT_SCREENING_RADIUS_KM,
-)
 
 
 # ---------------------------------------------------------------------------
@@ -224,41 +219,6 @@ class TestCatalogUnavailabilityFallback:
         result = _run_secondary_conflict_check(None, None)
         assert len(result.operator_note) > 0
 
-    def test_fetch_catalog_objects_returns_empty_on_missing_credentials(self):
-        """fetch_catalog_objects must return [] when env vars are missing, no crash."""
-        with patch.dict("os.environ", {}, clear=True):
-            # Remove SPACETRACK_USER and SPACETRACK_PASS if present
-            import os
-            env = {k: v for k, v in os.environ.items()
-                   if k not in ("SPACETRACK_USER", "SPACETRACK_PASS")}
-            with patch.dict("os.environ", env, clear=True):
-                result = fetch_catalog_objects(
-                    r_sat_km=[6778.0, 0.0, 0.0],
-                    burn_time_utc="2024-01-01T12:00:00Z",
-                )
-        assert result == []
-
-    def test_fetch_catalog_objects_returns_empty_on_network_failure(self):
-        """fetch_catalog_objects must return [] on network failure, no crash."""
-        with patch("common.spacetrack_tle.requests.Session") as mock_session_cls:
-            mock_session = MagicMock()
-            mock_session_cls.return_value = mock_session
-            mock_session.post.side_effect = ConnectionError("network unavailable")
-
-            result = fetch_catalog_objects(
-                r_sat_km=[6778.0, 0.0, 0.0],
-                burn_time_utc="2024-01-01T12:00:00Z",
-            )
-        assert result == []
-
-    def test_fetch_catalog_objects_returns_empty_on_bad_epoch(self):
-        """fetch_catalog_objects must return [] when burn_time_utc is unparseable."""
-        result = fetch_catalog_objects(
-            r_sat_km=[6778.0, 0.0, 0.0],
-            burn_time_utc="not-a-date",
-        )
-        assert result == []
-
 
 # ---------------------------------------------------------------------------
 # SCRUM-381: full-input gate and fail-closed routing
@@ -439,85 +399,6 @@ class TestVerificationResultSecondaryField:
         result = _build_verification_result(scoring, policy, secondary)
         assert result.passed is False
         assert any("OBJ-1" in r for r in result.failure_reasons)
-
-
-# ---------------------------------------------------------------------------
-# TLE parse + propagate (unit, no network)
-# ---------------------------------------------------------------------------
-
-class TestTLEParseAndPropagate:
-    """Tests for _parse_and_propagate_tle using embedded TLE strings."""
-
-    def _make_tle_text(self, *pairs):
-        """Build TLE text from (line1, line2) tuples."""
-        lines = []
-        for l1, l2 in pairs:
-            lines.extend([l1, l2])
-        return "\n".join(lines)
-
-    def test_returns_empty_for_empty_input(self):
-        epoch = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-        r_sat = np.array([6778.0, 0.0, 0.0])
-        result = _parse_and_propagate_tle("", epoch, r_sat, 100.0)
-        assert result == []
-
-    def test_returns_empty_when_no_objects_nearby(self):
-        """ISS should not be near [6778, 0, 0] at the test epoch -- different orbit phase."""
-        tle_text = self._make_tle_text((_ISS_TLE_LINE1, _ISS_TLE_LINE2))
-        epoch = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-        # Use a position far from ISS at this epoch
-        r_sat = np.array([0.0, 0.0, 6778.0])
-        result = _parse_and_propagate_tle(tle_text, epoch, r_sat, 1.0)
-        # Result may or may not be empty depending on ISS position -- just confirm no crash
-        assert isinstance(result, list)
-
-    def test_result_contains_required_keys(self):
-        """Each returned object must have obj_id, r_km, separation_km, norad_id."""
-        tle_text = self._make_tle_text((_ISS_TLE_LINE1, _ISS_TLE_LINE2))
-        epoch = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-
-        # Propagate ISS to get its actual position, then screen from there
-        try:
-            from sgp4.api import Satrec, jday
-            sat = Satrec.twoline2rv(_ISS_TLE_LINE1, _ISS_TLE_LINE2)
-            jd, fr = jday(2024, 1, 1, 12, 0, 0)
-            e, r, v = sat.sgp4(jd, fr)
-            if e != 0:
-                pytest.skip("SGP4 propagation error for test TLE")
-            r_sat = np.array(r)
-        except ImportError:
-            pytest.skip("sgp4 not installed")
-
-        result = _parse_and_propagate_tle(tle_text, epoch, r_sat, 100.0)
-        if result:
-            obj = result[0]
-            assert "obj_id" in obj
-            assert "r_km" in obj
-            assert "separation_km" in obj
-            assert "norad_id" in obj
-            assert isinstance(obj["r_km"], list)
-            assert len(obj["r_km"]) == 3
-
-    def test_separation_km_is_accurate(self):
-        """separation_km must equal actual Euclidean distance."""
-        tle_text = self._make_tle_text((_ISS_TLE_LINE1, _ISS_TLE_LINE2))
-        epoch = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-
-        try:
-            from sgp4.api import Satrec, jday
-            sat = Satrec.twoline2rv(_ISS_TLE_LINE1, _ISS_TLE_LINE2)
-            jd, fr = jday(2024, 1, 1, 12, 0, 0)
-            e, r, v = sat.sgp4(jd, fr)
-            if e != 0:
-                pytest.skip("SGP4 error")
-            r_sat = np.array(r)
-        except ImportError:
-            pytest.skip("sgp4 not installed")
-
-        result = _parse_and_propagate_tle(tle_text, epoch, r_sat, 200.0)
-        for obj in result:
-            actual_sep = float(np.linalg.norm(r_sat - np.array(obj["r_km"])))
-            assert abs(actual_sep - obj["separation_km"]) < 0.01
 
 
 # ---------------------------------------------------------------------------

@@ -10,8 +10,6 @@
 #   docker compose -f docker-compose.prod.yaml up -d
 #
 # Required environment variables on VPS:
-#   SPACETRACK_USER — Space-Track.org username
-#   SPACETRACK_PASS — Space-Track.org password
 #   DMUI_DIR        — Path to orbital-dmui repo
 #                     (default: /orbital-dmui)
 #
@@ -28,8 +26,6 @@ services:
     ports: ["8001:8000"]
     environment:
       - OUTPUT_DIR=/data/planner_artifacts
-      - SPACETRACK_USER=${SPACETRACK_USER}
-      - SPACETRACK_PASS=${SPACETRACK_PASS}
     volumes:
       - planner_data:/data/planner_artifacts
       - cdm_data:/data/cdm_store

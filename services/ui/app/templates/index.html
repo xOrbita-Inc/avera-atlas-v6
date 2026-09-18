@@ -1385,7 +1385,14 @@ function covLabelLine(result){
   const cs = result && result.covariance_source;
   if(cs === 'real_cdm'){
     const src = String((result && result.source) || '').toLowerCase();
-    const name = src==='leolabs' ? 'LeoLabs' : src==='spacetrack' ? 'Space-Track' : src==='udl' ? 'UDL' : 'live';
+    // SCRUM-431: the planner still returns source "spacetrack" for any real_cdm
+    // covariance, but Space-Track is retired -- such a covariance came from the
+    // offline reference store, so this no longer calls it a live Space-Track
+    // CDM. The internal source name is a backend rename, out of scope here.
+    if(src==='spacetrack'){
+      return 'COVARIANCE: Reference CDM covariance (CCSDS 508.0-B-1)';
+    }
+    const name = src==='leolabs' ? 'LeoLabs' : src==='udl' ? 'UDL' : 'live';
     return 'COVARIANCE: Live ' + name + ' CDM covariance (CCSDS 508.0-B-1)';
   }
   return 'COVARIANCE: Surrogate covariance (identity-scaled)';
@@ -3295,8 +3302,15 @@ function renderPostManeuverProjection(pm) {
   // Secondary conflict
   const sc = pm.secondary_conflict;
   if (sc) {
-    const scLabel = !sc.secondary_check_performed ? 'NOT CHECKED' : sc.secondary_conjunction_clear ? 'CLEAR' : 'CONFLICT DETECTED';
-    const scCls = !sc.secondary_check_performed ? '' : sc.secondary_conjunction_clear ? 'green' : 'red';
+    // SCRUM-431: deferred is its own state. "NOT CHECKED" is the
+    // screen-should-have-run-and-could-not case, which is a failure; deferred
+    // means the screen is out of scope for this build pending the LeoLabs
+    // rebuild, and reads neutral.
+    const scLabel = sc.screen_deferred ? 'DEFERRED'
+      : !sc.secondary_check_performed ? 'NOT CHECKED'
+      : sc.secondary_conjunction_clear ? 'CLEAR' : 'CONFLICT DETECTED';
+    const scCls = (sc.screen_deferred || !sc.secondary_check_performed) ? ''
+      : sc.secondary_conjunction_clear ? 'green' : 'red';
     html += _ar('Secondary conflict', scLabel, scCls);
     // SCRUM-349: the performed path carries the closest catalog object, the
     // closest approach distance, and the screening epoch (the burn epoch, not
@@ -3324,7 +3338,7 @@ function renderNoGoReasoning(ng) {
     '</div><div class="nogo-text">' + (ng.human_readable || '') + '</div></div>';
 }
 
-function renderVerificationResult(vr, maneuverRecommended) {
+function renderVerificationResult(vr, maneuverRecommended, secondaryDeferred) {
   if (!vr) return;
   const el = document.getElementById('verificationBody');
   const badge = document.getElementById('verifyOverallBadge');
@@ -3350,10 +3364,15 @@ function renderVerificationResult(vr, maneuverRecommended) {
   ];
   let html = '<div class="verify-grid">';
   checks.forEach(c => {
-    const val = vr[c.key];
+    // SCRUM-431: a deferred secondary screen is not a failed check. The overall
+    // verdict already excludes it, so showing a red FAIL row beside a PASSED
+    // banner would tell an operator the opposite of what the result says.
+    // Rendered with the existing skipped vocabulary.
+    const deferred = c.key === 'secondary_clear' && secondaryDeferred;
+    const val = deferred ? null : vr[c.key];
     const cls = val == null ? 'skip' : val ? 'pass' : 'fail';
     const icon = val == null ? '\u2014' : val ? '\u2713' : '\u2717';
-    const verdict = val == null ? 'N/A' : val ? 'PASS' : 'FAIL';
+    const verdict = deferred ? 'DEFERRED' : val == null ? 'N/A' : val ? 'PASS' : 'FAIL';
     html += '<div class="verify-check ' + cls + '">' +
       '<span class="verify-icon">' + icon + '</span>' +
       '<span class="verify-label">' + c.label + '</span>' +
@@ -3421,7 +3440,10 @@ function renderAtlasArtifact(artifact) {
   renderNoGoReasoning(artifact.no_go);
   renderVerificationResult(
     artifact.verification,
-    artifact.recommendation != null
+    artifact.recommendation != null,
+    !!(artifact.post_maneuver
+       && artifact.post_maneuver.secondary_conflict
+       && artifact.post_maneuver.secondary_conflict.screen_deferred)
   );
   renderMissionImpactSummary(artifact.mission_impact);
 }

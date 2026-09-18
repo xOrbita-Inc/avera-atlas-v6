@@ -741,12 +741,18 @@ def m1_to_m2_guards(inputs: GuardInputs) -> Tuple[GuardResult, ...]:
     Every guard is evaluated, not short-circuited, so the transition record can
     show all seven verdicts rather than only the first failure.
     """
+    # SCRUM-431: the secondary guard is included only when the screen is not
+    # deferred. Omitted rather than passed: a guard that always passes would
+    # read, in the evidence record, as a screen that ran and found nothing.
+    secondary = (
+        () if inputs.secondary_screen_deferred else (guard_secondary_clear(inputs),)
+    )
     return (
         guard_pc_above_action(inputs),
         guard_iod_confident(inputs),
         guard_validity_earned(inputs),
         guard_envelope_satisfied(inputs),
-        guard_secondary_clear(inputs),
+    ) + secondary + (
         guard_slew_feasible(inputs),
         guard_authority_l1_or_l2(inputs),
         # SCRUM-380: floors layered on top of the section 3 row, not among its
@@ -785,6 +791,10 @@ def _m1_escalation_guards(inputs: GuardInputs) -> Tuple[GuardResult, ...]:
         not inputs.validity_service_available
     ):
         results.append(guard_validity_earned(inputs))
+    # SCRUM-431: a deferred screen is inert here by construction -- it is never
+    # "performed", so this clause cannot fire on it. Stated explicitly because
+    # the inertness is load-bearing: if this escalated on a deferred screen, the
+    # default build would safehold every watch event.
     if inputs.secondary_check_performed and not inputs.secondary_conjunction_clear:
         results.append(guard_secondary_clear(inputs))
 

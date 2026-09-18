@@ -223,28 +223,6 @@ async def planner_leolabs_status():
 
 # ---------- Ingest CDM proxy ----------
 
-@app.post("/api/ingest/poll")
-async def ingest_poll(request: Request):
-    """Proxy a CDM poll request to the ingest service.
-
-    Triggers a Space-Track fetch and persists results to the CDM store.
-    Body: { "norad_id": int } or { "pc_threshold": float, "days_lookahead": int }
-    """
-    body = await request.json()
-    try:
-        resp = requests.post(
-            f"{INGEST_SERVICE_URL}/cdm/poll",
-            json=body, timeout=30
-        )
-        return JSONResponse(status_code=resp.status_code, content=resp.json())
-    except requests.exceptions.ConnectionError:
-        return JSONResponse(status_code=503, content={
-            "error": "Ingest service unavailable"
-        })
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-
 @app.get("/api/ingest/cdm/source_mode")
 async def ingest_cdm_source_mode():
     """Passthrough proxy to the ingest CDM source-mode endpoint (SCRUM-347).

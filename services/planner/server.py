@@ -66,7 +66,6 @@ from common.gnc_report import assess_post_burn, build_report_ack
 from common.satellite_capability import SatelliteCapability
 from common.logging_setup import build_logger, _POLICY_CONFIG_PATH, SERVICE_NAME, SERVICE_VERSION
 from common.operator_policy import OperatorPolicy, CovarianceSurrogate
-from common.spacetrack_tle import fetch_catalog_objects
 from common.udl_client import UDL_ENABLED, get_conjunctions, get_credential_validity
 from common import leolabs_runtime
 from common.leolabs_runtime import (
@@ -360,6 +359,17 @@ def _post_planner_output(
 # FileModeStore, otherwise a NullModeStore that persists nothing. A store that
 # silently retained modes between unrelated requests would be worse than none,
 # because a mode left over from another event would read as this one's.
+# SCRUM-431: the SCRUM-381 secondary conflict screen ran on a Space-Track TLE
+# catalog. That catalog carries no covariance, so the screen could only ever
+# produce an assumed-covariance answer, and with Space-Track retired there is no
+# catalog at all -- it failed closed and showed VERIFICATION FAILED on every
+# evaluate. Deferred, not deleted: the screen logic is intact and flipping this
+# flag restores today's fail-closed behaviour exactly, which is what the
+# LeoLabs covariance-backed rebuild will do.
+SECONDARY_SCREEN_ENABLED = (
+    os.environ.get("SECONDARY_SCREEN_ENABLED", "false").lower() == "true"
+)
+
 _MODE_STORE = build_mode_store()
 
 # SCRUM-382: the latest operator approve/veto per conjunction, so an operator
@@ -1629,31 +1639,15 @@ async def post_evaluate(request: Request):
             cap     = SatelliteCapability.from_request(sat_dict)
             policy  = _policy_from_dict(body.get("policy", {}))
 
-            # SCRUM-381: fetch the full TLE catalog for policy-horizon Pc screening.
-            # r_post_km approximated as r_sat_km -- position barely changes
-            # during a short avoidance burn; only velocity changes.
+            # SCRUM-431: the Space-Track TLE catalog fetch is gone with the
+            # credential. The secondary screen is deferred behind
+            # SECONDARY_SCREEN_ENABLED (default off) pending the LeoLabs
+            # covariance-backed rebuild, so nothing fetches a catalog here.
+            # r_post_km is still approximated as r_sat_km -- position barely
+            # changes during a short avoidance burn, only velocity does -- and
+            # the A4 post-maneuver projection still uses it.
             r_sat_km_req = sat_dict.get("r_sat_km", [])
-            t_burn_utc   = sat_dict.get("t_burn_utc", "")
-            known_objects = []
-            try:
-                known_objects = fetch_catalog_objects(
-                    r_sat_km=r_sat_km_req,
-                    burn_time_utc=t_burn_utc,
-                    screening_radius_km=None,
-                )
-                log.info(
-                    "catalog screening complete",
-                    extra={
-                        "event": "catalog_screening_complete",
-                        "nearby_count": len(known_objects),
-                        "conjunction_id": scoring.conjunction_id,
-                    },
-                )
-            except Exception as exc:
-                log.warning(
-                    "catalog fetch failed, secondary check will be not_performed",
-                    extra={"event": "catalog_fetch_failed", "exc": str(exc)},
-                )
+            known_objects = None
 
             v_sat_km_s_req = sat_dict.get("v_sat_km_s", [])
             v_post_km_s = None
@@ -1673,6 +1667,7 @@ async def post_evaluate(request: Request):
                 known_objects=known_objects if known_objects else None,
                 r_post_km=r_sat_km_req if r_sat_km_req else None,
                 v_post_km_s=v_post_km_s,
+                secondary_screen_enabled=SECONDARY_SCREEN_ENABLED,
             )
             result["atlas_artifact"] = artifact.to_dict()
             # Read once: both the decision-log block and the SCRUM-379 block
