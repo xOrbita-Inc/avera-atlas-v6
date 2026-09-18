@@ -467,6 +467,23 @@ async def get_conjunctions():
         tca_indices = data.get("tca_indices", np.zeros(len(obj_ids), dtype=int))
         rel_velocities = data.get("relative_velocities", np.zeros(len(obj_ids)))
 
+        # SCRUM-383: source provenance originates in the scenario/state
+        # producer and is carried through the propagator artifact. Never infer
+        # synthetic/live status from object IDs or UI state.
+        assessment_source = None
+        source_metadata = data.get("source_metadata", None)
+        if source_metadata is not None:
+            try:
+                metadata_value = (
+                    source_metadata.item()
+                    if hasattr(source_metadata, "item")
+                    else source_metadata
+                )
+                metadata_dict = json.loads(str(metadata_value))
+                assessment_source = metadata_dict.get("source")
+            except Exception:
+                assessment_source = None
+
         n_red = int(data.get("n_red_alerts", 0))
         n_amber = int(data.get("n_amber_alerts", 0))
 
@@ -508,6 +525,7 @@ async def get_conjunctions():
                 "time_to_tca_min": round(time_to_tca_s / 60, 1),
                 "relative_velocity_km_s": round(float(rel_velocities[i]), 3),
                 "tca_index": tca_idx,
+                "source": assessment_source,
             }
 
             # Include orbital positions for 3D viz if available
