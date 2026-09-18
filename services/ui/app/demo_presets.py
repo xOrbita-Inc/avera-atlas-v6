@@ -209,10 +209,13 @@ class CuratedSpec:
         return int(round(self.t_star_s / SAMPLE_DT_S))
 
 
+# SCRUM-383: keep the curated demo geometry/Pc behavior, but place the
+# conjunctions six hours out so the browser demo exercises the real MAF
+# authority loop inside the locked 4-72 hour decision horizon.
 CURATED: List[CuratedSpec] = [
-    CuratedSpec("OBJ-DEMO-ALWAYS", (0.30, 0.0, 0.10), 7200.0, 0.5, 0.9),
-    CuratedSpec("OBJ-DEMO-FLIP", (0.10, 0.0, 0.40), 3600.0, 0.5, 0.9),
-    CuratedSpec("OBJ-DEMO-NEVER", (0.20, 0.0, 3.00), 3600.0, 0.5, 0.9),
+    CuratedSpec("OBJ-DEMO-ALWAYS", (0.30, 0.0, 0.10), 21600.0, 0.5, 0.9),
+    CuratedSpec("OBJ-DEMO-FLIP", (0.10, 0.0, 0.40), 21600.0, 0.5, 0.9),
+    CuratedSpec("OBJ-DEMO-NEVER", (0.20, 0.0, 3.00), 21600.0, 0.5, 0.9),
 ]
 
 SCENARIOS: Tuple[str, ...] = tuple(PRESETS) + ("demo",)

@@ -27,9 +27,9 @@ def _case(demo, authority: str, pc_action: float):
     )
 
 
-def test_demo_now_runs_through_real_authorized_execution(demo):
-    assert demo["scope"] == "through-authorized-execution"
-    assert demo["downstream_dependency"] == "SCRUM-382"
+def test_demo_runs_complete_simulated_maf_loop(demo):
+    assert demo["scope"] == "end-to-end-sim"
+    assert demo["downstream_dependency"] is None
 
 
 def test_fixed_scrum_383_scenario_is_preserved_across_policy_matrix(demo):
@@ -348,34 +348,61 @@ def test_scrum_379_transition_evidence_is_real_not_pending(demo):
     )
 
     evidence = case["evidence"]
-    fields = evidence["fields"]
 
-    assert fields["from_mode"]["state"] == FieldState.PRESENT
-    assert fields["from_mode"]["value"] == "M2"
+    transitions = [
+        record
+        for record in evidence["records"]
+        if (
+            record["record_type"] == "transition"
+            and record["fields"]["from_mode"]["value"] == "M2"
+            and record["fields"]["to_mode"]["value"] == "M3"
+        )
+    ]
 
-    assert fields["to_mode"]["state"] == FieldState.PRESENT
-    assert fields["to_mode"]["value"] == "M3"
+    assert len(transitions) == 1
+
+    fields = transitions[0]["fields"]
 
     assert fields["trigger"]["state"] == FieldState.PRESENT
-
     assert (
         fields["monitor_results"]["state"]
         == FieldState.PRESENT
     )
     assert fields["monitor_results"]["value"]
 
-    assert "SCRUM-379" not in evidence["pending_producers"]
 
-
-def test_scrum_382_outputs_remain_explicitly_pending(demo):
+@pytest.mark.parametrize(
+    "authority",
+    [
+        AuthorityLevel.L1.value,
+        AuthorityLevel.L2.value,
+    ],
+)
+def test_scrum_382_outputs_are_real_for_authorized_burns(
+    demo,
+    authority,
+):
     case = _case(
         demo,
-        AuthorityLevel.L2.value,
+        authority,
         STRICT_PC_ACTION,
     )
 
-    evidence = case["evidence"]
-    fields = evidence["fields"]
+    gnc = case["gnc"]
+
+    assert gnc is not None
+    assert gnc["emission"]["mode"] == "record_only"
+    assert gnc["emission"]["acknowledged"] is False
+
+    # No endpoint exists, therefore no command ack is invented.
+    assert gnc["command_ack"] is None
+
+    assert (
+        gnc["report"]["execution_status"]
+        == "NOMINAL"
+    )
+
+    fields = case["evidence"]["fields"]
 
     for field_name in (
         "commands_and_acknowledgments",
@@ -385,14 +412,29 @@ def test_scrum_382_outputs_remain_explicitly_pending(demo):
     ):
         assert (
             fields[field_name]["state"]
-            == FieldState.PRODUCER_NOT_IMPLEMENTED
+            == FieldState.PRESENT
         )
         assert (
             fields[field_name]["producer"]
             == "SCRUM-382"
         )
 
-    assert "SCRUM-382" in evidence["pending_producers"]
+    assert (
+        "SCRUM-382"
+        not in case["evidence"]["pending_producers"]
+    )
+
+
+def test_cases_without_authorized_execution_emit_no_gnc_command(
+    demo,
+):
+    for case in demo["cases"]:
+        if (
+            case["state_machine"]["authorized_execution"]
+            is None
+        ):
+            assert case["gnc"] is None
+
 
 
 def test_evidence_contains_real_validity_and_envelope_outputs(demo):

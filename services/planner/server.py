@@ -1,4 +1,4 @@
-"""
+﻿"""
 AVERA-ATLAS Planner Service — FastAPI wrapper for decision_model.py
 APS 2.5 / 9.6 + SCRUM-341 container hardening.
 
@@ -1648,7 +1648,6 @@ async def post_evaluate(request: Request):
             # the A4 post-maneuver projection still uses it.
             r_sat_km_req = sat_dict.get("r_sat_km", [])
             known_objects = None
-
             v_sat_km_s_req = sat_dict.get("v_sat_km_s", [])
             v_post_km_s = None
             if v_sat_km_s_req and scoring.dv_eci_km_s:

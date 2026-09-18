@@ -14,10 +14,13 @@ Implemented here:
   5. Real SCRUM-379 M0-M3 decision-state-machine and safety-monitor execution.
   6. L1 operator-approval and L2 veto-window execution authorization.
   7. Real SCRUM-377 decision and transition evidence records.
+  8. Real SCRUM-382 GNCCommand construction and record-only emission.
+  9. Constructed contract-valid GNCReport consumed by the real SCRUM-382
+     post-burn assessment and evidence producers.
 
-SCRUM-382 remains a downstream dependency. SCRUM-379 stops at
-AuthorizedExecution. GNC command framing, acknowledgements, burn execution,
-post-burn OD, and residual-risk reporting remain SCRUM-382 producers.
+The demo has no live GNC endpoint. Authorized commands therefore use
+SCRUM-382 record-only emission and no GNCCommandAck is fabricated. The
+GNCReport is a constructed simulation fixture, not measured flight data.
 
 SCRUM-377 provides a tamper-evident hash-chained evidence trail. SCRUM-375
 provides HMAC-SHA256 authentication for the approved authorization envelope.
@@ -31,11 +34,12 @@ from __future__ import annotations
 
 import argparse
 import copy
+import inspect
 import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
@@ -69,6 +73,11 @@ from common.evidence_record import (
     verify_chain,
 )
 from common.logging_setup import SERVICE_VERSION
+from aps_math import conventions
+from common import gnc_client
+from common.gnc_contract import load_gnc_schema, validate_against_contract
+from common.gnc_report import assess_post_burn, build_report_ack
+import server as planner_server
 from common.maneuver_scorer import evaluate_conjunction_v25, _policy_from_dict
 from common.monitor_adapter import (
     evaluate_request as evaluate_decision_state_machine,
@@ -411,6 +420,302 @@ def _run_state_machine(
     return decisions
 
 
+
+
+def _contract_fixture_value(
+    schema: Dict[str, Any],
+    field_name: str,
+) -> Any:
+    """Minimal constructed value for a required GNC contract field."""
+
+    if "default" in schema:
+        return copy.deepcopy(schema["default"])
+
+    enum = schema.get("enum")
+    if enum:
+        return enum[0]
+
+    schema_type = schema.get("type")
+
+    if schema_type == "string":
+        if schema.get("format") == "date-time" or field_name.endswith("_utc"):
+            return _iso(DEMO_DECISION_DT + timedelta(seconds=10))
+        return f"scrum-383-{field_name}"
+
+    if schema_type == "number":
+        return 0.0
+
+    if schema_type == "integer":
+        return 0
+
+    if schema_type == "boolean":
+        return False
+
+    if schema_type == "array":
+        item_schema = schema.get("items", {})
+        count = int(schema.get("minItems", 0) or 0)
+        return [
+            _contract_fixture_value(item_schema, field_name)
+            for _ in range(count)
+        ]
+
+    if schema_type == "object":
+        properties = schema.get("properties", {})
+        return {
+            name: _contract_fixture_value(
+                properties.get(name, {}),
+                name,
+            )
+            for name in schema.get("required", [])
+        }
+
+    return None
+
+
+def _contract_block(
+    schema_name: str,
+    overrides: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Build and validate one constructed block from gnc_interface.yaml."""
+
+    schema = load_gnc_schema(schema_name)
+    properties = schema.get("properties", {})
+
+    block: Dict[str, Any] = {}
+
+    for field_name in schema.get("required", []):
+        if field_name in overrides:
+            block[field_name] = copy.deepcopy(
+                overrides[field_name]
+            )
+        else:
+            block[field_name] = _contract_fixture_value(
+                properties.get(field_name, {}),
+                field_name,
+            )
+
+    for field_name, value in overrides.items():
+        if field_name in properties:
+            block[field_name] = copy.deepcopy(value)
+
+    validate_against_contract(schema_name, block)
+    return block
+
+
+def _real_post_burn_assessment(
+    *,
+    report: Dict[str, Any],
+    scenario: Dict[str, Any],
+    scoring: Any,
+    pc_action: float,
+) -> Any:
+    """Feed the constructed report through SCRUM-382 assess_post_burn."""
+
+    conj = scenario["conjunction"]
+
+    available = {
+        "conjunction_id": scenario["conjunction_id"],
+        "pc_pre": scoring.pc_pre,
+        "pc_precomputed": scoring.pc_pre,
+        "r_rel_km": conj.get("r_rel_km"),
+        "r_rel_km_at_tca": conj.get("r_rel_km"),
+        "v_rel_km_s": conj.get("v_rel_km_s"),
+        "v_rel_km_s_at_tca": conj.get("v_rel_km_s"),
+        "p_pre_km2": conj.get("p_rel_km2"),
+        "p_rel_km2": conj.get("p_rel_km2"),
+        "p_rel_pre_km2": conj.get("p_rel_km2"),
+        "hbr_m": float(
+            conventions.DEFAULT_COMBINED_HBR_M
+        ),
+        "pc_monitor_threshold": pc_action / 10.0,
+        "pc_action_threshold": pc_action,
+        "pc_maneuver_threshold": pc_action,
+    }
+
+    signature = inspect.signature(assess_post_burn)
+    kwargs: Dict[str, Any] = {}
+
+    # First positional argument is the GNC report itself.
+    parameters = list(signature.parameters.items())[1:]
+
+    for name, parameter in parameters:
+        if name in available:
+            kwargs[name] = available[name]
+        elif parameter.default is inspect._empty:
+            raise RuntimeError(
+                "SCRUM-383 missing required assess_post_burn "
+                f"input: {name}"
+            )
+
+    return assess_post_burn(report, **kwargs)
+
+
+def _run_scrum_382(
+    *,
+    scenario: Dict[str, Any],
+    scoring: Any,
+    artifact: Any,
+    decisions: List[Any],
+    pc_action: float,
+) -> Optional[Dict[str, Any]]:
+    """Run real SCRUM-382 command + report processing for an authorized burn."""
+
+    final_monitor = decisions[-1]
+
+    if final_monitor.authorized_execution is None:
+        return None
+
+    result: Dict[str, Any] = {}
+
+    # The capstone has no external GNC service. Use 382's real
+    # record-only adapter instead of manufacturing a fake endpoint/ack.
+    old_enabled = gnc_client.GNC_ENABLED
+    old_url = gnc_client.GNC_SERVICE_URL
+
+    try:
+        gnc_client.GNC_ENABLED = True
+        gnc_client.GNC_SERVICE_URL = ""
+
+        planner_server._emit_to_gnc(
+            result,
+            final_monitor,
+            scoring,
+            artifact,
+            scenario["satellite"],
+        )
+    finally:
+        gnc_client.GNC_ENABLED = old_enabled
+        gnc_client.GNC_SERVICE_URL = old_url
+
+    command = result["gnc_command"]
+    emission = result["gnc_emission"]
+
+    validate_against_contract(
+        "GNCCommand",
+        command,
+    )
+
+    if emission["mode"] != gnc_client.MODE_RECORD_ONLY:
+        raise RuntimeError(
+            "SCRUM-383 expected record-only GNC emission"
+        )
+
+    if emission["acknowledged"]:
+        raise RuntimeError(
+            "record-only mode must not fabricate a GNCCommandAck"
+        )
+
+    maneuver = command["maneuver"]
+    sat = scenario["satellite"]
+    conj = scenario["conjunction"]
+
+    # Constructed perfect-execution report for the simulation.
+    # These are not measured flight values.
+    r_post_km = [
+        float(v)
+        for v in sat["r_sat_km"]
+    ]
+
+    v_post_km_s = [
+        float(sat["v_sat_km_s"][i])
+        + float(scoring.dv_eci_km_s[i])
+        for i in range(3)
+    ]
+
+    execution_error = _contract_block(
+        "ExecutionError",
+        {
+            "sigma_mag": 0.0,
+            "pointing_error_deg": 0.0,
+            "p_burn_rtn_km2": [0.0] * 9,
+        },
+    )
+
+    post_burn_state = _contract_block(
+        "PostBurnState",
+        {
+            "r_sat_km": r_post_km,
+            "v_sat_km_s": v_post_km_s,
+            "p_post_km2": [
+                float(v)
+                for v in conj["p_rel_km2"]
+            ],
+            "epoch_utc": _iso(
+                DEMO_DECISION_DT
+                + timedelta(seconds=5)
+            ),
+            "m2_post_estimated": (
+                float(scoring.m2_pre) + 1.0
+            ),
+        },
+    )
+
+    report = _contract_block(
+        "GNCReport",
+        {
+            "command_id": command["command_id"],
+            "conjunction_id": scenario["conjunction_id"],
+            "execution_status": "NOMINAL",
+            "actual_dv_m_s": float(
+                maneuver["dv_magnitude_m_s"]
+            ),
+            "actual_dv_rtn_m_s": list(
+                maneuver["dv_rtn_m_s"]
+            ),
+            "attitude_error_deg": 0.0,
+            "execution_error": execution_error,
+            "post_burn_state": post_burn_state,
+            "reported_at_utc": _iso(
+                DEMO_DECISION_DT
+                + timedelta(seconds=10)
+            ),
+        },
+    )
+
+    assessment = _real_post_burn_assessment(
+        report=report,
+        scenario=scenario,
+        scoring=scoring,
+        pc_action=pc_action,
+    )
+
+    report_ack = build_report_ack(assessment)
+
+    validate_against_contract(
+        "GNCReportAck",
+        report_ack,
+    )
+
+    evidence_values = {
+        "commands_and_acknowledgments": {
+            "command": command,
+            "emission": emission,
+            "command_acknowledgment": None,
+            "report_acknowledgment": report_ack,
+        },
+        **assessment.evidence_values(),
+    }
+
+    return {
+        "command": command,
+        "emission": emission,
+        "command_ack": None,
+        "report": report,
+        "report_ack": report_ack,
+        "assessment": {
+            "execution_status": (
+                assessment.execution_status
+            ),
+            "pc_post": assessment.pc_post,
+            "replan_required": (
+                assessment.replan_required
+            ),
+        },
+        "evidence_values": evidence_values,
+    }
+
+
+
 def _transition_extra_values(
     *,
     artifact: Any,
@@ -477,6 +782,7 @@ def _build_evidence_package(
     decisions: List[Any],
     authority_level: AuthorityLevel,
     pc_action: float,
+    gnc_result: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     """Build one chained decision + transition evidence package."""
 
@@ -512,9 +818,8 @@ def _build_evidence_package(
             "pc_source": scoring.pc_source,
             "covariance_source": "real_cdm",
             "integration_scope": (
-                "SCRUM-383 through real SCRUM-379 "
-                "AuthorizedExecution; SCRUM-382 GNC runtime "
-                "remains downstream"
+                "SCRUM-383 end-to-end simulated MAF loop through "
+                "SCRUM-382 command emission and post-burn assessment"
             ),
         },
         "orbit_state": {
@@ -580,6 +885,48 @@ def _build_evidence_package(
             recorded_at=monitor.evaluated_at_utc,
         )
         records.append(transition_record)
+
+    # SCRUM-382 post-burn outcome is a later event in the evidence chain,
+    # not something retroactively attached to the earlier M2 -> M3 record.
+    if gnc_result is not None:
+        post_values = dict(evidence_values)
+
+        post_values.update(
+            gnc_result["evidence_values"]
+        )
+
+        final_monitor = decisions[-1]
+
+        post_values.update(
+            {
+                "timestamp": (
+                    gnc_result["report"]["reported_at_utc"]
+                ),
+                "from_mode": (
+                    final_monitor.transition.from_mode.value
+                ),
+                "to_mode": final_monitor.mode.value,
+                "trigger": (
+                    "gnc_report_consumed_post_burn"
+                ),
+                "monitor_results": [
+                    guard.to_dict()
+                    for guard in final_monitor.guards
+                ],
+            }
+        )
+
+        post_record = build_decision_record(
+            chain_id=chain_id,
+            seq=len(records),
+            prev_hash=records[-1].content_hash,
+            values=post_values,
+            recorded_at=(
+                gnc_result["report"]["reported_at_utc"]
+            ),
+        )
+
+        records.append(post_record)
 
     verification = verify_chain(records)
 
@@ -693,6 +1040,14 @@ def run_case(
                 decision.authorized_execution.to_dict()
             )
 
+    gnc_result = _run_scrum_382(
+        scenario=scenario,
+        scoring=scoring,
+        artifact=artifact,
+        decisions=decisions,
+        pc_action=pc_action,
+    )
+
     evidence = _build_evidence_package(
         scenario=scenario,
         scoring=scoring,
@@ -702,6 +1057,7 @@ def run_case(
         decisions=decisions,
         authority_level=authority_level,
         pc_action=pc_action,
+        gnc_result=gnc_result,
     )
 
     return {
@@ -747,6 +1103,7 @@ def run_case(
             "final_mode": decisions[-1].mode.value,
             "authorized_execution": authorized_execution,
         },
+        "gnc": gnc_result,
         "evidence": evidence,
     }
 
@@ -774,9 +1131,9 @@ def run_demo() -> Dict[str, Any]:
 
     return {
         "story": "SCRUM-383",
-        "scope": "through-authorized-execution",
+        "scope": "end-to-end-sim",
         "software_version": SERVICE_VERSION,
-        "downstream_dependency": "SCRUM-382",
+        "downstream_dependency": None,
         "cases": cases,
     }
 
@@ -869,10 +1226,10 @@ def _print_summary(result: Dict[str, Any]) -> None:
 
     print()
     print(
-        "Scope note: the real MAF loop is exercised through "
-        "SCRUM-379 AuthorizedExecution. SCRUM-382 remains the "
-        "downstream owner of GNC command framing, execution, "
-        "acknowledgements, post-burn OD, and residual risk."
+        "Scope note: the simulated MAF loop is exercised through "
+        "SCRUM-382 GNCCommand record-only emission and a constructed "
+        "contract-valid GNCReport consumed by the real post-burn "
+        "assessment. No live GNC acknowledgement is fabricated."
     )
 
 
