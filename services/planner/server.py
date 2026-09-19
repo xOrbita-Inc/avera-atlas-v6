@@ -289,6 +289,58 @@ def _resolve_evaluate_source(
     return "surrogate"
 
 
+def _persist_leolabs_cdm(parsed_ll) -> Optional[int]:
+    """SCRUM-429: store the LeoLabs CDM this evaluate is scoring, return its id.
+
+    Persist-on-evaluate, not a scheduler: the planner already holds a parsed,
+    guard-checked CDM at this point, so writing it down costs one POST and no
+    background machinery.
+
+    Guarded like every other audit write on this service. Any failure -- a
+    malformed mapping, an unreachable ingest, a store error -- logs and returns
+    None, which is exactly the value this branch used to hardcode. The evaluate
+    then behaves as it does today rather than failing because an audit write
+    did. A decision that was made must still be returned even if we could not
+    write down what it was made from.
+    """
+    try:
+        store_dict = parsed_ll.to_store_cdm_dict()
+    except Exception as exc:
+        log.warning(
+            "LeoLabs CDM could not be mapped for the store",
+            extra={"event": "leolabs_cdm_map_failed", "exc": str(exc)},
+        )
+        return None
+
+    try:
+        resp = http_requests.post(
+            f"{_ingest_url()}/cdm/persist", json=store_dict, timeout=5.0
+        )
+        if resp.status_code != 200:
+            _note_audit_failure(
+                "leolabs_cdm", str(store_dict.get("COMMENT_ID", "?")),
+                f"status {resp.status_code}: {resp.text[:200]}",
+            )
+            return None
+        payload = resp.json()
+        record_id = payload.get("id")
+        log.info(
+            "LeoLabs CDM persisted",
+            extra={"event": "leolabs_cdm_persisted",
+                   "cdm_record_id": record_id,
+                   # Not "created": that is a reserved LogRecord attribute and
+                   # passing it in extra raises inside the logging call.
+                   "row_created": payload.get("created"),
+                   "cdm_id": store_dict.get("COMMENT_ID")},
+        )
+        return int(record_id) if record_id is not None else None
+    except Exception as exc:
+        _note_audit_failure(
+            "leolabs_cdm", str(store_dict.get("COMMENT_ID", "?")), str(exc)
+        )
+        return None
+
+
 def _post_planner_output(
     cdm_record_id: int,
     result: Dict[str, Any],
@@ -1519,7 +1571,14 @@ async def post_evaluate(request: Request):
         # and take precedence over UDL when both flags are set.
         covariance_source = _conj_block.get("covariance_source") or "real_cdm"
         body["conjunction"]["covariance_source"] = covariance_source
-        cdm_record_id = None
+        # SCRUM-429: persist the CDM this decision is being made from, and keep
+        # its row id. Without this the store's only feeder was the injected
+        # reference CDM, so no real conjunction the system acted on reached
+        # ADR-008's record of truth -- and the audit write below, guarded on
+        # cdm_record_id, never fired for a LeoLabs decision. The covariance is
+        # untouched: it still comes from the block, still reads real_cdm. This
+        # only writes the CDM down and remembers where.
+        cdm_record_id = _persist_leolabs_cdm(parsed_ll)
     elif UDL_ENABLED:
         covariance_source = "UDL"
         cdm_record_id = None

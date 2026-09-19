@@ -263,8 +263,10 @@ async def inject_cdm(request: Request) -> dict:
     Accepts a dict matching the cdm_parser.parse_cdm_kvn() output format
     (flat dict with CCSDS field names prefixed by OBJECT1_ / OBJECT2_).
 
-    Returns {saved, skipped, errors}. SCRUM-431: this is now the only ingest
-    route; the Space-Track poll it used to sit beside is retired.
+    Returns {saved, skipped, errors}. SCRUM-431: the Space-Track poll this used
+    to sit beside is retired. SCRUM-429: the source is now named through
+    save_cdm_record rather than patched onto the row afterwards, and the save is
+    idempotent, so re-injecting the reference CDM reuses its row.
     """
     body = await request.json()
 
@@ -276,14 +278,7 @@ async def inject_cdm(request: Request) -> dict:
 
     for cdm in cdm_list:
         try:
-            save_cdm_record(cdm)
-            with get_session() as session:
-                record = session.query(CdmRecord).order_by(
-                    CdmRecord.id.desc()
-                ).first()
-                if record:
-                    record.source = "real_cdm"
-                    session.commit()
+            save_cdm_record(cdm, source="real_cdm")
             saved += 1
         except Exception as e:
             skipped += 1
@@ -295,6 +290,40 @@ async def inject_cdm(request: Request) -> dict:
 
     logging.info("[INGEST] Inject complete: %d saved, %d skipped", saved, skipped)
     return {"saved": saved, "skipped": skipped, "errors": errors}
+
+
+@app.post("/cdm/persist", status_code=200)
+async def persist_cdm(request: Request) -> dict:
+    """SCRUM-429: persist a live LeoLabs CDM from the planner's evaluate path.
+
+    Same flat OBJECTn_ shape as /cdm/inject, written with source='leolabs' so
+    the store distinguishes a live conjunction from the offline reference CDM
+    and from a synthetic one. ParsedLeoLabsCDM.to_store_cdm_dict() produces it.
+
+    Idempotent by construction: save_cdm_record upserts on the originating CDM's
+    id, so re-evaluating a conjunction reuses its row and returns the same id
+    rather than accumulating one row per evaluate. created says which happened.
+
+    Returns {id, created}. The planner threads id back as cdm_record_id so the
+    decision's audit trail links to the exact stored CDM it was made from.
+    """
+    body = await request.json()
+    if not isinstance(body, dict):
+        return JSONResponse(
+            status_code=422,
+            content={"error": "expected a single CDM object"},
+        )
+    try:
+        record_id, created = save_cdm_record(body, source="leolabs")
+    except Exception as exc:
+        logging.warning("[INGEST] persist failed: %s", exc)
+        return JSONResponse(status_code=500, content={"error": str(exc)})
+
+    logging.info(
+        "[INGEST] LeoLabs CDM %s (id=%d, created=%s)",
+        body.get("COMMENT_ID", "?"), record_id, created,
+    )
+    return {"id": record_id, "created": created}
 
 
 @app.get("/store/cdm_records")
