@@ -199,6 +199,61 @@ class ParsedLeoLabsCDM:
             "relative_velocity_rtn_m_s": self.relative_velocity_rtn_m_s,
         }
 
+    def to_store_cdm_dict(self) -> Dict[str, Any]:
+        """SCRUM-429: this CDM in the flat shape the ingest store already takes.
+
+        save_cdm_record consumes cdm_parser.parse_cdm_kvn()'s output -- a flat
+        dict of CCSDS names prefixed OBJECT1_ / OBJECT2_. This emits that shape
+        from data the parser has already validated, so a LeoLabs conjunction can
+        land in the store (ADR-008's record of truth) alongside the injected
+        reference CDM.
+
+        No re-parse and no new physics. The six position covariance elements per
+        object are read straight off the parsed 6x6 RTN covariance, whose axis
+        order is R, T, N, RDOT, TDOT, NDOT -- so the store's CR_R / CT_R / CT_T /
+        CN_R / CN_T / CN_N are the lower triangle of its top-left 3x3 block, and
+        the LeoLabs SATn_ to store OBJECTn_ mapping is a rename, not a
+        conversion. Units stay m^2, which is what the store holds.
+
+        The designator field carries the NORAD id, because that is what the
+        store is keyed and looked up by (GET /cdm/{primary}/{secondary}). An
+        object with no NORAD id falls back to its LeoLabs catalog designator
+        rather than to a placeholder, so the row still names something real.
+        """
+        def _object_key(obj: ParsedObject) -> str:
+            return str(obj.norad_id) if obj.norad_id is not None else str(obj.designator)
+
+        def _position_block(obj: ParsedObject, prefix: str) -> Dict[str, Any]:
+            cov = obj.cov_rtn_m2
+            return {
+                f"{prefix}_CR_R": float(cov[0, 0]),
+                f"{prefix}_CT_R": float(cov[1, 0]),
+                f"{prefix}_CT_T": float(cov[1, 1]),
+                f"{prefix}_CN_R": float(cov[2, 0]),
+                f"{prefix}_CN_T": float(cov[2, 1]),
+                f"{prefix}_CN_N": float(cov[2, 2]),
+            }
+
+        prov = self.provenance
+        record: Dict[str, Any] = {
+            "OBJECT1_OBJECT_DESIGNATOR": _object_key(self.primary),
+            "OBJECT2_OBJECT_DESIGNATOR": _object_key(self.secondary),
+            "OBJECT1_OBJECT_NAME": self.primary.object_name,
+            "OBJECT2_OBJECT_NAME": self.secondary.object_name,
+            "TCA": self.t_ca_utc,
+            "MISS_DISTANCE": self.miss_distance_m,
+            # The CDM's own Pc, not the planner's. The store column holds the
+            # published Pc from the originating CDM, which is what this is.
+            "COLLISION_PROBABILITY": self.cdm_collision_probability,
+            # Carried for dedup: cdm_id identifies this exact message, event_id
+            # the conjunction event it belongs to.
+            "COMMENT_ID": prov.get("cdm_id"),
+            "COMMENT_EVENT_ID": prov.get("event_id"),
+        }
+        record.update(_position_block(self.primary, "OBJECT1"))
+        record.update(_position_block(self.secondary, "OBJECT2"))
+        return record
+
 
 # ---------------------------------------------------------------------------
 # Field helpers
