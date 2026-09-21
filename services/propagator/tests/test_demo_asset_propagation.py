@@ -44,6 +44,11 @@ the next reader to update the numbers instead of investigating them.
   and reach RED. Every object without one is bit-identical to the SCRUM-392
   entry, which is the evidence that the fallback path did not change.
 
+- 2026-09-20, SCRUM-435 / SCRUM-383: the curated demo conjunctions were
+  intentionally moved to six hours (21600 s) so the MAF browser demo sits inside
+  the locked 4-72 hour decision horizon. Demo TCA and Pc baselines were recaptured;
+  risk labels, miss distances, covariance, and underlying geometry remain unchanged.
+
 The covariance ceiling, and how SCRUM-391 got past it
 -----------------------------------------------------
 ``PC_RED_THRESHOLD`` is 1e-4 and ``HBR_M`` is 15 m. An object with no supplied
@@ -133,8 +138,8 @@ BASELINE = {
     },
     "demo": {
         "risk": ["AMBER", "AMBER", "GREEN"],
-        "tca": [120, 60, 60],
-        "pc": [7.972491e-05, 5.028529e-05, 1.779663e-06],
+        "tca": [360, 360, 360],
+        "pc": [6.789152108284578e-05, 6.547347884681053e-05, 2.3099292539498346e-06],
         "miss_m": [316.2278, 412.3106, 3006.6593],
         "sigma_m": [2222.2222, 2222.2222, 2222.2222],
         "cov_source": ["confidence_default"] * 3,
