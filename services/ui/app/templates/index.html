@@ -1082,7 +1082,7 @@ async function runScenario(){
     setTimeout(()=>{refreshData();msg.textContent='Refreshing...'},4000);
     setTimeout(()=>{refreshData();msg.textContent='Loading...'},8000);
     setTimeout(async()=>{await refreshData();btn.classList.remove('running');btn.textContent='RUN SCENARIO';msg.textContent='Scenario complete';
-      if(conjunctionData?.conjunctions?.length>0){const idx=selectedConjunction||0;evaluateConjunction(conjunctionData.conjunctions[idx]||conjunctionData.conjunctions[0],idx)}
+      autoEvaluateSelectedOrFirstPlannable();
     },12000);
   }catch(e){msg.textContent='Error: '+e.message;btn.classList.remove('running');btn.textContent='RUN SCENARIO'}
 }
@@ -1328,6 +1328,45 @@ function mafDemoInputs(conj){
   };
 }
 
+// SCRUM-436: the scenario burn window.
+//
+// The scenario branch used a burn fixed at now+2h while the TCA came from the
+// row, so any conjunction inside two hours -- which the default scenario on
+// load is -- sent a burn after its own TCA and the scorer rejected the whole
+// request. Deriving the burn from the TCA instead of from the clock keeps it
+// strictly inside (now, TCA) no matter how close the encounter is: six hours
+// before TCA when there is room, otherwise the midpoint.
+//
+// Returns null when the row carries no usable TCA, which is the caller's cue
+// not to evaluate at all rather than to send a window the planner must refuse.
+// The live branch does not use this: it omits t_burn_utc entirely and lets the
+// planner place the burn from the CDM's own TCA.
+const SCENARIO_BURN_LEAD_MS = 6 * 60 * 60 * 1000;
+
+function scenarioBurnWindow(timeToTcaS, nowMs) {
+  const now = nowMs != null ? nowMs : Date.now();
+  const secs = Number(timeToTcaS);
+  if (!isFinite(secs) || secs <= 0) return null;   // TCA missing, or at/behind now
+  const tcaMs = now + secs * 1000;
+  const burnMs = tcaMs - Math.min(SCENARIO_BURN_LEAD_MS, (tcaMs - now) / 2);
+  return { t_burn_utc: new Date(burnMs).toISOString(),
+           t_ca_utc:   new Date(tcaMs).toISOString() };
+}
+
+// SCRUM-436: auto-evaluate the selected row, but only when it can actually be
+// planned. This used to take row 0 unconditionally in both callers, so a top
+// row at or past its TCA greeted the operator with EVALUATE FAILED. Prefer the
+// selected row, fall back to the first plannable one, and if none qualifies
+// leave the panel alone rather than firing a request that can only fail.
+function autoEvaluateSelectedOrFirstPlannable(){
+  const rows=conjunctionData?.conjunctions;
+  if(!rows||rows.length===0)return;
+  const preferred=selectedConjunction||0;
+  let idx=scenarioBurnWindow(rows[preferred]?.time_to_tca_s)?preferred:-1;
+  if(idx<0)idx=rows.findIndex(r=>scenarioBurnWindow(r?.time_to_tca_s));
+  if(idx>=0)evaluateConjunction(rows[idx],idx);
+}
+
 async function evaluateConjunction(conj,idx){
   panX=0;panY=0;zoomLevel=2.5;
   document.getElementById('plannerDetails').innerHTML='<div class="empty-state"><span class="spinner"></span>Evaluating conjunction...</div>';
@@ -1349,6 +1388,15 @@ async function evaluateConjunction(conj,idx){
   // injection that used to hijack it. A scenario evaluate is now NORAD-free,
   // which is what SCRUM-420 made possible.
   const live = isLiveMode() && liveAssetNorad;
+  // SCRUM-436: a scenario row with no usable TCA has no valid burn window, so
+  // there is nothing to ask the planner. Say so instead of sending a request
+  // that can only come back 422 and read as EVALUATE FAILED.
+  const burnWindow = live ? null : scenarioBurnWindow(conj?.time_to_tca_s);
+  if(!live && !burnWindow){
+    document.getElementById('plannerDetails').innerHTML='<div class="empty-state">No upcoming TCA for this conjunction<br><span style="font-size:9px;color:var(--text-dim)">its time to TCA is missing or already past, so there is no burn window to plan</span></div>';
+    document.getElementById('candidatesBody').innerHTML='<tr><td colspan="4" class="empty-state">No burn window</td></tr>';
+    return;
+  }
   const request = live ? {
     conjunction_id:'leolabs-'+(conj.cdm_id!=null?conj.cdm_id:(conj.secondary_norad||'row')),
     // t_burn_utc omitted on purpose: the planner defaults it to six hours before
@@ -1359,10 +1407,10 @@ async function evaluateConjunction(conj,idx){
   } : {
     conjunction_id:'eval-'+conj.object_id,
     satellite:{sat_id:'XORB-001',r_sat_km:asset_r,v_sat_km_s:asset_v,a_ref_km:semiMajorAxisFromStateKm(asset_r,asset_v),
-      t_burn_utc:new Date(Date.now()+2*60*60*1000).toISOString(),v_remaining_m_s:25.0},
+      t_burn_utc:burnWindow.t_burn_utc,v_remaining_m_s:25.0},
     conjunction:{obj_id:conj.object_id,
       ...(secondaryNoradId ? {secondary_norad: secondaryNoradId} : {}),
-      t_ca_utc:new Date(Date.now()+conj.time_to_tca_s*1000).toISOString(),
+      t_ca_utc:burnWindow.t_ca_utc,
       r_rel_km:conj.r_obj_km?[conj.r_obj_km[0]-asset_r[0],conj.r_obj_km[1]-asset_r[1],conj.r_obj_km[2]-asset_r[2]]:[conj.miss_distance_km,0.0,0.0],
       // SCRUM-398: the planner needs a relative velocity to define the
       // encounter plane. Without one it establishes no Pc and falls back to the
@@ -2520,16 +2568,25 @@ function getPayloadContent(){
   // SCRUM-370 Step 2: displayed payload uses the same real asset velocity the
   // evaluated payload sends, so the two match.
   const asset_v=conjs[0].v_asset_km_s||[0.0,7.668,0.0];
+  // SCRUM-436: one clock read for the whole preview, and the same burn-window
+  // rule the evaluate uses, so the previewed payload is what would actually be
+  // sent rather than a fixed now+2h burn that can land after the TCA. The
+  // satellite block mirrors the top row, whose asset state it already borrows;
+  // each row carries the burn its own evaluate would send.
+  const nowMs=Date.now();
+  const topWindow=scenarioBurnWindow(conjs[0].time_to_tca_s,nowMs);
   return{
     scenario:selectedScenario,
     satellite:{sat_id:'XORB-001',r_sat_km:asset_r,v_sat_km_s:asset_v,a_ref_km:semiMajorAxisFromStateKm(asset_r,asset_v),
-      t_burn_utc:new Date(Date.now()+2*60*60*1000).toISOString(),v_remaining_m_s:25.0},
+      t_burn_utc:topWindow?topWindow.t_burn_utc:null,v_remaining_m_s:25.0},
     conjunctions:conjs.map(function(c){
       var ar=c.r_asset_km||asset_r;
+      var w=scenarioBurnWindow(c.time_to_tca_s,nowMs);
       return{
         conjunction_id:'eval-'+c.object_id,
         obj_id:c.object_id,
-        t_ca_utc:new Date(Date.now()+c.time_to_tca_s*1000).toISOString(),
+        t_burn_utc:w?w.t_burn_utc:null,
+        t_ca_utc:w?w.t_ca_utc:null,
         r_rel_km:c.r_obj_km?[c.r_obj_km[0]-ar[0],c.r_obj_km[1]-ar[1],c.r_obj_km[2]-ar[2]]:[c.miss_distance_km,0.0,0.0],
         pc_precomputed:c.pc>0?c.pc:null,
         miss_distance_km:c.miss_distance_km,
@@ -2835,7 +2892,7 @@ document.addEventListener('DOMContentLoaded',async()=>{
   // Scenario default before anything renders.
   populateAssetDropdown();updateConjSourceNote();
   initPortletControls();initEncounter();refreshPipeline();await refreshData();
-  if(conjunctionData?.conjunctions?.length>0){const idx=selectedConjunction||0;evaluateConjunction(conjunctionData.conjunctions[idx]||conjunctionData.conjunctions[0],idx)}
+  autoEvaluateSelectedOrFirstPlannable();
   setInterval(refreshPipeline,10000);setInterval(refreshData,15000);
 });
 
