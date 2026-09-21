@@ -261,7 +261,7 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 .store-count{font-size:9px;color:var(--text-dim);margin-bottom:8px}
 
 
-/* â”€â”€ APS 2.5 ATLAS ARTIFACT PANELS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+/* ── APS 2.5 ATLAS ARTIFACT PANELS ─────────────────────────────────────── */
 .artifact-section{margin:0 8px 8px}
 .artifact-panel{border-radius:4px;background:var(--bg-card);border:1px solid var(--border);margin-bottom:6px}
 .artifact-panel-hdr{padding:7px 12px;border-bottom:1px solid var(--border);font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--accent-dim);font-weight:500;display:flex;justify-content:space-between;align-items:center}
@@ -698,7 +698,7 @@ function populateAssetDropdown(){
   if(!sel) return;
   const opts = ['<option value="">Select subscribed asset...</option>'];
   (LEOLABS_ASSETS || []).forEach(a => {
-    opts.push('<option value="'+a.norad_id+'" data-name="'+a.name+'">'+a.name+' â€” '+a.norad_id+'</option>');
+    opts.push('<option value="'+a.norad_id+'" data-name="'+a.name+'">'+a.name+' — '+a.norad_id+'</option>');
   });
   sel.innerHTML = opts.join('');
 }
@@ -745,12 +745,12 @@ function updateConjSourceNote(){
   const hdr=document.getElementById('conjPcHdr');
   if(!note) return;
   if(isLiveMode()){
-    note.innerHTML = 'SOURCE: LEOLABS LIVE â€” real_cdm covariance'
-      + (liveAssetName ? ' â€” ' + liveAssetName + ' (' + liveAssetNorad + ')' : '')
-      + '<br>Pc column is LeoLabsâ€™ CDM Pc. The decision card Pc is APS-computed when a row is scored.';
+    note.innerHTML = 'SOURCE: LEOLABS LIVE — real_cdm covariance'
+      + (liveAssetName ? ' — ' + liveAssetName + ' (' + liveAssetNorad + ')' : '')
+      + '<br>Pc column is LeoLabs’ CDM Pc. The decision card Pc is APS-computed when a row is scored.';
     if(hdr) hdr.textContent = 'Pc (LeoLabs)';
   } else {
-    note.textContent = 'SOURCE: SCENARIO â€” surrogate covariance';
+    note.textContent = 'SOURCE: SCENARIO — surrogate covariance';
     if(hdr) hdr.textContent = 'Pc';
   }
 }
@@ -867,7 +867,7 @@ async function injectExampleCdm() {
 
   // Real CCSDS 508.0-B-1 CDM: TIROS 4 (226) vs IRIDIUM 33 DEB (35929)
   // Source: Space-Track.org Near Earth KVN example, 2020-02-28
-  // Covariance values in mÂ² as parsed by cdm_parser.parse_cdm_kvn()
+  // Covariance values in m² as parsed by cdm_parser.parse_cdm_kvn()
   const exampleCdm = {
     TCA: '2020-03-05T07:26:54.974Z',
     MISS_DISTANCE: 1780.0,
@@ -1141,7 +1141,7 @@ async function fetchLiveConjunctions(){
     msg.textContent='No conjunctions in the '+(data.window?.lookahead_days ?? 7)+'-day window';
     return;
   }
-  msg.textContent=rows.length+' live conjunction'+(rows.length===1?'':'s')+' â€” click a row to score it';
+  msg.textContent=rows.length+' live conjunction'+(rows.length===1?'':'s')+' — click a row to score it';
 }
 
 function setLiveTableMessage(text){
@@ -2033,7 +2033,7 @@ function drawEncounter(conj,result){
   [[cx+covRx,cy,cx+covRx+6,cy],[cx-covRx,cy,cx-covRx-6,cy],[cx,cy+covRy,cx,cy+covRy+6],[cx,cy-covRy,cx,cy-covRy-6]].forEach(([x1,y1,x2,y2])=>{ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke()});
   // Label
   ctx.fillStyle='rgba(79,248,232,0.65)';ctx.font='bold 9px "JetBrains Mono"';ctx.textAlign='left';
-  ctx.fillText('1Ïƒ COV',cx+covRx+8,cy+4);
+  ctx.fillText('1σ COV',cx+covRx+8,cy+4);
 
   // ---- HARD BODY RADIUS (15m combined) ----
   const hbrPx=Math.max(15*scale,16);
