@@ -3742,12 +3742,13 @@ async function runTiros4SmokeTest() {
   const r1 = [-1484.865223, -5293.446853, -4495.437378];
   const r2 = [-1484.285818, -5292.263622, -4494.23968];
   const r_rel = [r1[0]-r2[0], r1[1]-r2[1], r1[2]-r2[2]];
-  // Covariance: CDM values in m2, convert to km2 (divide by 1e6)
-  const p_rel_km2 = [
-    (99.64+211.52)/1e6, 0, 0,
-    0, (22486.67+1805633.08)/1e6, 0,
-    0, 0, (9.97+147.36)/1e6
-  ];
+  // SCRUM-432: no hand-rolled covariance here. This used to send a diagonal
+  // p_rel_km2 built from the CDM numbers above plus pc_precomputed 0.0, with no
+  // NORAD pair -- so the covariance adapter resolved GET /cdm//IRIDIUM 33 DEB,
+  // found nothing, and fell back to a surrogate that overwrote the supplied
+  // matrix. The test read as green while never touching the real covariance.
+  // Sending the injected pair instead lets the adapter resolve the stored CDM,
+  // which is the thing this test exists to exercise.
   const tBurn = new Date(Date.now() - 3600000).toISOString();
   const tCA   = new Date(Date.now() + 3 * 3600000).toISOString();
   const evalReq = {
@@ -3760,7 +3761,13 @@ async function runTiros4SmokeTest() {
     },
     conjunction: {
       obj_id: 'IRIDIUM 33 DEB', t_ca_utc: tCA,
-      r_rel_km: r_rel, p_rel_km2: p_rel_km2, pc_precomputed: 0.0
+      // The pair Step 1 injected. r_rel_km stays: it drives the 2D geometry.
+      primary_norad: '226', secondary_norad: '35929',
+      // TIROS 4 is not a subscribed LeoLabs asset, so with LEOLABS_ENABLED the
+      // pair alone would route this to the live fetch and 503. This says what
+      // the test actually means: score the CDM Step 1 put in the store.
+      use_stored_cdm: true,
+      r_rel_km: r_rel
     },
     policy: { lambda_v: 1.0, lambda_L: 0.8, dv_mag_limit_m_s: 2.0, a_ref_km: 7000.0 }
   };
@@ -3781,22 +3788,31 @@ async function runTiros4SmokeTest() {
     log('Step 6: m2_pre > 0', !!(evalResult.metrics && evalResult.metrics.m2_pre > 0), evalResult.metrics ? 'm2_pre=' + evalResult.metrics.m2_pre : '');
     log('Step 7: evaluated_at present', !!evalResult.evaluated_at, evalResult.evaluated_at || '');
 
-    // Step 8: atlas_artifact (when backend is extended)
+    // SCRUM-432: the point of the whole test. Everything above passes just as
+    // happily on a surrogate covariance, so without this step a regression that
+    // stops resolving the stored CDM is invisible in the output.
+    const covSrc = evalResult.covariance_source;
+    log('Step 8: covariance_source is real_cdm', covSrc === 'real_cdm',
+        covSrc ? (covSrc === 'real_cdm' ? 'real_cdm -- scored the stored TIROS 4 CDM'
+                                        : 'got ' + covSrc + ' -- the stored CDM did not resolve')
+               : 'covariance_source absent from the response');
+
+    // Step 9: atlas_artifact (when backend is extended)
     const art = evalResult.atlas_artifact;
     if (art) {
-      log('Step 8: atlas_artifact in response', true, 'APS 2.5 artifact bundle present');
-      log('Step 9: risk_summary present', !!art.risk_summary, '');
-      log('Step 10: verification present', !!art.verification, art.verification ? ('passed=' + art.verification.passed) : '');
-      log('Step 11: mission_impact present', !!art.mission_impact, '');
-      log('Step 12: five checks in verification', !!(art.verification && art.verification.risk_reduced != null), '');
+      log('Step 9: atlas_artifact in response', true, 'APS 2.5 artifact bundle present');
+      log('Step 10: risk_summary present', !!art.risk_summary, '');
+      log('Step 11: verification present', !!art.verification, art.verification ? ('passed=' + art.verification.passed) : '');
+      log('Step 12: mission_impact present', !!art.mission_impact, '');
+      log('Step 13: five checks in verification', !!(art.verification && art.verification.risk_reduced != null), '');
       renderAtlasArtifact(art);
       // SCRUM-350: this rebuilds A1, so refresh the Published Pc row the same way
       // the normal evaluate path does. Step 1 injected the TIROS 4 (226) /
       // IRIDIUM 33 DEB (35929) CDM, so key the lookup to that pair.
       updatePublishedPc('226', '35929');
-      log('Step 13: artifact panels rendered', true, 'All five artifact panels updated');
+      log('Step 14: artifact panels rendered', true, 'All five artifact panels updated');
     } else {
-      log('Step 8: atlas_artifact in response', false, 'v2.4 response only -- atlas_artifact not present (expected until backend is extended)');
+      log('Step 9: atlas_artifact in response', false, 'v2.4 response only -- atlas_artifact not present (expected until backend is extended)');
     }
   }
 
