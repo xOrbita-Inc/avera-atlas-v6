@@ -1421,7 +1421,20 @@ async def post_evaluate(request: Request):
         # surrogate/scenario path, so a missing primary_norad is not a 422 here --
         # it simply means "evaluate what I gave you" and the response reports
         # source=surrogate rather than leolabs.
-        if ll_primary:
+        #
+        # SCRUM-432: use_stored_cdm is the third mode, and the only one that can
+        # name a NORAD pair without asking LeoLabs about it. A caller that has
+        # already put a CDM in the store -- the TIROS 4 reference CDM the E2E
+        # smoke test injects -- needs the pair to resolve that row through the
+        # covariance adapter, but TIROS 4 is not a subscribed LeoLabs asset, so
+        # the live fetch can only fail it. Opt-in and absent from every existing
+        # caller, so the live path below is reached on exactly the requests it
+        # was reached on before: an unsubscribed NORAD still 503s rather than
+        # silently scoring on whatever else happens to be available.
+        _use_stored_cdm = bool(
+            (body.get("conjunction") or {}).get("use_stored_cdm")
+        )
+        if ll_primary and not _use_stored_cdm:
             # SCRUM-422: an operator clicking a row in the live Active
             # Conjunctions table sends that row's selector back, and we score
             # that conjunction instead of whatever is currently top of the list.
