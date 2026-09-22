@@ -391,7 +391,11 @@ class LeoLabsClient:
                 break
             page_params = dict(params)
             page_params.setdefault("paginate", _PAGINATE_TRUE)
-            page_params["nextToken"] = next_token
+            # SCRUM-438: LeoLabs returns the cursor as "nextToken" but expects it
+            # sent back on the next request as the "token" parameter, per LeoLabs
+            # support guidance. Sending it under "nextToken" is ignored, so the
+            # loop would re-fetch page 1 and never advance past 1,000 items.
+            page_params["token"] = next_token
 
         if total is not None and yielded != total:
             log.warning(

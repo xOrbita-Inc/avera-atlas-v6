@@ -237,12 +237,14 @@ def test_search_conjunction_cdms_follows_next_token():
         cdms = _client(session).search_conjunction_cdms(object1="L2669")
     assert [c["id"] for c in cdms] == [1, 2]
 
-    # First call carries cdmSource=LeoLabs and object1; second carries nextToken.
+    # First call carries cdmSource=LeoLabs and object1; second carries the cursor
+    # as `token` (LeoLabs returns it as `nextToken`, expects it back as `token`).
     first_params = session.request.call_args_list[0].kwargs["params"]
     assert first_params["cdmSource"] == "LeoLabs"
     assert first_params["object1"] == "L2669"
     second_params = session.request.call_args_list[1].kwargs["params"]
-    assert second_params["nextToken"] == "tok"
+    assert second_params["token"] == "tok"
+    assert "nextToken" not in second_params
 
 
 def test_search_conjunction_cdms_paginates_across_two_pages():
@@ -272,10 +274,35 @@ def test_search_conjunction_cdms_paginates_across_two_pages():
     second_params = session.request.call_args_list[1].kwargs["params"]
     assert first_params["paginate"] == "true"
     assert second_params["paginate"] == "true"
-    assert second_params["nextToken"] == "tok"
+    assert second_params["token"] == "tok"
+    assert "nextToken" not in second_params
     # The filter params survive onto page two rather than being dropped.
     assert second_params["object1"] == "L2669"
     assert second_params["cdmSource"] == "LeoLabs"
+
+
+def test_paginate_sends_cursor_under_token_not_next_token():
+    """SCRUM-438: the cursor is echoed back as `token`, not `nextToken`.
+
+    LeoLabs returns the cursor in the response field `nextToken` but expects it
+    on the *next request* under the parameter name `token`. Sending it as
+    `nextToken` is silently ignored by the API, so the loop re-fetches page one
+    and never advances past the first 1,000 items. This locks the wire name so
+    the two names cannot drift back together.
+    """
+    session = MagicMock()
+    session.request.side_effect = [
+        _resp(200, json_body={"cdms": [{"id": 1}], "nextToken": "CURSOR-123"}),
+        _resp(200, json_body={"cdms": [{"id": 2}]}),
+    ]
+    with _env():
+        _client(session).search_conjunction_cdms(object1="C0")
+
+    second_params = session.request.call_args_list[1].kwargs["params"]
+    # Sent under `token`, carrying the value the response gave as `nextToken`.
+    assert second_params["token"] == "CURSOR-123"
+    # And never echoed back under the response's own key.
+    assert "nextToken" not in second_params
 
 
 def test_paginate_warns_when_retrieved_count_misses_total():
