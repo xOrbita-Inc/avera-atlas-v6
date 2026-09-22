@@ -13,6 +13,7 @@ Run from repo root:
 
 from __future__ import annotations
 
+import logging
 import os
 from unittest.mock import MagicMock, patch
 
@@ -61,6 +62,40 @@ def _resp(status: int, json_body=None, text: str = "", headers=None):
     else:
         r.json.side_effect = ValueError("no json")
     return r
+
+
+class _CaptureWarnings:
+    """Collect records off the planner logger directly.
+
+    logging_setup sets propagate=False on "planner", so pytest's caplog (which
+    listens on the root logger) never sees these records once another test has
+    configured logging. Attaching a handler to the logger itself is independent
+    of that ordering.
+    """
+
+    def __init__(self, logger_name: str = "planner") -> None:
+        self._logger = logging.getLogger(logger_name)
+        self.records: list[logging.LogRecord] = []
+
+    def __enter__(self) -> "_CaptureWarnings":
+        records = self.records
+
+        class _Handler(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        self._handler = _Handler(level=logging.WARNING)
+        self._prev_level = self._logger.level
+        self._logger.setLevel(logging.WARNING)
+        self._logger.addHandler(self._handler)
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._logger.removeHandler(self._handler)
+        self._logger.setLevel(self._prev_level)
+
+    def events(self, event: str) -> list[logging.LogRecord]:
+        return [r for r in self.records if getattr(r, "event", None) == event]
 
 
 def _client(session, **kw):
@@ -208,6 +243,97 @@ def test_search_conjunction_cdms_follows_next_token():
     assert first_params["object1"] == "L2669"
     second_params = session.request.call_args_list[1].kwargs["params"]
     assert second_params["nextToken"] == "tok"
+
+
+def test_search_conjunction_cdms_paginates_across_two_pages():
+    """SCRUM-438: a 1,500-CDM result comes back whole, not capped at page one.
+
+    Without `paginate=true` LeoLabs caps the response at 1,000 entries and omits
+    nextToken, so the loop would stop after page one and silently truncate. Page
+    sizes here mirror that cap: 1,000 then 500, total 1,500.
+    """
+    page1 = [{"id": i} for i in range(1000)]
+    page2 = [{"id": i} for i in range(1000, 1500)]
+    session = MagicMock()
+    session.request.side_effect = [
+        _resp(200, json_body={"cdms": page1, "total": 1500, "nextToken": "tok"}),
+        _resp(200, json_body={"cdms": page2, "total": 1500}),
+    ]
+    with _env():
+        cdms = _client(session).search_conjunction_cdms(object1="L2669")
+
+    # All 1500 returned, in order, and the loop stopped once nextToken was gone.
+    assert len(cdms) == 1500
+    assert [c["id"] for c in cdms] == list(range(1500))
+    assert session.request.call_count == 2
+
+    # Both pages carry the flag; the second also carries the token.
+    first_params = session.request.call_args_list[0].kwargs["params"]
+    second_params = session.request.call_args_list[1].kwargs["params"]
+    assert first_params["paginate"] == "true"
+    assert second_params["paginate"] == "true"
+    assert second_params["nextToken"] == "tok"
+    # The filter params survive onto page two rather than being dropped.
+    assert second_params["object1"] == "L2669"
+    assert second_params["cdmSource"] == "LeoLabs"
+
+
+def test_paginate_warns_when_retrieved_count_misses_total():
+    """A short read against a reported total is logged, not swallowed."""
+    session = MagicMock()
+    session.request.return_value = _resp(
+        200, json_body={"cdms": [{"id": 1}], "total": 1500}
+    )
+    with _env():
+        with _CaptureWarnings() as cap:
+            cdms = _client(session).search_conjunction_cdms(object1="L2669")
+
+    assert len(cdms) == 1
+    mismatches = cap.events("leolabs_pagination_count_mismatch")
+    assert len(mismatches) == 1
+    assert mismatches[0].retrieved == 1
+    assert mismatches[0].total == 1500
+
+
+def test_paginate_does_not_warn_when_count_matches_total():
+    session = MagicMock()
+    session.request.side_effect = [
+        _resp(200, json_body={"cdms": [{"id": 1}], "total": 2, "nextToken": "tok"}),
+        _resp(200, json_body={"cdms": [{"id": 2}], "total": 2}),
+    ]
+    with _env():
+        with _CaptureWarnings() as cap:
+            cdms = _client(session).search_conjunction_cdms(object1="L2669")
+
+    assert len(cdms) == 2
+    assert not cap.events("leolabs_pagination_count_mismatch")
+
+
+def test_list_objects_sets_paginate_flag():
+    """SCRUM-438: the object listing pages fully too, not just the CDM search."""
+    session = MagicMock()
+    session.request.return_value = _resp(
+        200, json_body={"objects": [{"catalogNumber": "L2669"}], "total": 1}
+    )
+    with _env():
+        objects = _client(session).list_objects()
+    assert len(objects) == 1
+    assert session.request.call_args_list[0].kwargs["params"]["paginate"] == "true"
+
+
+def test_search_conjunction_cdms_accepts_c0_and_volume_filters():
+    """object1='C0' (full subscription) and the RIC volume filters pass through."""
+    session = MagicMock()
+    session.request.return_value = _resp(200, json_body={"cdms": [], "total": 0})
+    with _env():
+        _client(session).search_conjunction_cdms(
+            object1="C0", maxRelativePositionR=2000, maxRelativePositionI=25000
+        )
+    params = session.request.call_args_list[0].kwargs["params"]
+    assert params["object1"] == "C0"
+    assert params["maxRelativePositionR"] == 2000
+    assert params["maxRelativePositionI"] == 25000
+    assert params["paginate"] == "true"
 
 
 def test_search_conjunction_cdms_defaults_source_to_leolabs():
