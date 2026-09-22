@@ -24,10 +24,14 @@ respected. Call reset_caches() in tests.
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 import logging
 import os
 import threading
 import time
+from dataclasses import dataclass, field as dc_field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterator, List, Optional, Set
 
@@ -42,6 +46,7 @@ from common.leolabs_client import (
     LeoLabsClient,
     LeoLabsError,
 )
+from common.leolabs_conjunction_list import dedupe_raw_by_event
 
 log = logging.getLogger("planner")
 
@@ -68,6 +73,45 @@ MAX_WINDOW_DAYS = 30
 _ASSET_NORADS_ENV = "LEOLABS_ASSET_NORADS"
 
 _PROBE_INTERVAL_SECONDS = 1800  # 30 minutes, matches the UDL probe cadence
+
+# Paging (SCRUM-445). The listing used to fetch and parse every scorable CDM in
+# the window in one synchronous call. Once SCRUM-438 made the pull complete, a
+# dense asset (SWARM C / 39453) overran the ui-to-planner 60 s read timeout. The
+# fetch of ~1,850 CDMs is the larger fixed cost (~16-20 s, measured); parsing all
+# of them on top of it is what pushed the request past 60 s. A page bounds the
+# parse, which is the part this module controls.
+DEFAULT_PAGE_SIZE = 100
+MAX_PAGE_SIZE = 500
+
+# The three LeoLabs RIC volume filters, as the API spells them.
+VOLUME_FILTER_PARAMS = (
+    "maxRelativePositionR",
+    "maxRelativePositionI",
+    "maxRelativePositionC",
+)
+
+# LeoLabs' own reporting volume, in metres: it issues an initial CDM when the
+# overall miss is within 2 x 50 x 50 km (radial x in-track x cross-track) and
+# reissues while the overall miss is under 100 km. It is LeoLabs' own reporting
+# criterion rather than a number invented here.
+#
+# Measured against SWARM C (39453) on 2026-09-22, this filter is NOT what makes a
+# dense asset tractable: the window held 1,852 CDMs unfiltered and 1,841 inside
+# this volume, collapsing to the same 96 conjunction events either way. LeoLabs
+# only issues CDMs inside roughly this volume already, so the filter trims the
+# margin, not the bulk. What actually bounds the work is deduping reissues before
+# parsing (1,841 CDMs -> 96 events) and parsing only the returned page. The filter
+# is kept because the ticket asks for it and because a narrower explicit volume is
+# a useful operator control, not because it is load-bearing here.
+DEFAULT_REPORTING_VOLUME_M: Dict[str, float] = {
+    "maxRelativePositionR": 2_000.0,
+    "maxRelativePositionI": 50_000.0,
+    "maxRelativePositionC": 50_000.0,
+}
+
+# Cursor format version, so a cursor minted by an older build is rejected rather
+# than silently reinterpreted as an offset into a different query.
+_CURSOR_VERSION = 1
 
 
 class LeoLabsRuntimeError(LeoLabsError):
@@ -275,6 +319,286 @@ def fetch_leolabs_conjunctions(
         _scorable_in_risk_order(
             primary_norad, client, registry, now, lookback_days, lookahead_days
         )
+    )
+
+
+# ---------------------------------------------------------------------------
+# Paging (SCRUM-445)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ConjunctionPage:
+    """One page of an asset's conjunctions, plus what the caller needs to page on.
+
+    rows are parsed CDMs, one per conjunction event, ordered highest Pc first with
+    earliest TCA as the tie-break -- the same ordering the unpaged listing used.
+    total counts events across the whole in-volume set, not just this page, so a
+    dashboard can say "1-100 of 1,432" honestly.
+    """
+
+    rows: List[ParsedLeoLabsCDM]
+    next_cursor: Optional[str]
+    total: int
+    # How many CDMs the window held before reissues for one event were collapsed.
+    # Shown so a caller can see that reissues were collapsed, not dropped.
+    cdm_total: int
+    offset: int
+    page_size: int
+    volume_filters: Dict[str, float] = dc_field(default_factory=dict)
+
+    @property
+    def in_volume(self) -> bool:
+        """Whether a reporting-volume bound was applied to this page's fetch."""
+        return bool(self.volume_filters)
+
+
+class LeoLabsCursorError(LeoLabsError):
+    """A paging cursor was malformed, or belongs to a different query."""
+
+
+def _query_fingerprint(
+    primary_norad: int,
+    lookback_days: int,
+    lookahead_days: int,
+    page_size: int,
+    volume_filters: Dict[str, float],
+) -> str:
+    """A short digest of everything a cursor's offset is only valid against.
+
+    A cursor is an offset into one specific ordered result set. Replayed against a
+    different asset, window, page size or volume filter it would point at an
+    unrelated row and the operator would page from one asset's list into another's.
+    Binding the offset to a fingerprint of the query makes that a 422 instead.
+
+    Bound to the requested window in days, deliberately NOT to the resolved
+    absolute minTca..maxTca. Those are computed from the wall clock, so they move
+    between the request that mints a cursor and the request that spends it, and
+    fingerprinting them would reject every "next page" click as a foreign cursor.
+    The set itself does shift slightly as the clock advances -- unavoidable when
+    paging a live feed -- but the offset stays an offset into the same query.
+    """
+    payload = json.dumps(
+        {
+            "n": int(primary_norad),
+            "lb": int(lookback_days),
+            "la": int(lookahead_days),
+            "p": int(page_size),
+            "v": {k: volume_filters[k] for k in sorted(volume_filters)},
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def encode_cursor(offset: int, fingerprint: str) -> str:
+    """An opaque forward cursor. Opaque on purpose: it is ours, not LeoLabs'."""
+    raw = json.dumps(
+        {"v": _CURSOR_VERSION, "o": int(offset), "q": fingerprint},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def decode_cursor(cursor: str, fingerprint: str) -> int:
+    """The offset a cursor names, or raise LeoLabsCursorError.
+
+    Rejects a cursor from a different query or an older cursor format rather than
+    treating its offset as valid here.
+    """
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        data = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+        version = int(data["v"])
+        offset = int(data["o"])
+        query = str(data["q"])
+    except Exception as exc:
+        raise LeoLabsCursorError(f"malformed cursor: {exc}") from exc
+    if version != _CURSOR_VERSION:
+        raise LeoLabsCursorError(
+            f"cursor format v{version} is not v{_CURSOR_VERSION}; re-read page one"
+        )
+    if query != fingerprint:
+        raise LeoLabsCursorError(
+            "cursor belongs to a different asset, window, page size or volume "
+            "filter; re-read page one"
+        )
+    if offset < 0:
+        raise LeoLabsCursorError("cursor offset is negative")
+    return offset
+
+
+def resolve_volume_filters(
+    max_r_m: Optional[float] = None,
+    max_i_m: Optional[float] = None,
+    max_c_m: Optional[float] = None,
+    *,
+    in_volume: bool = True,
+) -> Dict[str, float]:
+    """The RIC volume filters a fetch should send.
+
+    in_volume=True with no explicit values means LeoLabs' own reporting volume,
+    which is the listing default. Any explicitly supplied axis overrides that
+    axis. in_volume=False drops the bound entirely, which is the "widen" control.
+
+    See DEFAULT_REPORTING_VOLUME_M: on a real dense asset this filter turned out
+    to change the raw CDM count by well under 1% and the event count not at all,
+    so do not read the default as the thing keeping the listing fast.
+    """
+    if not in_volume:
+        filters: Dict[str, float] = {}
+    else:
+        filters = dict(DEFAULT_REPORTING_VOLUME_M)
+    for key, value in zip(VOLUME_FILTER_PARAMS, (max_r_m, max_i_m, max_c_m)):
+        if value is not None:
+            filters[key] = float(value)
+    return filters
+
+
+def _raw_cdms_in_risk_order(
+    primary_norad: int,
+    client: Optional[LeoLabsClient],
+    registry: Optional[AssetRegistry],
+    now: datetime,
+    lookback_days: int,
+    lookahead_days: int,
+    volume_filters: Dict[str, float],
+) -> tuple[str, List[Dict[str, Any]], int]:
+    """Fetch the in-volume CDMs for an asset, risk-ordered, one event each.
+
+    Sorting and deduping happen on the RAW CDMs, before any parsing, which is the
+    whole point: _risk_key reads COLLISION_PROBABILITY and the TCA straight off
+    the message, and raw_event_key reads COMMENT_EVENT_ID, so the global ordering
+    and the event dedupe both cost a dict lookup per CDM rather than a parse. Only
+    the page that is actually returned gets parsed.
+
+    Returns (catalog, cdms, raw_count), where raw_count is how many CDMs the
+    window held before reissues were collapsed, so a response can show that
+    reissues were collapsed rather than dropped. Raises LeoLabsRuntimeError for an
+    unsubscribed asset, the same as the unpaged path.
+    """
+    client = client or get_client()
+    registry = registry or get_registry(client)
+
+    catalog = registry.leolabs_for_norad(int(primary_norad))
+    if catalog is None:
+        raise LeoLabsRuntimeError(
+            f"NORAD {primary_norad} is not in the LeoLabs subscribed-objects "
+            f"registry; it cannot be screened on this account."
+        )
+
+    min_tca, max_tca = conjunction_window(now, lookback_days, lookahead_days)
+    cdms = client.search_conjunction_cdms(
+        object1=catalog,
+        min_tca=min_tca,
+        max_tca=max_tca,
+        cdm_source="LeoLabs",
+        **volume_filters,
+    )
+    raw = list(cdms or [])
+    ordered = dedupe_raw_by_event(sorted(raw, key=_risk_key))
+    return catalog, ordered, len(raw)
+
+
+def fetch_leolabs_conjunction_page(
+    primary_norad: int,
+    *,
+    client: Optional[LeoLabsClient] = None,
+    registry: Optional[AssetRegistry] = None,
+    now: Optional[datetime] = None,
+    lookback_days: int = _DEFAULT_LOOKBACK_DAYS,
+    lookahead_days: int = _DEFAULT_LOOKAHEAD_DAYS,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    cursor: Optional[str] = None,
+    volume_filters: Optional[Dict[str, float]] = None,
+) -> ConjunctionPage:
+    """One page of an asset's conjunctions, newest solution per event, worst first.
+
+    SCRUM-445. The unpaged fetch_leolabs_conjunctions still exists and is still
+    what the evaluate path uses, because a row selector has to resolve against the
+    whole window no matter which page the operator clicked it on. This is the
+    listing's fetch, and it differs in exactly two ways: it bounds the fetch with
+    the RIC reporting volume, and it parses only the rows it returns.
+
+    Why the cursor is ours and not LeoLabs'
+    ---------------------------------------
+    LeoLabs' own `token` cursor pages the API in LeoLabs' order, which is not Pc
+    order. Paging on it would mean the worst conjunction in a window could land on
+    page seven, and an operator reading the top of a triage table would not see
+    it. Dedupe would break too, since reissues of one event can straddle an API
+    page boundary. So the set is fetched whole -- cheap, because sorting and
+    deduping read raw dict fields and nothing is parsed yet -- then ordered and
+    deduped globally, and only then sliced. That buys a true worst-Pc-first page
+    one, an exact event total, and a cursor that is simply an offset into that
+    ordering.
+
+    What this costs: every page request re-fetches the window from LeoLabs, since
+    nothing is cached between requests. Measured on SWARM C (39453), the fetch is
+    ~16-20 s of the ~17-25 s a page takes, comfortably inside the ui-to-planner
+    60 s timeout that this story exists to stop overrunning, but not free. A
+    short-TTL cache of the ordered set per query fingerprint would make page two
+    onward nearly instant; deliberately not built here, since it adds cross-request
+    state the story did not ask for.
+
+    Raises LeoLabsCursorError for a cursor that does not belong to this query,
+    LeoLabsRuntimeError for an unsubscribed asset, and propagates LeoLabsError
+    subclasses on transport failures.
+    """
+    now = now or datetime.now(timezone.utc)
+    page_size = max(1, min(int(page_size), MAX_PAGE_SIZE))
+    filters = dict(volume_filters or {})
+
+    fingerprint = _query_fingerprint(
+        primary_norad, lookback_days, lookahead_days, page_size, filters
+    )
+    offset = decode_cursor(cursor, fingerprint) if cursor else 0
+
+    catalog, ordered, cdm_total = _raw_cdms_in_risk_order(
+        primary_norad, client, registry, now, lookback_days,
+        lookahead_days, filters,
+    )
+    total = len(ordered)
+
+    # Parse only this page. A CDM that fails a guard is skipped exactly as the
+    # unpaged path skips it, so a page can come back shorter than page_size
+    # without that meaning the list ended.
+    registry_for_parse = registry or get_registry(client or get_client())
+    rows: List[ParsedLeoLabsCDM] = []
+    global _last_fetch_utc
+    for cdm in ordered[offset:offset + page_size]:
+        try:
+            our_id = registry_for_parse.resolve_our_catalog_id(cdm)
+            rows.append(parse_leolabs_cdm(cdm, our_id))
+        except (LeoLabsParseError, LookupError) as exc:
+            log.info(
+                "skipping LeoLabs CDM that failed parse/guards",
+                extra={"event": "leolabs_cdm_skipped", "catalog": catalog,
+                       "reason": str(exc)},
+            )
+            continue
+    if rows:
+        _last_fetch_utc = now.isoformat().replace("+00:00", "Z")
+
+    next_offset = offset + page_size
+    next_cursor = (
+        encode_cursor(next_offset, fingerprint) if next_offset < total else None
+    )
+
+    log.info(
+        "LeoLabs conjunction page fetched",
+        extra={"event": "leolabs_page_fetched", "catalog": catalog,
+               "primary_norad": int(primary_norad), "offset": offset,
+               "page_size": page_size, "returned": len(rows), "total": total,
+               "in_volume": bool(filters)},
+    )
+    return ConjunctionPage(
+        rows=rows,
+        next_cursor=next_cursor,
+        total=total,
+        cdm_total=cdm_total,
+        offset=offset,
+        page_size=page_size,
+        volume_filters=filters,
     )
 
 

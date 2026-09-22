@@ -102,6 +102,44 @@ def event_key(parsed: ParsedLeoLabsCDM) -> str:
     return f"secondary:{parsed.secondary.designator}"
 
 
+def raw_event_key(cdm: Dict[str, Any]) -> str:
+    """event_key's answer, read off an unparsed CDM.
+
+    SCRUM-445. Paging has to dedupe the whole in-volume set before it slices a
+    page, or the same event could appear on two pages and the total would count
+    reissues as separate conjunctions. Parsing every CDM just to dedupe is the
+    cost this story exists to avoid, so the key is read from the raw fields the
+    parser reads it from: provenance["cdm_id"] is COMMENT_ID, provenance
+    ["event_id"] is COMMENT_EVENT_ID, and secondary.designator is
+    SAT2_OBJECT_DESIGNATOR.
+
+    The two functions must agree on every CDM; a test asserts exactly that, so
+    this cannot drift away from event_key unnoticed.
+    """
+    for key, raw_field in (("event_id", "COMMENT_EVENT_ID"), ("cdm_id", "COMMENT_ID")):
+        value = cdm.get(raw_field)
+        if value is not None:
+            return f"{key}:{value}"
+    return f"secondary:{cdm.get('SAT2_OBJECT_DESIGNATOR')}"
+
+
+def dedupe_raw_by_event(cdms: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """dedupe_by_event, on unparsed CDMs. Same rule, same order-preservation.
+
+    Callers pass an already risk-ordered sequence, so "first seen" is again the
+    highest-risk CDM for that event.
+    """
+    seen = set()
+    kept: List[Dict[str, Any]] = []
+    for cdm in cdms:
+        key = raw_event_key(cdm)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(cdm)
+    return kept
+
+
 def conjunction_row(
     parsed: ParsedLeoLabsCDM, now: Optional[datetime] = None
 ) -> Dict[str, Any]:
@@ -143,6 +181,18 @@ def conjunction_row(
         "pc": pc,
         "pc_display": _pc_display(pc),
         "risk_level": pc_to_risk_level(pc),
+        # -- relative encounter geometry, RTN, straight from the CDM --------
+        # SCRUM-445: the dashboard highlights a selected row's encounter geometry
+        # without a round-trip, so the row carries the geometry rather than the
+        # viz asking for it on click. These are the CDM's own RTN relative state
+        # at TCA (metres, metres/second), the same numbers SCRUM-417 already puts
+        # on the evaluate response's conjunction block -- copied, not recomputed,
+        # and not propagated. None when the CDM did not carry them.
+        "relative_position_rtn_m": parsed.relative_position_rtn_m,
+        "relative_velocity_rtn_m_s": parsed.relative_velocity_rtn_m_s,
+        "relative_state_source": (
+            "leolabs_cdm_rtn" if parsed.relative_position_rtn_m is not None else None
+        ),
         # -- provenance, so a consumer cannot mistake whose Pc this is ------
         "pc_source": "leolabs_cdm",
         "pc_method": parsed.cdm_collision_probability_method,

@@ -189,6 +189,45 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 .portlet-btn:hover{color:var(--accent);border-color:var(--accent-dim)}
 .panel.portlet-minimized > *:not(.panel-hdr){display:none}
 .panel.portlet-maximized{width:88vw;max-width:1100px;max-height:88vh;overflow:auto;margin:0}
+
+/* SCRUM-445: expanded Active Conjunctions. The panel maximizes wider than the
+   default portlet so the table and the encounter geometry can sit side by side --
+   the whole point of expanding it is to triage a long list against the geometry,
+   which a full-width table covering the viz would defeat. The geometry pane is
+   only laid out while maximized; collapsed, the panel is the compact top-rows
+   table it has always been. */
+.panel.portlet-maximized#portlet-conjunctions{width:94vw;max-width:1600px;height:88vh;max-height:88vh;overflow:hidden}
+#portlet-conjunctions .conj-split{display:flex;flex-direction:column;min-height:0;flex:1}
+.panel.portlet-maximized#portlet-conjunctions .conj-split{flex-direction:row;gap:10px;padding:0 10px 10px}
+#portlet-conjunctions .conj-table-pane{display:flex;flex-direction:column;min-height:0;min-width:0;flex:1}
+#portlet-conjunctions .conj-scroll{max-height:260px;overflow-y:auto;padding:0}
+.panel.portlet-maximized#portlet-conjunctions .conj-scroll{max-height:none;flex:1}
+/* Collapsed, the geometry pane is not rendered at all; the viz stays in its own
+   container in the dashboard where it normally lives. */
+#portlet-conjunctions .conj-geom-pane{display:none}
+/* min-width:0 matters: a flex item defaults to min-width:auto, and the canvas's
+   intrinsic width then overrides the 46% basis and squeezes the table. */
+.panel.portlet-maximized#portlet-conjunctions .conj-geom-pane{
+  display:flex;flex-direction:column;min-height:0;min-width:0;flex:0 0 46%;
+  border:1px solid var(--border);border-radius:3px;background:var(--bg-panel)}
+#portlet-conjunctions .conj-geom-hdr{padding:6px 10px;border-bottom:1px solid var(--border);
+  font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--accent-dim);
+  display:flex;justify-content:space-between;align-items:center;gap:8px}
+#portlet-conjunctions .conj-geom-slot{flex:1;min-height:0;min-width:0;position:relative;display:flex}
+#portlet-conjunctions .conj-geom-slot > *{flex:1;min-height:0;min-width:0}
+/* Toolbar: the volume filter and the pager. Both live above the table so the
+   operator can see what bounded the list before reading it. */
+.conj-toolbar{display:flex;align-items:center;justify-content:space-between;gap:8px;
+  flex-wrap:wrap;padding:5px 10px;border-bottom:1px solid var(--border);font-size:9px}
+.conj-toolbar-grp{display:flex;align-items:center;gap:6px}
+.conj-chip{background:none;border:1px solid var(--border);color:var(--text-dim);
+  font-family:inherit;font-size:9px;letter-spacing:0.5px;padding:2px 7px;border-radius:2px;
+  cursor:pointer;transition:color .2s,border-color .2s}
+.conj-chip:hover:not(:disabled){color:var(--accent);border-color:var(--accent-dim)}
+.conj-chip:disabled{opacity:0.35;cursor:default}
+.conj-chip.on{color:var(--accent);border-color:var(--accent-dim)}
+.conj-range{color:var(--text-dim);letter-spacing:0.5px;white-space:nowrap}
+.conj-geom-note{font-size:8px;color:var(--text-dim);letter-spacing:0.5px;text-transform:none}
 .artifact-panel.portlet-minimized > *:not(.artifact-panel-hdr){display:none}
 .artifact-panel.portlet-maximized{width:88vw;max-width:1100px;max-height:88vh;overflow:auto;margin:0}
 
@@ -586,9 +625,44 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
              decision card's Pc after scoring is APS-computed -- two different
              numbers that must not read as one. -->
         <div class="conj-source-note" id="conjSourceNote">SOURCE: SCENARIO &mdash; surrogate covariance</div>
-        <div style="max-height:260px;overflow-y:auto;padding:0">
-          <table class="conj-table"><thead><tr><th>Object</th><th>Miss (m)</th><th id="conjPcHdr">Pc</th><th>TCA</th><th>Risk</th></tr></thead>
-          <tbody id="conjBody"><tr><td colspan="5" class="empty-state">No data - run a scenario</td></tr></tbody></table>
+        <!-- SCRUM-445: live-only toolbar. The reporting-volume filter bounds
+             which conjunctions are listed at all, so an operator has to be able
+             to see that it is on and widen it deliberately -- a short list must
+             never be ambiguous between "quiet sky" and "cropped by the volume".
+             Hidden in scenario mode, which has no paging and no volume. -->
+        <div class="conj-toolbar" id="conjToolbar" style="display:none">
+          <div class="conj-toolbar-grp">
+            <button type="button" class="conj-chip on" id="conjVolBtn"
+              onclick="toggleConjVolumeFilter()"
+              title="LeoLabs reporting volume: 2 x 50 x 50 km RIC. Off widens to the whole window, which is slower.">IN VOLUME</button>
+            <span class="conj-range" id="conjVolNote">2 &times; 50 &times; 50 km RIC</span>
+          </div>
+          <div class="conj-toolbar-grp">
+            <span class="conj-range" id="conjRange">&mdash;</span>
+            <button type="button" class="conj-chip" id="conjPrevBtn"
+              onclick="conjPrevPage()" disabled>&lsaquo; PREV</button>
+            <button type="button" class="conj-chip" id="conjNextBtn"
+              onclick="conjNextPage()" disabled>NEXT &rsaquo;</button>
+          </div>
+        </div>
+        <div class="conj-split">
+          <div class="conj-table-pane">
+            <div class="conj-scroll">
+              <table class="conj-table"><thead><tr><th>Object</th><th>Miss (m)</th><th id="conjPcHdr">Pc</th><th>TCA</th><th>Risk</th></tr></thead>
+              <tbody id="conjBody"><tr><td colspan="5" class="empty-state">No data - run a scenario</td></tr></tbody></table>
+            </div>
+          </div>
+          <!-- Expanded only. The live encounter canvas is MOVED in here while the
+               panel is maximized and moved back on restore, the same way the
+               portlet code moves a panel into its overlay: one renderer, one
+               canvas, so the expanded geometry cannot drift from the dashboard's. -->
+          <div class="conj-geom-pane" id="conjGeomPane">
+            <div class="conj-geom-hdr">
+              <span>Encounter Geometry</span>
+              <span class="conj-geom-note" id="conjGeomNote">Select a row</span>
+            </div>
+            <div class="conj-geom-slot" id="conjGeomSlot"></div>
+          </div>
         </div>
       </div>
     </div>
@@ -741,6 +815,8 @@ function onLiveAssetChange(){
 }
 
 function updateConjSourceNote(){
+  // The paging toolbar is live-only; scenario mode has no cursor and no volume.
+  renderConjPager();
   const note=document.getElementById('conjSourceNote');
   const hdr=document.getElementById('conjPcHdr');
   if(!note) return;
@@ -757,6 +833,9 @@ function updateConjSourceNote(){
 
 function clearConjunctionsForSourceSwitch(){
   conjunctionData=null;selectedConjunction=null;
+  // SCRUM-445: a cursor is only valid for the query that minted it, so a source
+  // or asset switch discards the walk rather than carrying an offset across.
+  selectedRowGeom=null;resetConjPaging();renderConjPager();setConjGeomNote('Select a row');
   const tbody=document.getElementById('conjBody');
   if(tbody){
     tbody.innerHTML='<tr><td colspan="5" class="empty-state">'
@@ -1090,20 +1169,114 @@ async function runScenario(){
 // SCRUM-421: fetch an asset's live LeoLabs conjunctions and make them the table.
 // Replaces the surrogate rows outright; the two sources are never on screen
 // together.
-async function fetchLiveConjunctions(){
+// SCRUM-445: paging state for the live listing. The cursor is opaque and
+// forward-only, so stepping back means replaying a cursor we have already used --
+// hence the stack. Index i of the stack is the cursor that fetched page i, with
+// null for page one.
+const conjPaging={
+  pageSize:100,
+  inVolume:true,
+  cursorStack:[null],
+  pageIndex:0,
+  nextCursor:null,
+  total:null,
+  offset:0,
+  returned:0,
+  loading:false
+};
+
+function resetConjPaging(){
+  conjPaging.cursorStack=[null];
+  conjPaging.pageIndex=0;
+  conjPaging.nextCursor=null;
+  conjPaging.total=null;
+  conjPaging.offset=0;
+  conjPaging.returned=0;
+}
+
+function conjPagingUrl(cursor){
+  const q=new URLSearchParams({
+    primary_norad:liveAssetNorad,
+    page_size:String(conjPaging.pageSize),
+    in_volume:conjPaging.inVolume?'true':'false'
+  });
+  if(cursor) q.set('cursor',cursor);
+  return '/api/planner/v1/leolabs/conjunctions?'+q.toString();
+}
+
+// The pager reads as "1-100 of 1432" so a short list is never ambiguous about
+// whether it is the whole set.
+function renderConjPager(){
+  const bar=document.getElementById('conjToolbar');
+  if(bar) bar.style.display=isLiveMode()?'flex':'none';
+  const range=document.getElementById('conjRange');
+  const prev=document.getElementById('conjPrevBtn');
+  const next=document.getElementById('conjNextBtn');
+  if(range){
+    if(conjPaging.total==null||conjPaging.returned===0){
+      range.textContent=conjPaging.total===0?'0 of 0':'\u2014';
+    }else{
+      const from=conjPaging.offset+1,to=conjPaging.offset+conjPaging.returned;
+      range.textContent=from+'-'+to+' of '+conjPaging.total;
+    }
+  }
+  if(prev) prev.disabled=conjPaging.loading||conjPaging.pageIndex<=0;
+  if(next) next.disabled=conjPaging.loading||!conjPaging.nextCursor;
+  const volBtn=document.getElementById('conjVolBtn');
+  if(volBtn) volBtn.classList.toggle('on',conjPaging.inVolume);
+  const volNote=document.getElementById('conjVolNote');
+  if(volNote){
+    volNote.textContent=conjPaging.inVolume
+      ? '2 \u00d7 50 \u00d7 50 km RIC'
+      : 'whole window \u2014 slower';
+  }
+}
+
+function toggleConjVolumeFilter(){
+  if(conjPaging.loading)return;
+  conjPaging.inVolume=!conjPaging.inVolume;
+  // The volume is part of what a cursor is valid against, so widening or
+  // narrowing restarts at page one rather than replaying a now-foreign cursor.
+  resetConjPaging();
+  renderConjPager();
+  fetchLiveConjunctions();
+}
+
+function conjNextPage(){
+  if(conjPaging.loading||!conjPaging.nextCursor)return;
+  const cursor=conjPaging.nextCursor;
+  conjPaging.cursorStack=conjPaging.cursorStack.slice(0,conjPaging.pageIndex+1);
+  conjPaging.cursorStack.push(cursor);
+  conjPaging.pageIndex+=1;
+  fetchLiveConjunctions({cursor:cursor});
+}
+
+function conjPrevPage(){
+  if(conjPaging.loading||conjPaging.pageIndex<=0)return;
+  conjPaging.pageIndex-=1;
+  fetchLiveConjunctions({cursor:conjPaging.cursorStack[conjPaging.pageIndex]});
+}
+
+async function fetchLiveConjunctions(opts){
+  const cursor=(opts&&opts.cursor)||null;
   const btn=document.getElementById('runBtn'),msg=document.getElementById('scenarioMsg');
   if(!liveAssetNorad){msg.textContent='Select a subscribed asset first';return}
   userCleared=false;selectedCandidateDir=null;
+  // A fresh fetch with no cursor is page one, so forget any walk in progress.
+  if(!cursor) resetConjPaging();
+  conjPaging.loading=true;renderConjPager();
   btn.classList.add('running');btn.textContent='FETCHING...';
   msg.textContent='Fetching LeoLabs conjunctions for '+liveAssetName+'...';
   let resp,data;
   try{
-    resp=await fetch('/api/planner/v1/leolabs/conjunctions?primary_norad='+encodeURIComponent(liveAssetNorad));
+    resp=await fetch(conjPagingUrl(cursor));
     try{data=await resp.json();}catch(_){data={};}
   }catch(e){
+    conjPaging.loading=false;renderConjPager();
     btn.classList.remove('running');btn.textContent='FETCH LIVE CONJUNCTIONS';
     msg.textContent='Planner unreachable: '+e.message;return;
   }
+  conjPaging.loading=false;
   btn.classList.remove('running');btn.textContent='FETCH LIVE CONJUNCTIONS';
 
   // Each status means something different to an operator, so each says something
@@ -1111,37 +1284,68 @@ async function fetchLiveConjunctions(){
   // "no conjunctions", which would read as a clear sky.
   if(resp.status===404){
     setLiveTableMessage('NORAD not in LeoLabs subscription');
-    msg.textContent=liveAssetNorad+' is not in the LeoLabs subscription';return;
+    msg.textContent=liveAssetNorad+' is not in the LeoLabs subscription';
+    renderConjPager();return;
   }
   if(resp.status===422){
+    // SCRUM-445: a 422 here is either a bad window or a cursor that no longer
+    // belongs to this query (asset, window, page size or volume changed under a
+    // walk). Either way the honest recovery is page one, never a wrong page.
     const detail=data.error||data.detail||'invalid request';
+    if(cursor){
+      resetConjPaging();renderConjPager();
+      setLiveTableMessage('Paging cursor expired \u2014 re-reading from page one');
+      msg.textContent='Paging cursor expired: '+detail;
+      fetchLiveConjunctions();
+      return;
+    }
     setLiveTableMessage('Request rejected: '+detail);
-    msg.textContent='Request rejected: '+detail;return;
+    msg.textContent='Request rejected: '+detail;renderConjPager();return;
   }
   if(resp.status===503){
     setLiveTableMessage('LeoLabs feed unavailable or disabled');
-    msg.textContent='LeoLabs feed unavailable or disabled';return;
+    msg.textContent='LeoLabs feed unavailable or disabled';
+    renderConjPager();return;
   }
   if(!resp.ok){
     const detail=data.error||data.detail||('HTTP '+resp.status);
     setLiveTableMessage('Fetch failed: '+detail);
-    msg.textContent='Fetch failed: '+detail;return;
+    msg.textContent='Fetch failed: '+detail;renderConjPager();return;
   }
 
   const rows=(data.conjunctions||[]).map(liveRowToConj);
+  // SCRUM-445: remember where this page sits so the pager can say "1-100 of
+  // 1432" and so PREV/NEXT know whether they have anywhere to go.
+  conjPaging.nextCursor=data.next_cursor||null;
+  conjPaging.total=(typeof data.total==='number')?data.total:null;
+  conjPaging.offset=data.page?.offset ?? 0;
+  conjPaging.returned=rows.length;
   conjunctionData={conjunctions:rows,summary:liveSummary(rows),source:'leolabs'};
   selectedConjunction=null;
+  selectedRowGeom=null;
   updateMetrics(conjunctionData.summary);
   updateConjunctionTable(rows);
   updateConjSourceNote();
+  renderConjPager();
+  setConjGeomNote('Select a row');
   if(rows.length===0){
     // A genuinely empty window, which is a real state of the world and not a
     // failure. Worded so it cannot be mistaken for the feed being down.
-    setLiveTableMessage('No conjunctions in window');
-    msg.textContent='No conjunctions in the '+(data.window?.lookahead_days ?? 7)+'-day window';
+    setLiveTableMessage(conjPaging.inVolume
+      ? 'No conjunctions in the reporting volume'
+      : 'No conjunctions in window');
+    msg.textContent='No conjunctions in the '+(data.window?.lookahead_days ?? 7)+'-day window'
+      +(conjPaging.inVolume?' inside the reporting volume':'');
     return;
   }
-  msg.textContent=rows.length+' live conjunction'+(rows.length===1?'':'s')+' — click a row to score it';
+  // The count on screen is this page, so say which page of what. Anything else
+  // reads as the whole set and a truncated list is exactly the bug behind 445.
+  const total=conjPaging.total;
+  const shown=(total!=null&&total>rows.length)
+    ? (conjPaging.offset+1)+'-'+(conjPaging.offset+rows.length)+' of '+total
+    : String(rows.length);
+  msg.textContent=shown+' live conjunction'+(rows.length===1?'':'s')
+    +' — click a row to score it';
 }
 
 function setLiveTableMessage(text){
@@ -1171,7 +1375,12 @@ function liveRowToConj(r){
     secondary_designator:r.secondary_designator,
     secondary_name:r.secondary_name,
     tca_utc:r.tca_utc,
-    pc_source:r.pc_source
+    pc_source:r.pc_source,
+    // SCRUM-445: the CDM's own RTN relative state at TCA, so selecting the row
+    // can draw its encounter geometry with no round-trip and no recompute.
+    relative_position_rtn_m:r.relative_position_rtn_m,
+    relative_velocity_rtn_m_s:r.relative_velocity_rtn_m_s,
+    relative_state_source:r.relative_state_source
   };
 }
 
@@ -1251,9 +1460,42 @@ function updateConjunctionTable(conjs){
   }).join('');
 }
 
+// SCRUM-445: the row the operator picked, when its geometry is being drawn from
+// the row's own CDM state rather than from a scored result. Null once an evaluate
+// has returned, because the scored result is then the better source.
+let selectedRowGeom=null;
+
+function setConjGeomNote(text){
+  const el=document.getElementById('conjGeomNote');
+  if(el) el.textContent=text;
+}
+
+// Select-and-highlight, not recompute. The row already carries the CDM's RTN
+// relative state at TCA, so the encounter is drawn from numbers we already have:
+// no propagation, no fetch, and nothing here computes geometry. The authoritative
+// Pc still only arrives when the row is scored, which the evaluate below does.
+function highlightRowGeometry(conj){
+  if(!conj)return false;
+  const rtn=conj.relative_position_rtn_m;
+  if(!Array.isArray(rtn)||rtn.length!==3){
+    selectedRowGeom=null;
+    setConjGeomNote('No CDM relative state on this row');
+    return false;
+  }
+  selectedRowGeom=conj;
+  currentConj=conj;
+  setConjGeomNote((conj.object_id||'row')+' \u2014 CDM RTN geometry, unscored');
+  drawEncounter(conj,null);
+  return true;
+}
+
 function selectConj(idx){
   selectedConjunction=idx;const conjs=conjunctionData?.conjunctions;
-  if(!conjs||!conjs[idx])return;updateConjunctionTable(conjs);evaluateConjunction(conjs[idx],idx);
+  if(!conjs||!conjs[idx])return;updateConjunctionTable(conjs);
+  // Draw the picked row's geometry immediately, before the evaluate round-trip,
+  // so the viz answers the click rather than the scoring latency.
+  highlightRowGeometry(conjs[idx]);
+  evaluateConjunction(conjs[idx],idx);
   globeFocusOnConj(conjs[idx]);
 }
 
@@ -1440,6 +1682,9 @@ async function evaluateConjunction(conj,idx){
   // evaluate failure, so log it rather than falsely reporting EVALUATE FAILED.
   try{
     currentPlannerResult=result;currentConj=conj;
+    // SCRUM-445: the row's own CDM geometry was a pre-score stand-in; the scored
+    // result supersedes it, so stop preferring the row.
+    selectedRowGeom=null;
     if(result.decision_log_id){lastEvaluatedDecisionLogId=result.decision_log_id;const _e=document.getElementById('lastDecisionLogId');if(_e)_e.textContent=result.decision_log_id;}
     if(currentView==='3d')updateConjunctionArc(conj);
     renderCovSourceBadge(result.covariance_source || null);
@@ -1485,6 +1730,26 @@ function conjObjectLabel(o){
 }
 
 function evalDisplayCtx(result, conj){
+  // SCRUM-445: result === null means "draw this row's own geometry", used when a
+  // row is selected and not yet scored. The numbers are the CDM's: its RTN
+  // relative state, its miss distance, its Pc -- labelled as LeoLabs' Pc by the
+  // row itself. Nothing is recomputed here, and the risk band stays the row's
+  // rather than being inferred from an artifact that does not exist yet.
+  if(result === null && conj && Array.isArray(conj.relative_position_rtn_m)){
+    const rv = conj.relative_velocity_rtn_m_s;
+    const relVelKmS = (Array.isArray(rv) && rv.length===3)
+      ? Math.sqrt(rv[0]*rv[0]+rv[1]*rv[1]+rv[2]*rv[2])/1000 : null;
+    return {
+      live:true,
+      risk:conj.risk_level,
+      label:conj.object_id,
+      missM:(conj.miss_distance_m||0),
+      pc:(conj.pc||0),
+      tcaMin:conj.time_to_tca_min,
+      rtn:conj.relative_position_rtn_m,
+      relVelKmS:relVelKmS
+    };
+  }
   const live = !!(result && result.source && String(result.source).toLowerCase() !== 'surrogate');
   const rs = (result && result.atlas_artifact && result.atlas_artifact.risk_summary) || {};
   if(live){
@@ -1502,12 +1767,14 @@ function evalDisplayCtx(result, conj){
     let tcaMin = conj.time_to_tca_min;
     const tca = (cj && cj.tca_utc) || rs.tca_utc;
     if(tca){ const dm = (new Date(tca).getTime() - Date.now())/60000; if(isFinite(dm)) tcaMin = dm; }
-    const rtn = (cj && cj.relative_position_rtn_m) || null;
+    // SCRUM-445: fall back to the row's own RTN when the response has no
+    // conjunction block, so a scored row never loses geometry the row already had.
+    const rtn = (cj && cj.relative_position_rtn_m) || conj.relative_position_rtn_m || null;
     // SCRUM-421: a live row has no relative velocity of its own -- the list
     // endpoint does not carry one -- but the scored result does, as the CDM's
     // RTN relative velocity in m/s. Use it rather than leaving the overlay to
     // read a surrogate field that is not there.
-    const rv = (cj && cj.relative_velocity_rtn_m_s) || null;
+    const rv = (cj && cj.relative_velocity_rtn_m_s) || conj.relative_velocity_rtn_m_s || null;
     const relVelKmS = (Array.isArray(rv) && rv.length===3)
       ? Math.sqrt(rv[0]*rv[0]+rv[1]*rv[1]+rv[2]*rv[2])/1000
       : (typeof conj.relative_velocity_km_s==='number' ? conj.relative_velocity_km_s : null);
@@ -1883,6 +2150,7 @@ function updateRiskBar(result,conj){
 function clearAll(){
   userCleared=true;
   conjunctionData=null;selectedConjunction=null;currentPlannerResult=null;currentConj=null;zoomLevel=2.5;panX=0;panY=0;selectedCandidateDir=null;currentCandidates=null;
+  selectedRowGeom=null;resetConjPaging();renderConjPager();setConjGeomNote('Select a row');
   document.getElementById('conjBody').innerHTML='<tr><td colspan="5" class="empty-state">'
     +(isLiveMode()?'Select an asset and fetch live conjunctions':'No data - run a scenario')+'</td></tr>';
   document.getElementById('fuelRiskChart').innerHTML='';
@@ -1926,35 +2194,50 @@ function setNode(id,on){const el=document.getElementById(id);el.classList.toggle
 // ==========================================================
 // ENCOUNTER GEOMETRY RENDERER (Canvas 2D)
 // ==========================================================
+// SCRUM-445: redraw whatever the viz is currently showing. Needed because the
+// canvas is re-laid-out when the expanded Active Conjunctions panel borrows it,
+// and because a row can be showing its own CDM geometry with no scored result.
+function redrawEncounter(){
+  if(selectedRowGeom&&!currentPlannerResult){drawEncounter(selectedRowGeom,null);return;}
+  if(currentConj&&currentPlannerResult){drawEncounter(currentConj,currentPlannerResult);return;}
+  drawEncounterEmpty();
+}
+
+// Set by initEncounter so the portlet code can re-measure the canvas after the
+// element is moved between its dashboard slot and the expanded panel.
+let resizeEncounter=function(){};
+
 function initEncounter(){
   const canvas=document.getElementById('encounterCanvas');
-  const wrap=canvas.parentElement;
   function resize(){
+    const wrap=canvas.parentElement;
+    if(!wrap)return;
     encounterW=wrap.clientWidth;encounterH=wrap.clientHeight;
+    if(encounterW===0||encounterH===0)return;
     canvas.width=encounterW*window.devicePixelRatio;
     canvas.height=encounterH*window.devicePixelRatio;
     canvas.style.width=encounterW+'px';canvas.style.height=encounterH+'px';
     encounterCtx=canvas.getContext('2d');
     encounterCtx.scale(window.devicePixelRatio,window.devicePixelRatio);
-    if(currentConj&&currentPlannerResult)drawEncounter(currentConj,currentPlannerResult);
-    else drawEncounterEmpty();
+    redrawEncounter();
   }
+  resizeEncounter=resize;
   window.addEventListener('resize',resize);
   canvas.addEventListener('wheel',function(e){
     e.preventDefault();
     var d=e.deltaY>0?0.82:1.22;
     zoomLevel=Math.max(0.15,Math.min(25,zoomLevel*d));
-    if(currentConj&&currentPlannerResult)drawEncounter(currentConj,currentPlannerResult);
+    redrawEncounter();
   },{passive:false});
   canvas.addEventListener('dblclick',function(){
     zoomLevel=2.5;panX=0;panY=0;
-    if(currentConj&&currentPlannerResult)drawEncounter(currentConj,currentPlannerResult);
+    redrawEncounter();
   });
   canvas.addEventListener('mousedown',function(e){isDragging=true;dragStartX=e.clientX-panX;dragStartY=e.clientY-panY;canvas.style.cursor='grabbing'});
   canvas.addEventListener('mousemove',function(e){
     if(!isDragging)return;
     panX=e.clientX-dragStartX;panY=e.clientY-dragStartY;
-    if(currentConj&&currentPlannerResult)drawEncounter(currentConj,currentPlannerResult);
+    redrawEncounter();
   });
   canvas.addEventListener('mouseup',function(){isDragging=false;canvas.style.cursor='grab'});
   canvas.addEventListener('mouseleave',function(){isDragging=false;canvas.style.cursor='grab'});
@@ -2094,7 +2377,12 @@ function drawEncounter(conj,result){
   ctx.restore();
 
   // ---- BURN VECTOR ARROW ----
-  const rec=result.recommendation;
+  // SCRUM-445: result is null when this is a row-selection highlight -- the
+  // encounter geometry comes from the row's own CDM state and nothing has been
+  // scored yet. There is then no recommendation, no delta-v and no post-maneuver
+  // envelope to draw, so everything below falls away on activeDv being absent.
+  // Drawing a burn here would show a maneuver the planner has not recommended.
+  const rec=result&&result.recommendation;
   // No-burn: skip burn vector entirely
   const isNoBurn=rec?.direction==='no-burn';
   // Resolve active burn: selected candidate preview or recommended
@@ -2102,14 +2390,14 @@ function drawEncounter(conj,result){
   let activeDir=rec?.direction||'';
   let activeMag=rec?.dv_magnitude_m_s||0;
   let isAltCandidate=false;
-  let activeM2Post=result.metrics?.m2_post||0;
+  let activeM2Post=result?.metrics?.m2_post||0;
   if(typeof selectedCandidateDir!=='undefined'&&selectedCandidateDir&&typeof currentCandidates!=='undefined'&&currentCandidates){
     const sel=currentCandidates.find(cd=>cd.direction===selectedCandidateDir);
     if(sel){
       activeDv=sel.dv_eci_km_s;activeDir=sel.direction;
       activeMag=Math.sqrt(sel.dv_eci_km_s.reduce((s,v)=>s+v*v,0))*1000;
       isAltCandidate=true;
-      const m2p=result.metrics?.m2_pre||0;
+      const m2p=result?.metrics?.m2_pre||0;
       activeM2Post=Math.max(0,m2p-sel.delta_C);
     }
   }
@@ -2202,7 +2490,7 @@ function drawEncounter(conj,result){
 
       // ---- POST-MANEUVER MISS ENVELOPE ----
       const m2Post=activeM2Post;
-      const m2Pre=result.metrics?.m2_pre||0;
+      const m2Pre=result?.metrics?.m2_pre||0;
       if(m2Post>m2Pre&&m2Pre>0){
         const ratio=Math.sqrt(m2Post/Math.max(0.01,m2Pre));
         const postPx=missPx*Math.min(ratio,4);
@@ -2371,9 +2659,54 @@ function maximizePortlet(id){
   portletState[id] = 'maximized';
   maximizedPortletId = id;
   updatePortletButtons(id);
+  onPortletMaximized(id);
+}
+
+// SCRUM-445: expanding Active Conjunctions has to keep the encounter geometry in
+// view -- triaging a long list against the geometry is the reason to expand it,
+// and a full-screen table would cover the viz. The live canvas wrapper is MOVED
+// into the panel's geometry pane and moved back on restore, exactly as this code
+// already moves a panel into its overlay. Moving rather than cloning keeps one
+// renderer and one canvas, so the expanded geometry cannot drift from the
+// dashboard's, and the row-to-geometry highlight works in both places unchanged.
+const ENCOUNTER_BORROWER = 'portlet-conjunctions';
+// setView('3d') hides the 2D wrapper and shows the globe. The expanded panel's
+// geometry pane is a 2D encounter view, so borrowing the wrapper has to unhide it
+// and hand back exactly the display state it found. The globe stays in the
+// dashboard behind the overlay and is untouched.
+let borrowedEncounterDisplay = null;
+
+function onPortletMaximized(id){
+  if(id !== ENCOUNTER_BORROWER) return;
+  const slot = document.getElementById('conjGeomSlot');
+  const wrap = document.querySelector('.encounter-canvas-wrap');
+  if(!slot || !wrap) return;
+  const ph = document.createElement('div');
+  ph.id = 'encounter-wrap-ph';
+  ph.style.display = 'none';
+  wrap.parentNode.insertBefore(ph, wrap);
+  slot.appendChild(wrap);
+  borrowedEncounterDisplay = wrap.style.display;
+  wrap.style.display = '';
+  // Re-measure after layout settles, or the canvas keeps the old pane's size.
+  requestAnimationFrame(function(){ resizeEncounter(); });
+}
+
+function onPortletRestored(id){
+  if(id !== ENCOUNTER_BORROWER) return;
+  const ph = document.getElementById('encounter-wrap-ph');
+  const wrap = document.querySelector('.encounter-canvas-wrap');
+  if(wrap && borrowedEncounterDisplay !== null){
+    wrap.style.display = borrowedEncounterDisplay;
+  }
+  borrowedEncounterDisplay = null;
+  if(ph && wrap && ph.parentNode){ ph.parentNode.insertBefore(wrap, ph); }
+  if(ph) ph.remove();
+  requestAnimationFrame(function(){ resizeEncounter(); });
 }
 
 function restorePortlet(id){    // restore from maximized to the original slot
+  onPortletRestored(id);   // hand the encounter canvas back before the panel moves
   const panel = document.getElementById(id);
   const ph = document.getElementById('portlet-ph-' + id);
   const backdrop = document.getElementById('portletMaxBackdrop');
