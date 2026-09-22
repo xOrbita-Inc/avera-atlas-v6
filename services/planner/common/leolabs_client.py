@@ -76,6 +76,12 @@ _SCREENING_POLL_TIMEOUT_S = 300.0
 
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 
+# SCRUM-438: LeoLabs defaults the `paginate` request parameter to false, which
+# caps a search/list at 1,000 entries and suppresses nextToken. Every paginated
+# GET sends it explicitly, as the lowercase string the API expects (requests
+# would serialize a Python bool as "True").
+_PAGINATE_TRUE = "true"
+
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -349,19 +355,54 @@ class LeoLabsClient:
         LeoLabs list/search endpoints return {<items_key>: [...], total, limit,
         nextToken}. Pagination is required on every search and list call
         (design section 9, item 5).
+
+        The ``paginate`` request parameter must be set explicitly (SCRUM-438).
+        When it is absent LeoLabs defaults it to false, caps the response at
+        1,000 entries and returns no nextToken, so this loop would stop after one
+        page and silently truncate the result. It is sent as the string "true"
+        rather than a Python bool because requests renders True as "True", and
+        the API expects the lowercase literal. A caller can still override it
+        through params if a specific endpoint ever needs paginate off.
+
+        Because a silent truncation is the failure mode this guards against, the
+        number of items yielded is cross-checked against the ``total`` the first
+        page reports, and a mismatch is logged as a warning.
         """
         page_params = dict(params)
+        page_params.setdefault("paginate", _PAGINATE_TRUE)
+
+        yielded = 0
+        total: Optional[int] = None
         while True:
             data = self._request("GET", path, params=page_params)
             if not isinstance(data, dict):
-                return
+                break
+            if total is None:
+                raw_total = data.get("total")
+                if isinstance(raw_total, (int, float)) and not isinstance(
+                    raw_total, bool
+                ):
+                    total = int(raw_total)
             for item in data.get(items_key, []) or []:
+                yielded += 1
                 yield item
             next_token = data.get("nextToken")
             if not next_token:
-                return
+                break
             page_params = dict(params)
+            page_params.setdefault("paginate", _PAGINATE_TRUE)
             page_params["nextToken"] = next_token
+
+        if total is not None and yielded != total:
+            log.warning(
+                "LeoLabs pagination returned a different count than total",
+                extra={
+                    "event": "leolabs_pagination_count_mismatch",
+                    "path": path,
+                    "retrieved": yielded,
+                    "total": total,
+                },
+            )
 
     # -- identity ---------------------------------------------------------
 
@@ -369,7 +410,9 @@ class LeoLabsClient:
         """List catalog objects, following pagination.
 
         Used once to map each of our subscribed sats to its LeoLabs catalog
-        number and NORAD id (design sections 3 and 6.3).
+        number and NORAD id (design sections 3 and 6.3). Pages carry
+        ``paginate=true`` via _paginate, so a catalog larger than 1,000 objects
+        comes back whole (SCRUM-438).
         """
         return list(self._paginate("/catalog/objects", params, "objects"))
 
@@ -423,6 +466,16 @@ class LeoLabsClient:
         cdm_source defaults to "LeoLabs" to keep 18th Space CDMs (which can carry
         DEFAULT covariance) out of the result (design Appendix A). Each returned
         item is a field-keyed CDM JSON object for the parser to read.
+
+        object1 takes either a catalog number for the per-asset evaluate
+        (``object1="L2669"``, what the runtime uses) or the literal ``"C0"`` to
+        pull every vehicle the subscription covers in one search. ``**extra``
+        passes any further query parameter straight through; the volume filters
+        ``maxRelativePositionR``, ``maxRelativePositionI`` and
+        ``maxRelativePositionC`` (metres, RIC) are the ones worth knowing about.
+
+        Every page carries ``paginate=true`` via _paginate, so the result is the
+        complete set rather than the first 1,000 CDMs (SCRUM-438).
         """
         params: Dict[str, Any] = {"cdmSource": cdm_source}
         if object1 is not None:
