@@ -70,8 +70,10 @@ from common.udl_client import UDL_ENABLED, get_conjunctions, get_credential_vali
 from common import leolabs_runtime
 from common.leolabs_runtime import (
     LEOLABS_ENABLED,
+    LeoLabsCursorError,
     LeoLabsRuntimeError,
     fetch_leolabs_conjunction,
+    fetch_leolabs_conjunction_page,
     fetch_leolabs_conjunctions,
 )
 from common.leolabs_conjunction_list import (
@@ -1283,6 +1285,12 @@ async def leolabs_conjunctions(
     primary_norad: int,
     lookahead_days: int = leolabs_runtime.DEFAULT_LOOKAHEAD_DAYS,
     lookback_days: int = leolabs_runtime.DEFAULT_LOOKBACK_DAYS,
+    page_size: int = leolabs_runtime.DEFAULT_PAGE_SIZE,
+    cursor: Optional[str] = None,
+    in_volume: bool = True,
+    max_relative_position_r_m: Optional[float] = None,
+    max_relative_position_i_m: Optional[float] = None,
+    max_relative_position_c_m: Optional[float] = None,
 ) -> JSONResponse:
     """SCRUM-422: list a subscribed asset's live LeoLabs conjunctions.
 
@@ -1305,6 +1313,28 @@ async def leolabs_conjunctions(
       503  LeoLabs is disabled, or the fetch failed. Deliberately not an empty
            200: "the feed is off" and "the sky is clear" must not look alike on
            an operator's screen.
+
+    Paging and the reporting volume (SCRUM-445)
+    -------------------------------------------
+    This used to return every scorable CDM in the window in one response. Once
+    SCRUM-438 made the pull complete, a dense asset (SWARM C / 39453) overran the
+    ui-to-planner 60 s read timeout, so a request now returns one page:
+
+      page_size   rows per page, capped at leolabs_runtime.MAX_PAGE_SIZE.
+      cursor      the next_cursor from a prior page. Opaque and forward-only. It
+                  is bound to the asset, window, page size and volume filter it
+                  was minted for; replayed against a different query it is a 422
+                  rather than an offset into an unrelated list.
+      in_volume   defaults true, meaning LeoLabs' own reporting volume
+                  (2 x 50 x 50 km RIC). Pass false to widen to the whole window,
+                  which is honest about being slower rather than silently capped.
+      max_relative_position_{r,i,c}_m
+                  override one RIC axis, in metres.
+
+    total counts conjunction events across the whole in-volume set, not just this
+    page, and rows stay ordered worst Pc first with earliest TCA as the tie-break
+    across that whole set -- so page one really does hold the worst conjunctions,
+    which is the only ordering a triage table can be read top-down.
     """
     if not LEOLABS_ENABLED:
         return JSONResponse(
@@ -1328,14 +1358,35 @@ async def leolabs_conjunctions(
             ),
         )
 
+    if page_size < 1:
+        return JSONResponse(
+            status_code=422,
+            content=error_response("page_size must be >= 1"),
+        )
+
+    volume_filters = leolabs_runtime.resolve_volume_filters(
+        max_relative_position_r_m,
+        max_relative_position_i_m,
+        max_relative_position_c_m,
+        in_volume=in_volume,
+    )
+
     now = datetime.now(timezone.utc)
     try:
-        parsed = fetch_leolabs_conjunctions(
+        page = fetch_leolabs_conjunction_page(
             int(primary_norad),
             now=now,
             lookback_days=lookback_days,
             lookahead_days=lookahead_days,
+            page_size=page_size,
+            cursor=cursor,
+            volume_filters=volume_filters,
         )
+    except LeoLabsCursorError as exc:
+        # A cursor from a different asset, window, page size or volume filter.
+        # Paging on it would walk one asset's offsets through another's list, so
+        # it is a bad request and the dashboard re-reads page one.
+        return JSONResponse(status_code=422, content=error_response(str(exc)))
     except LeoLabsRuntimeError as exc:
         return JSONResponse(status_code=404, content=error_response(str(exc)))
     except Exception as exc:
@@ -1349,25 +1400,57 @@ async def leolabs_conjunctions(
             content=error_response(f"LeoLabs fetch failed: {exc}"),
         )
 
-    events = dedupe_by_event(parsed)
+    # The page's rows are already one per event -- the paged fetch dedupes the
+    # whole in-volume set before it slices, so an event cannot straddle two pages.
+    # Run it again anyway: it is idempotent, and it keeps the endpoint's guarantee
+    # true at the endpoint rather than only upstream of it.
+    events = dedupe_by_event(page.rows)
     min_tca, max_tca = leolabs_runtime.conjunction_window(
         now, lookback_days, lookahead_days
     )
     log.info(
         "LeoLabs conjunction list served",
         extra={"event": "leolabs_list_served", "primary_norad": primary_norad,
-               "cdm_count": len(parsed), "count": len(events)},
+               "cdm_count": page.cdm_total, "count": len(events),
+               "total": page.total, "offset": page.offset,
+               "in_volume": page.in_volume},
     )
     return JSONResponse(
         status_code=200,
         content={
             "primary_norad": int(primary_norad),
             "source": "leolabs",
+            # count is this page; total is every conjunction event in the window
+            # under the current volume filter, so a caller can render "1-100 of
+            # 1432" without a second request.
             "count": len(events),
+            "total": page.total,
+            "next_cursor": page.next_cursor,
+            "page": {
+                "size": page.page_size,
+                "offset": page.offset,
+                "returned": len(events),
+                "has_more": page.next_cursor is not None,
+            },
             # Rows are deduped to one per conjunction event; cdm_count is how
             # many CDMs those events were distilled from, so a caller can see
             # that reissues were collapsed rather than dropped.
-            "cdm_count": len(parsed),
+            "cdm_count": page.cdm_total,
+            # What bounded the fetch. An operator reading a short list needs to
+            # know whether it is short because the sky is quiet or because the
+            # reporting volume cropped it.
+            "volume_filter": {
+                "in_volume": page.in_volume,
+                "max_relative_position_r_m": page.volume_filters.get(
+                    "maxRelativePositionR"
+                ),
+                "max_relative_position_i_m": page.volume_filters.get(
+                    "maxRelativePositionI"
+                ),
+                "max_relative_position_c_m": page.volume_filters.get(
+                    "maxRelativePositionC"
+                ),
+            },
             "window": {
                 "min_tca_utc": min_tca,
                 "max_tca_utc": max_tca,

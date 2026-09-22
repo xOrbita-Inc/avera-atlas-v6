@@ -34,13 +34,18 @@ from common.leolabs_conjunction_list import (
     SELECTOR_FIELDS,
     conjunction_row,
     dedupe_by_event,
+    dedupe_raw_by_event,
+    event_key,
     pc_to_risk_level,
+    raw_event_key,
     select_conjunction,
     selector_from_conjunction_block,
 )
 from common.leolabs_runtime import (
+    LeoLabsCursorError,
     LeoLabsRuntimeError,
     fetch_leolabs_conjunction,
+    fetch_leolabs_conjunction_page,
     fetch_leolabs_conjunctions,
 )
 
@@ -207,6 +212,10 @@ class TestRowShape:
             "tca_utc", "time_to_tca_s", "time_to_tca_min",
             "miss_distance_m", "miss_distance_km",
             "pc", "pc_display", "risk_level",
+            # SCRUM-445: the RTN relative state the encounter viz draws from, so
+            # selecting a row needs no round-trip.
+            "relative_position_rtn_m", "relative_velocity_rtn_m_s",
+            "relative_state_source",
             "pc_source", "pc_method", "covariance_source", "source",
         }
 
@@ -337,6 +346,158 @@ class TestDedupeByEvent:
 # ---------------------------------------------------------------------------
 
 
+class TestRawEventKey:
+    """SCRUM-445: the raw-CDM dedupe key must not drift from the parsed one."""
+
+    def test_raw_and_parsed_event_keys_agree(self, three_cdms, registry):
+        parsed = fetch_leolabs_conjunctions(
+            36508, client=_client_for(three_cdms), registry=registry, now=_NOW
+        )
+        # Same CDMs, same order: fetch preserves risk order and these are distinct
+        # events, so the two key functions are compared pairwise on one CDM each.
+        raw_sorted = sorted(three_cdms, key=lambda c: -c["COLLISION_PROBABILITY"])
+        assert [raw_event_key(c) for c in raw_sorted] == [
+            event_key(p) for p in parsed
+        ]
+
+    def test_the_key_falls_back_the_same_way_when_ids_are_missing(self, cdm):
+        no_event = {**cdm, "COMMENT_EVENT_ID": None}
+        assert raw_event_key(no_event) == f"cdm_id:{cdm['COMMENT_ID']}"
+        bare = {**cdm, "COMMENT_EVENT_ID": None, "COMMENT_ID": None}
+        assert raw_event_key(bare) == (
+            f"secondary:{cdm['SAT2_OBJECT_DESIGNATOR']}"
+        )
+
+    def test_raw_dedupe_collapses_reissues_and_keeps_order(self, cdm):
+        pair = [
+            _variant(cdm, pc=3.0e-4, tca="2026-08-28T00:00:00Z", norad=300001,
+                     designator="L300001", cdm_id=3001, event_id=7001),
+            _variant(cdm, pc=1.0e-4, tca="2026-08-28T00:00:10Z", norad=300001,
+                     designator="L300001", cdm_id=3002, event_id=7001),
+            _variant(cdm, pc=2.0e-4, tca="2026-08-29T00:00:00Z", norad=300002,
+                     designator="L300002", cdm_id=3003, event_id=7002),
+        ]
+        kept = dedupe_raw_by_event(pair)
+        assert [c["COMMENT_ID"] for c in kept] == [3001, 3003]
+
+
+class TestUnpagedFetchIsUntouched:
+    """The evaluate/selector path must keep seeing the whole undeduped window.
+
+    SCRUM-445 bounds the *listing*. A row selector has to resolve no matter which
+    page the operator clicked it on, and the secondary screen needs the complete
+    in-volume set, so fetch_leolabs_conjunctions keeps its old behaviour: every
+    scorable CDM, reissues included, and no volume filter.
+    """
+
+    def test_it_still_returns_every_cdm_including_reissues(self, cdm, registry):
+        pair = [
+            _variant(cdm, pc=3.0e-4, tca="2026-08-28T00:00:00Z", norad=300001,
+                     designator="L300001", cdm_id=3001, event_id=7001),
+            _variant(cdm, pc=1.0e-4, tca="2026-08-28T00:00:10Z", norad=300001,
+                     designator="L300001", cdm_id=3002, event_id=7001),
+        ]
+        parsed = fetch_leolabs_conjunctions(
+            36508, client=_client_for(pair), registry=registry, now=_NOW
+        )
+        assert len(parsed) == 2
+
+    def test_it_sends_no_volume_filter(self, three_cdms, registry):
+        client = _client_for(three_cdms)
+        fetch_leolabs_conjunctions(
+            36508, client=client, registry=registry, now=_NOW
+        )
+        sent = client.search_conjunction_cdms.call_args.kwargs
+        for param in leolabs_runtime.VOLUME_FILTER_PARAMS:
+            assert param not in sent
+
+
+class TestPageFetch:
+    """SCRUM-445: the paged fetch, below the endpoint."""
+
+    def test_the_cursor_round_trips_through_the_page(self, cdm, registry):
+        cdms = _many_cdms(cdm, 30)
+        page1 = fetch_leolabs_conjunction_page(
+            36508, client=_client_for(cdms), registry=registry, now=_NOW,
+            page_size=10,
+        )
+        page2 = fetch_leolabs_conjunction_page(
+            36508, client=_client_for(cdms), registry=registry, now=_NOW,
+            page_size=10, cursor=page1.next_cursor,
+        )
+        assert page1.total == 30 and page2.total == 30
+        assert page1.offset == 0 and page2.offset == 10
+        assert len(page1.rows) == 10 and len(page2.rows) == 10
+
+    def test_a_cursor_for_another_query_raises(self, cdm, registry):
+        cdms = _many_cdms(cdm, 30)
+        page = fetch_leolabs_conjunction_page(
+            36508, client=_client_for(cdms), registry=registry, now=_NOW,
+            page_size=10,
+        )
+        with pytest.raises(LeoLabsCursorError):
+            fetch_leolabs_conjunction_page(
+                36508, client=_client_for(cdms), registry=registry, now=_NOW,
+                page_size=5, cursor=page.next_cursor,
+            )
+
+    def test_volume_filters_are_passed_to_the_client(self, cdm, registry):
+        client = _client_for(_many_cdms(cdm, 3))
+        fetch_leolabs_conjunction_page(
+            36508, client=client, registry=registry, now=_NOW,
+            volume_filters={"maxRelativePositionR": 1234.0},
+        )
+        assert client.search_conjunction_cdms.call_args.kwargs[
+            "maxRelativePositionR"
+        ] == 1234.0
+
+    def test_in_volume_reflects_whether_a_bound_was_applied(self, cdm, registry):
+        cdms = _many_cdms(cdm, 3)
+        bounded = fetch_leolabs_conjunction_page(
+            36508, client=_client_for(cdms), registry=registry, now=_NOW,
+            volume_filters=leolabs_runtime.DEFAULT_REPORTING_VOLUME_M,
+        )
+        wide = fetch_leolabs_conjunction_page(
+            36508, client=_client_for(cdms), registry=registry, now=_NOW,
+            volume_filters={},
+        )
+        assert bounded.in_volume is True
+        assert wide.in_volume is False
+
+    def test_an_offset_past_the_end_is_an_empty_page_not_an_error(
+        self, cdm, registry
+    ):
+        cdms = _many_cdms(cdm, 12)
+        page = fetch_leolabs_conjunction_page(
+            36508, client=_client_for(cdms), registry=registry, now=_NOW,
+            page_size=10,
+        )
+        last = fetch_leolabs_conjunction_page(
+            36508, client=_client_for(cdms), registry=registry, now=_NOW,
+            page_size=10, cursor=page.next_cursor,
+        )
+        assert len(last.rows) == 2
+        assert last.next_cursor is None
+
+    def test_an_unsubscribed_asset_raises(self, cdm, registry):
+        with pytest.raises(LeoLabsRuntimeError):
+            fetch_leolabs_conjunction_page(
+                99999, client=_client_for(_many_cdms(cdm, 3)),
+                registry=registry, now=_NOW,
+            )
+
+    def test_resolve_volume_filters_defaults_to_the_reporting_volume(self):
+        assert leolabs_runtime.resolve_volume_filters() == (
+            leolabs_runtime.DEFAULT_REPORTING_VOLUME_M
+        )
+        assert leolabs_runtime.resolve_volume_filters(in_volume=False) == {}
+        narrowed = leolabs_runtime.resolve_volume_filters(500.0)
+        assert narrowed["maxRelativePositionR"] == 500.0
+        assert narrowed["maxRelativePositionI"] == (
+            leolabs_runtime.DEFAULT_REPORTING_VOLUME_M["maxRelativePositionI"]
+        )
+
+
 class TestSelectConjunction:
     @pytest.fixture
     def parsed(self, three_cdms, registry):
@@ -406,16 +567,49 @@ def _parsed_from(cdms, registry):
     )
 
 
+def _serve(cdms, registry, monkeypatch):
+    """Wire the endpoint to a mocked LeoLabs client and return the TestClient.
+
+    SCRUM-445: the endpoint's paging is the thing under test, so these tests stub
+    the *client* and let the real route -> fetch_leolabs_conjunction_page ->
+    dedupe/sort/slice/cursor path run. Stubbing the fetch function instead (what
+    the SCRUM-422 tests did, when there was no paging to get wrong) would let a
+    cursor or ordering bug straight through.
+
+    Returns the mock client too, so a test can assert what reached LeoLabs.
+    """
+    client = _client_for(cdms)
+    monkeypatch.setattr(server, "LEOLABS_ENABLED", True)
+    monkeypatch.setattr(leolabs_runtime, "get_client", lambda: client)
+    monkeypatch.setattr(leolabs_runtime, "get_registry", lambda c=None: registry)
+    return TestClient(server.svc), client
+
+
+def _get(tc, **params):
+    params.setdefault("primary_norad", 36508)
+    return tc.get("/v1/leolabs/conjunctions", params=params)
+
+
+def _many_cdms(base, n, *, start_norad=200000):
+    """n CDMs for n distinct events, Pc descending so risk order is known."""
+    return [
+        _variant(
+            base,
+            pc=1.0e-4 * (n - i),
+            tca=f"2026-08-27T{i // 60:02d}:{i % 60:02d}:00Z",
+            norad=start_norad + i,
+            designator=f"L{start_norad + i}",
+            cdm_id=500000 + i,
+            event_id=600000 + i,
+        )
+        for i in range(n)
+    ]
+
+
 class TestListEndpoint:
     def test_lists_an_assets_conjunctions(self, three_cdms, registry, monkeypatch):
-        monkeypatch.setattr(server, "LEOLABS_ENABLED", True)
-        monkeypatch.setattr(
-            server, "fetch_leolabs_conjunctions",
-            lambda n, **kw: _parsed_from(three_cdms, registry),
-        )
-        resp = TestClient(server.svc).get(
-            "/v1/leolabs/conjunctions", params={"primary_norad": 36508}
-        )
+        tc, _ = _serve(three_cdms, registry, monkeypatch)
+        resp = _get(tc)
 
         assert resp.status_code == 200
         data = resp.json()
@@ -425,37 +619,27 @@ class TestListEndpoint:
         assert len(data["conjunctions"]) == 3
 
     def test_rows_come_back_highest_risk_first(self, three_cdms, registry, monkeypatch):
-        monkeypatch.setattr(server, "LEOLABS_ENABLED", True)
-        monkeypatch.setattr(
-            server, "fetch_leolabs_conjunctions",
-            lambda n, **kw: _parsed_from(three_cdms, registry),
-        )
-        rows = TestClient(server.svc).get(
-            "/v1/leolabs/conjunctions", params={"primary_norad": 36508}
-        ).json()["conjunctions"]
+        tc, _ = _serve(three_cdms, registry, monkeypatch)
+        rows = _get(tc).json()["conjunctions"]
 
         assert [r["pc"] for r in rows] == [5.0e-4, 2.0e-5, 1.0e-6]
         assert [r["risk_level"] for r in rows] == ["RED", "AMBER", "GREEN"]
 
-    def test_an_empty_window_is_an_empty_list_with_200(self, monkeypatch):
-        monkeypatch.setattr(server, "LEOLABS_ENABLED", True)
-        monkeypatch.setattr(server, "fetch_leolabs_conjunctions", lambda n, **kw: [])
-        resp = TestClient(server.svc).get(
-            "/v1/leolabs/conjunctions", params={"primary_norad": 36508}
-        )
+    def test_an_empty_window_is_an_empty_list_with_200(self, registry, monkeypatch):
+        tc, _ = _serve([], registry, monkeypatch)
+        resp = _get(tc)
 
         assert resp.status_code == 200
         assert resp.json()["conjunctions"] == []
         assert resp.json()["count"] == 0
+        # An empty window has no next page and nothing to page to.
+        assert resp.json()["total"] == 0
+        assert resp.json()["next_cursor"] is None
 
-    def test_the_response_states_the_window_it_searched(self, monkeypatch):
+    def test_the_response_states_the_window_it_searched(self, registry, monkeypatch):
         """An empty table means something different over an hour than a week."""
-        monkeypatch.setattr(server, "LEOLABS_ENABLED", True)
-        monkeypatch.setattr(server, "fetch_leolabs_conjunctions", lambda n, **kw: [])
-        window = TestClient(server.svc).get(
-            "/v1/leolabs/conjunctions",
-            params={"primary_norad": 36508, "lookahead_days": 3},
-        ).json()["window"]
+        tc, _ = _serve([], registry, monkeypatch)
+        window = _get(tc, lookahead_days=3).json()["window"]
 
         assert window["lookahead_days"] == 3
         assert window["min_tca_utc"] < window["max_tca_utc"]
@@ -469,17 +653,180 @@ class TestListEndpoint:
             _variant(cdm, pc=1.0e-4, tca="2026-08-28T00:00:10Z", norad=300001,
                      designator="L300001", cdm_id=3002, event_id=7001),
         ]
-        monkeypatch.setattr(server, "LEOLABS_ENABLED", True)
-        monkeypatch.setattr(
-            server, "fetch_leolabs_conjunctions",
-            lambda n, **kw: _parsed_from(pair, registry),
-        )
-        data = TestClient(server.svc).get(
-            "/v1/leolabs/conjunctions", params={"primary_norad": 36508}
-        ).json()
+        tc, _ = _serve(pair, registry, monkeypatch)
+        data = _get(tc).json()
 
         assert data["count"] == 1
         assert data["cdm_count"] == 2
+        # The event total counts events, not reissues, so paging cannot advertise
+        # a second page that is really the same conjunction again.
+        assert data["total"] == 1
+        assert data["next_cursor"] is None
+
+    # -- SCRUM-445: paging, the volume filters, and the row geometry ------
+
+    def test_a_page_reports_next_cursor_and_the_event_total(
+        self, cdm, registry, monkeypatch
+    ):
+        tc, _ = _serve(_many_cdms(cdm, 250), registry, monkeypatch)
+        data = _get(tc, page_size=100).json()
+
+        assert data["count"] == 100
+        assert len(data["conjunctions"]) == 100
+        # total is the whole in-volume set, not the page, so the dashboard can
+        # render "1-100 of 250" from one response.
+        assert data["total"] == 250
+        assert data["next_cursor"]
+        assert data["page"] == {
+            "size": 100, "offset": 0, "returned": 100, "has_more": True
+        }
+
+    def test_the_cursor_returns_the_next_page_and_the_pages_do_not_overlap(
+        self, cdm, registry, monkeypatch
+    ):
+        tc, _ = _serve(_many_cdms(cdm, 250), registry, monkeypatch)
+
+        page1 = _get(tc, page_size=100).json()
+        page2 = _get(tc, page_size=100, cursor=page1["next_cursor"]).json()
+        page3 = _get(tc, page_size=100, cursor=page2["next_cursor"]).json()
+
+        assert [p["count"] for p in (page1, page2, page3)] == [100, 100, 50]
+        assert page2["page"]["offset"] == 100
+        assert page3["page"]["offset"] == 200
+        # The last page ends the walk rather than looping.
+        assert page3["next_cursor"] is None
+        assert page3["page"]["has_more"] is False
+
+        ids = [r["cdm_id"] for p in (page1, page2, page3) for r in p["conjunctions"]]
+        assert len(ids) == 250
+        assert len(set(ids)) == 250, "a conjunction appeared on two pages"
+
+    def test_worst_pc_first_holds_across_pages_not_just_within_one(
+        self, cdm, registry, monkeypatch
+    ):
+        """The point of the ordering: page one really is the worst conjunctions.
+
+        Paging on LeoLabs' own cursor would return LeoLabs' order, so the worst
+        conjunction in a window could land on page seven while an operator read
+        page one top-down. The whole in-volume set is ordered before it is sliced,
+        so that cannot happen.
+        """
+        tc, _ = _serve(_many_cdms(cdm, 120), registry, monkeypatch)
+
+        page1 = _get(tc, page_size=50).json()
+        page2 = _get(tc, page_size=50, cursor=page1["next_cursor"]).json()
+        pcs = [r["pc"] for r in page1["conjunctions"] + page2["conjunctions"]]
+
+        assert pcs == sorted(pcs, reverse=True)
+        assert page1["conjunctions"][0]["pc"] == max(pcs)
+
+    def test_the_volume_filters_reach_the_client(self, cdm, registry, monkeypatch):
+        tc, client = _serve(_many_cdms(cdm, 5), registry, monkeypatch)
+        _get(tc, max_relative_position_r_m=1500, max_relative_position_i_m=20000)
+
+        sent = client.search_conjunction_cdms.call_args.kwargs
+        assert sent["maxRelativePositionR"] == 1500.0
+        assert sent["maxRelativePositionI"] == 20000.0
+        # The unset axis falls back to LeoLabs' reporting volume rather than being
+        # dropped, so one narrowed axis cannot silently widen another.
+        assert sent["maxRelativePositionC"] == (
+            leolabs_runtime.DEFAULT_REPORTING_VOLUME_M["maxRelativePositionC"]
+        )
+
+    def test_the_reporting_volume_is_the_default_and_is_reported(
+        self, cdm, registry, monkeypatch
+    ):
+        tc, client = _serve(_many_cdms(cdm, 5), registry, monkeypatch)
+        data = _get(tc).json()
+
+        sent = client.search_conjunction_cdms.call_args.kwargs
+        for param, expected in leolabs_runtime.DEFAULT_REPORTING_VOLUME_M.items():
+            assert sent[param] == expected
+        # And the response says so: a short list because the volume cropped it
+        # must not read like a quiet sky.
+        assert data["volume_filter"]["in_volume"] is True
+        assert data["volume_filter"]["max_relative_position_r_m"] == 2000.0
+
+    def test_in_volume_false_widens_by_dropping_the_filters(
+        self, cdm, registry, monkeypatch
+    ):
+        tc, client = _serve(_many_cdms(cdm, 5), registry, monkeypatch)
+        data = _get(tc, in_volume="false").json()
+
+        sent = client.search_conjunction_cdms.call_args.kwargs
+        for param in leolabs_runtime.VOLUME_FILTER_PARAMS:
+            assert param not in sent
+        assert data["volume_filter"]["in_volume"] is False
+        assert data["volume_filter"]["max_relative_position_r_m"] is None
+
+    def test_a_cursor_from_a_different_query_is_422_not_a_wrong_page(
+        self, cdm, registry, monkeypatch
+    ):
+        """A replayed cursor must not walk one query's offsets through another's."""
+        tc, _ = _serve(_many_cdms(cdm, 250), registry, monkeypatch)
+        cursor = _get(tc, page_size=100).json()["next_cursor"]
+
+        # Same cursor, different page size: the offset no longer means what it did.
+        assert _get(tc, page_size=50, cursor=cursor).status_code == 422
+        # Same cursor, different window.
+        assert _get(tc, page_size=100, cursor=cursor,
+                    lookahead_days=3).status_code == 422
+        # Same cursor, different volume filter.
+        assert _get(tc, page_size=100, cursor=cursor,
+                    in_volume="false").status_code == 422
+        # And unchanged, it still works -- the guard is not simply refusing all.
+        assert _get(tc, page_size=100, cursor=cursor).status_code == 200
+
+    def test_a_garbage_cursor_is_422(self, cdm, registry, monkeypatch):
+        tc, _ = _serve(_many_cdms(cdm, 10), registry, monkeypatch)
+        assert _get(tc, cursor="not-a-cursor").status_code == 422
+
+    def test_page_size_is_capped_rather_than_refused(
+        self, cdm, registry, monkeypatch
+    ):
+        tc, _ = _serve(_many_cdms(cdm, 600), registry, monkeypatch)
+        data = _get(tc, page_size=100000).json()
+
+        assert data["page"]["size"] == leolabs_runtime.MAX_PAGE_SIZE
+        assert data["count"] == leolabs_runtime.MAX_PAGE_SIZE
+
+    def test_a_page_size_below_one_is_422(self, cdm, registry, monkeypatch):
+        tc, _ = _serve(_many_cdms(cdm, 10), registry, monkeypatch)
+        assert _get(tc, page_size=0).status_code == 422
+
+    def test_only_the_returned_page_is_parsed(self, cdm, registry, monkeypatch):
+        """The bounded parse is the fix; an unbounded one is the timeout.
+
+        Parsing is where the time goes, so a page must not parse the whole set on
+        its way to slicing ten rows out of it.
+        """
+        import common.leolabs_runtime as rt
+
+        calls = {"n": 0}
+        real = rt.parse_leolabs_cdm
+
+        def _counting(cdm_dict, our_id):
+            calls["n"] += 1
+            return real(cdm_dict, our_id)
+
+        monkeypatch.setattr(rt, "parse_leolabs_cdm", _counting)
+        tc, _ = _serve(_many_cdms(cdm, 400), registry, monkeypatch)
+        data = _get(tc, page_size=10).json()
+
+        assert data["total"] == 400
+        assert calls["n"] == 10
+
+    def test_a_row_carries_the_rtn_geometry_the_viz_draws(
+        self, three_cdms, registry, monkeypatch
+    ):
+        """Row-to-geometry is select-and-highlight, so the row carries the state."""
+        tc, _ = _serve(three_cdms, registry, monkeypatch)
+        row = _get(tc).json()["conjunctions"][0]
+
+        assert len(row["relative_position_rtn_m"]) == 3
+        assert len(row["relative_velocity_rtn_m_s"]) == 3
+        # Provenance-labelled: these are the CDM's own numbers, not a propagation.
+        assert row["relative_state_source"] == "leolabs_cdm_rtn"
 
     def test_disabled_is_503_not_an_empty_list(self, monkeypatch):
         """'The feed is off' and 'the sky is clear' must not look alike."""
@@ -496,7 +843,7 @@ class TestListEndpoint:
         def _raise(n, **kw):
             raise LeoLabsRuntimeError("NORAD 99999 is not in the registry")
 
-        monkeypatch.setattr(server, "fetch_leolabs_conjunctions", _raise)
+        monkeypatch.setattr(server, "fetch_leolabs_conjunction_page", _raise)
         resp = TestClient(server.svc).get(
             "/v1/leolabs/conjunctions", params={"primary_norad": 99999}
         )
@@ -509,7 +856,7 @@ class TestListEndpoint:
         def _boom(n, **kw):
             raise RuntimeError("upstream 500")
 
-        monkeypatch.setattr(server, "fetch_leolabs_conjunctions", _boom)
+        monkeypatch.setattr(server, "fetch_leolabs_conjunction_page", _boom)
         resp = TestClient(server.svc).get(
             "/v1/leolabs/conjunctions", params={"primary_norad": 36508}
         )
