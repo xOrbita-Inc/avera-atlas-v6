@@ -72,10 +72,14 @@ from common.leolabs_runtime import (
     LEOLABS_ENABLED,
     LeoLabsCursorError,
     LeoLabsRuntimeError,
+    LeoLabsStateError,
+    catalog_for_norad,
     fetch_leolabs_conjunction,
     fetch_leolabs_conjunction_page,
     fetch_leolabs_conjunctions,
+    latest_state_km,
 )
+from aps_math.orbits import propagate_two_body
 from common.leolabs_conjunction_list import (
     conjunction_row,
     dedupe_by_event,
@@ -1280,6 +1284,17 @@ def _post_gnc_report_record(assessment, report: Dict[str, Any]) -> Optional[str]
         return None
 
 
+# SCRUM-447 globe tracks. 90 steps is what the UI's /api/orbits has always drawn
+# a revolution with, so the live globe renders at the same fidelity as the
+# scenario one. The object cap is a rendering bound, not a data one: past a few
+# hundred rings the globe is unreadable and the browser, not the API, is the
+# limit.
+GLOBE_TRACK_STEPS = 90
+MIN_GLOBE_TRACK_STEPS = 8
+MAX_GLOBE_TRACK_STEPS = 360
+MAX_GLOBE_OBJECTS = 250
+
+
 @svc.get("/v1/leolabs/conjunctions")
 async def leolabs_conjunctions(
     primary_norad: int,
@@ -1459,6 +1474,263 @@ async def leolabs_conjunctions(
             },
             "fetched_at_utc": now.isoformat().replace("+00:00", "Z"),
             "conjunctions": [conjunction_row(p, now=now) for p in events],
+        },
+    )
+
+
+@svc.get("/v1/leolabs/orbits")
+async def leolabs_orbits(
+    primary_norad: int,
+    lookahead_days: int = leolabs_runtime.DEFAULT_LOOKAHEAD_DAYS,
+    lookback_days: int = leolabs_runtime.DEFAULT_LOOKBACK_DAYS,
+    in_volume: bool = True,
+    max_relative_position_r_m: Optional[float] = None,
+    max_relative_position_i_m: Optional[float] = None,
+    max_relative_position_c_m: Optional[float] = None,
+    max_objects: int = MAX_GLOBE_OBJECTS,
+    steps: int = GLOBE_TRACK_STEPS,
+) -> JSONResponse:
+    """SCRUM-447: orbit tracks for the 3D globe, from live LeoLabs states.
+
+    Returns one closed revolution for the subscribed asset and for each object it
+    has an in-volume conjunction with, plus the risk band per object, so the globe
+    can draw what the Active Conjunctions table lists rather than the surrogate
+    propagator artifact it drew before SCRUM-446 hid it.
+
+    Where the states come from, and why they differ per object
+    ---------------------------------------------------------
+    The asset's state is live from GET /catalog/objects/<catalog>/states, which is
+    the point of this ticket. A secondary's state is the SAT2 block of the CDM
+    already parsed for its conjunction row. That is not a shortcut: get_states
+    returns HTTP 403 for an object outside our subscription, which every
+    conjunction secondary is, so the CDM is the only live source available for
+    them -- and it costs no extra API call, since the CDM was already fetched.
+
+    Epochs are therefore not aligned: the asset is at now, a secondary is at its
+    TCA. The tracks are orbital rings, and the renderer already places every
+    marker at a random phase along its ring, so the globe does not claim to be a
+    simultaneous snapshot and this does not make it less true than it was. Each
+    object carries its own epoch_utc so the limitation is legible rather than
+    implied.
+
+    Status codes, matching /v1/leolabs/conjunctions exactly:
+      200  Tracks, possibly with no objects at all. An asset with nothing in its
+           reporting volume is a real and unremarkable state of the world.
+      404  The NORAD id is not in this account's subscribed-objects registry.
+      422  The window is wider than the LeoLabs cap, or a parameter is invalid.
+      503  LeoLabs is disabled, the conjunction fetch failed, or the asset has no
+           usable state. Never an empty 200: an operator must not read "the feed
+           is off" as "your asset has a clear sky".
+    """
+    if not LEOLABS_ENABLED:
+        return JSONResponse(
+            status_code=503,
+            content=error_response(
+                "LEOLABS_ENABLED=false; the live conjunction globe is unavailable"
+            ),
+        )
+
+    if lookback_days < 0 or lookahead_days < 0:
+        return JSONResponse(
+            status_code=422,
+            content=error_response("lookback_days and lookahead_days must be >= 0"),
+        )
+    if lookback_days + lookahead_days > leolabs_runtime.MAX_WINDOW_DAYS:
+        return JSONResponse(
+            status_code=422,
+            content=error_response(
+                f"requested window spans {lookback_days + lookahead_days} days; "
+                f"LeoLabs caps minTca..maxTca at {leolabs_runtime.MAX_WINDOW_DAYS}"
+            ),
+        )
+    if max_objects < 0:
+        return JSONResponse(
+            status_code=422,
+            content=error_response("max_objects must be >= 0"),
+        )
+    if steps < MIN_GLOBE_TRACK_STEPS:
+        return JSONResponse(
+            status_code=422,
+            content=error_response(
+                f"steps must be >= {MIN_GLOBE_TRACK_STEPS} for a closed track"
+            ),
+        )
+    max_objects = min(int(max_objects), MAX_GLOBE_OBJECTS)
+    steps = min(int(steps), MAX_GLOBE_TRACK_STEPS)
+
+    volume_filters = leolabs_runtime.resolve_volume_filters(
+        max_relative_position_r_m,
+        max_relative_position_i_m,
+        max_relative_position_c_m,
+        in_volume=in_volume,
+    )
+
+    now = datetime.now(timezone.utc)
+
+    # -- the asset's live state. A failure here is 503, not an empty globe ----
+    try:
+        catalog = catalog_for_norad(int(primary_norad))
+    except LeoLabsRuntimeError as exc:
+        return JSONResponse(status_code=404, content=error_response(str(exc)))
+    except Exception as exc:
+        return JSONResponse(
+            status_code=503,
+            content=error_response(f"LeoLabs registry lookup failed: {exc}"),
+        )
+
+    try:
+        asset_r_km, asset_v_km_s, asset_epoch = latest_state_km(catalog)
+        asset_track = propagate_two_body(asset_r_km, asset_v_km_s, n_steps=steps)
+    except Exception as exc:
+        # Includes LeoLabsStateError and the transport errors. Without the asset
+        # there is no globe, and drawing the secondaries alone would show an
+        # operator a sky with no spacecraft in it.
+        log.warning(
+            "LeoLabs asset state unavailable",
+            extra={"event": "leolabs_globe_asset_state_failed",
+                   "primary_norad": primary_norad, "catalog": catalog,
+                   "exc": str(exc)},
+        )
+        return JSONResponse(
+            status_code=503,
+            content=error_response(f"asset state unavailable: {exc}"),
+        )
+
+    # -- the in-volume conjunctions, via the same fetch the 2D table uses -----
+    try:
+        page = fetch_leolabs_conjunction_page(
+            int(primary_norad),
+            now=now,
+            lookback_days=lookback_days,
+            lookahead_days=lookahead_days,
+            page_size=max_objects if max_objects else 1,
+            volume_filters=volume_filters,
+        )
+    except LeoLabsRuntimeError as exc:
+        return JSONResponse(status_code=404, content=error_response(str(exc)))
+    except Exception as exc:
+        log.warning(
+            "LeoLabs globe conjunction fetch failed",
+            extra={"event": "leolabs_globe_fetch_failed",
+                   "primary_norad": primary_norad, "exc": str(exc)},
+        )
+        return JSONResponse(
+            status_code=503,
+            content=error_response(f"LeoLabs fetch failed: {exc}"),
+        )
+
+    rows = dedupe_by_event(page.rows) if max_objects else []
+
+    object_tracks: Dict[str, List[List[float]]] = {}
+    risk: Dict[str, str] = {}
+    objects: Dict[str, Dict[str, Any]] = {}
+    skipped: List[Dict[str, Any]] = []
+
+    for parsed in rows:
+        # conjunction_row is reused rather than reimplemented so the globe's risk
+        # band is literally the band the 2D table shows for the same object; two
+        # code paths would be two chances to disagree about what is RED.
+        row = conjunction_row(parsed, now=now)
+        norad = row.get("secondary_norad")
+        key = str(norad if norad is not None else row.get("secondary_designator"))
+        if key in object_tracks:
+            # One ring per object. Rows arrive worst-first, so the first sighting
+            # of an object already carries its worst risk band; a second event for
+            # the same object would draw a duplicate ring over the first.
+            continue
+        try:
+            r_km = list(parsed.secondary.r_km)
+            v_km_s = list(parsed.secondary.v_km_s)
+            track = propagate_two_body(r_km, v_km_s, n_steps=steps)
+        except Exception as exc:
+            # A secondary with no usable state is skipped, not fatal. It still
+            # appears in `skipped` so the globe can say the set it drew is
+            # incomplete instead of quietly showing fewer objects.
+            skipped.append({"secondary_norad": norad, "reason": str(exc)})
+            log.info(
+                "skipping globe object with no usable state",
+                extra={"event": "leolabs_globe_object_skipped",
+                       "secondary_norad": norad, "reason": str(exc)},
+            )
+            continue
+        object_tracks[key] = track
+        risk[key] = row["risk_level"]
+        objects[key] = {
+            "secondary_norad": norad,
+            "secondary_designator": row.get("secondary_designator"),
+            "name": row.get("secondary_name"),
+            "risk_level": row["risk_level"],
+            "pc": row.get("pc"),
+            "pc_display": row.get("pc_display"),
+            "miss_distance_m": row.get("miss_distance_m"),
+            "tca_utc": row.get("tca_utc"),
+            "cdm_id": row.get("cdm_id"),
+            "event_id": row.get("event_id"),
+            # The CDM's own epoch for this object's state, so a consumer can see
+            # that rings are not drawn at one common time.
+            "epoch_utc": row.get("tca_utc"),
+            "state_source": "leolabs_cdm_sat2",
+        }
+
+    # The worst conjunction is simply the first drawn object, since rows arrive
+    # highest Pc first. Named explicitly so the globe does not have to re-sort.
+    worst_key = next(iter(object_tracks), None)
+
+    min_tca, max_tca = leolabs_runtime.conjunction_window(
+        now, lookback_days, lookahead_days
+    )
+    log.info(
+        "LeoLabs globe orbits served",
+        extra={"event": "leolabs_globe_served", "primary_norad": primary_norad,
+               "catalog": catalog, "objects": len(object_tracks),
+               "skipped": len(skipped), "in_volume": page.in_volume,
+               "total_events": page.total},
+    )
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status": "ok",
+            "primary_norad": int(primary_norad),
+            "source": "leolabs",
+            "asset": {
+                "norad": int(primary_norad),
+                "catalog_number": catalog,
+                "epoch_utc": asset_epoch,
+                "state_source": "leolabs_get_states",
+            },
+            # The three fields the renderer consumes.
+            "asset_track": asset_track,
+            "object_tracks": object_tracks,
+            "risk": risk,
+            # Everything else is for labels, the worst-conjunction link, and
+            # honesty about what was left out.
+            "objects": objects,
+            "worst_object": worst_key,
+            "counts": {
+                "drawn": len(object_tracks),
+                "skipped": len(skipped),
+                "events_in_window": page.total,
+            },
+            "skipped": skipped,
+            "volume_filter": {
+                "in_volume": page.in_volume,
+                "max_relative_position_r_m": page.volume_filters.get(
+                    "maxRelativePositionR"
+                ),
+                "max_relative_position_i_m": page.volume_filters.get(
+                    "maxRelativePositionI"
+                ),
+                "max_relative_position_c_m": page.volume_filters.get(
+                    "maxRelativePositionC"
+                ),
+            },
+            "window": {
+                "min_tca_utc": min_tca,
+                "max_tca_utc": max_tca,
+                "lookback_days": lookback_days,
+                "lookahead_days": lookahead_days,
+            },
+            "fetched_at_utc": now.isoformat().replace("+00:00", "Z"),
         },
     )
 

@@ -51,14 +51,37 @@ from .frames import (  # noqa: F401
 from .observability import (  # noqa: F401
     observation_jacobian,
 )
-from .pc_utils import (  # noqa: F401
-    PcResult,
-    compute_pc,
-    compute_pc_batch,
-    default_covariance_from_uncertainty,
-    frisbee_max_pc,
-    pc_circle,
-)
+# pc_utils is imported lazily (PEP 562) because it is the only module here that
+# needs scipy. SCRUM-447 gave the ui image a reason to import aps_math.orbits --
+# forty lines of RK4 over numpy -- and an eager import chain would have made a
+# dashboard container carry the whole scipy stack to get it, or else forced a
+# second copy of the propagator, which the note at the top of this file exists to
+# forbid. Every name below still resolves exactly as it did; it just resolves on
+# first use. Services that use Pc already depend on scipy and see no change.
+_PC_UTILS_EXPORTS = frozenset({
+    "PcResult",
+    "compute_pc",
+    "compute_pc_batch",
+    "default_covariance_from_uncertainty",
+    "frisbee_max_pc",
+    "pc_circle",
+})
+
+
+def __getattr__(name):  # noqa: D401 - module-level lazy attribute hook
+    # importlib.import_module, not `from . import pc_utils`: the latter resolves
+    # the submodule by looking up the attribute on this package, which lands back
+    # in this function and recurses until the stack ends.
+    if name in _PC_UTILS_EXPORTS or name == "pc_utils":
+        import importlib
+
+        module = importlib.import_module(".pc_utils", __name__)
+        return module if name == "pc_utils" else getattr(module, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(set(globals()) | _PC_UTILS_EXPORTS | {"pc_utils"})
 
 __all__ = [
     "conventions",

@@ -1,7 +1,13 @@
-# SCRUM-388: the planner and propagator now build from the repository root so
-# they can COPY libs/aps_math. Without this file the whole repo becomes build
-# context for those two images, which is slow and ships things that have no
-# business in a runtime image.
+# SCRUM-388: the planner and propagator build from the repository root so they
+# can COPY libs/aps_math. Without this file the whole repo becomes build context
+# for those images, which is slow and ships things that have no business in a
+# runtime image.
+#
+# SCRUM-447: the ui image now builds from the root too, for the same reason (the
+# globe's shared propagator lives in libs/aps_math), so services/ui/ can no
+# longer be excluded here. It is therefore in the context of the planner and
+# propagator builds as well; that costs a little context transfer and ships
+# nothing extra, because each Dockerfile COPYs only the paths it needs.
 
 .git
 .github
@@ -25,12 +31,12 @@ openapi/
 *.md
 docker-compose*.yaml
 
-# Other services are not part of these two images.
+# Other services are not part of these images. services/ui/ is deliberately not
+# listed: it is the build context for the ui image (SCRUM-447).
 services/detector/
 services/ingest/
 services/physics-classifier/
 services/sandbox/
 services/tracker/
-services/ui/
 services/viz/
 services/voice/
