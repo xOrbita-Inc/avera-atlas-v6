@@ -274,6 +274,15 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 .globe-msg{position:absolute;left:10px;bottom:10px;z-index:5;font-size:9px;letter-spacing:0.5px;
   color:var(--text-dim);background:rgba(0,0,0,0.55);border:1px solid var(--border);
   border-radius:3px;padding:4px 8px;pointer-events:none;max-width:60%}
+/* SCRUM-447 follow-up: the floating control cluster over the globe, bottom-right,
+   opposite the bottom-left status line. Hidden with the rest of the globe in 2D. */
+.globe-controls{display:none;position:absolute;right:10px;bottom:10px;z-index:6;
+  gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end;max-width:70%;
+  background:rgba(0,0,0,0.55);border:1px solid var(--border);border-radius:4px;padding:6px 8px}
+.globe-controls.visible{display:flex}
+/* Buttons inside the cluster follow the cluster, not their own .visible flag:
+   the cluster is what setView shows and hides. */
+.globe-controls .globe-toggle{display:inline-flex;align-items:center}
 /* SCRUM-447: globe-only control, revealed with the speed control on the 3D view. */
 .globe-toggle{display:none;background:none;border:1px solid var(--border);color:var(--text-dim);
   font-family:inherit;font-size:9px;letter-spacing:1px;padding:3px 8px;border-radius:2px;
@@ -511,14 +520,10 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
              table shows. Unhidden here as the last step, after the live path was
              confirmed rendering. 2D remains the default view. -->
         <button class="view-toggle-btn" id="btn3D" onclick="setView('3d')">3D GLOBE</button>
-        <!-- SCRUM-447: a dense asset's globe is mostly NOMINAL rings. They are
-             drawn as a dim haze so the picture reads as "the sky is busy" without
-             burying the RED and AMBER objects the operator is here for, and this
-             drops them entirely. Shares .visible with the speed control, so both
-             appear only in the 3D view. -->
-        <button type="button" class="globe-toggle on" id="globeNominalBtn"
-          onclick="toggleGlobeNominal()"
-          title="Show conjunctions below the watch line as a dim haze">NOMINAL</button>
+        <!-- SCRUM-447 follow-up: NOMINAL used to sit here. It moved into the
+             floating control cluster over the globe (#globeControls), where the
+             mockup puts it and where it sits with the other globe-only controls
+             instead of crowding the 2D/3D switch. -->
         <div class="speed-control" id="speedControl">
           <label>Orbit Speed</label>
           <input type="range" id="speedSlider" min="1" max="10" step="1" value="5"
@@ -532,6 +537,29 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
       <!-- SCRUM-447: says what the globe is showing, or why it is showing nothing.
            A feed-off globe must read as "we cannot see", never as an empty sky. -->
       <div id="globeMsg" class="globe-msg" style="display:none"></div>
+      <!-- SCRUM-447 follow-up: the globe's own controls, floating bottom-right
+           over the canvas and mirroring how #globeMsg sits bottom-left. They are
+           globe-only, so the cluster shares the .visible show/hide that setView
+           already drives, and nothing here exists in the 2D view.
+
+           No COVARIANCE button: the mockup shows one, but drawing a real
+           covariance ellipsoid needs the endpoint to emit per-object ECI
+           covariance and the renderer to draw it. That is its own ticket, and a
+           button that does nothing is worse than no button. -->
+      <div id="globeControls" class="globe-controls">
+        <button type="button" class="globe-toggle" id="globeRotateBtn"
+          onclick="toggleGlobeAutoRotate()"
+          title="Slowly drift the camera around the globe">AUTO-ROTATE</button>
+        <button type="button" class="globe-toggle on" id="globeLabelsBtn"
+          onclick="toggleGlobeLabels()"
+          title="Show the asset and the RED and AMBER object labels">LABELS</button>
+        <button type="button" class="globe-toggle on" id="globeNominalBtn"
+          onclick="toggleGlobeNominal()"
+          title="Show conjunctions below the watch line as a dim haze">NOMINAL</button>
+        <button type="button" class="globe-toggle" id="globeFocusWorstBtn"
+          onclick="focusWorstConjunction()"
+          title="Frame the highest-Pc conjunction">FOCUS WORST</button>
+      </div>
     </div>
     <div class="risk-bar">
       <div class="label">Pc</div>
@@ -3297,7 +3325,7 @@ function setView(v){
     wrap2d.style.display='none';wrap3d.style.display='block';
     btn2d.classList.remove('active');btn3d.classList.add('active');
     document.getElementById('speedControl').classList.add('visible');
-    document.getElementById('globeNominalBtn')?.classList.add('visible');
+    document.getElementById('globeControls')?.classList.add('visible');
     if(!globeInitialized)initGlobe();
     else resizeGlobe();
     fetchAndUpdateGlobeOrbits();
@@ -3308,7 +3336,7 @@ function setView(v){
     wrap2d.style.display='';wrap3d.style.display='none';
     btn2d.classList.add('active');btn3d.classList.remove('active');
     document.getElementById('speedControl').classList.remove('visible');
-    document.getElementById('globeNominalBtn')?.classList.remove('visible');
+    document.getElementById('globeControls')?.classList.remove('visible');
     stopGlobeLoop();
     cameraFollowActive=false;
     if(currentConj&&currentPlannerResult)drawEncounter(currentConj,currentPlannerResult);
@@ -3539,6 +3567,70 @@ let globeWorstLink=null;            // dashed asset-to-worst closest-approach li
 let globeWorstIndex=-1;             // index into debrisMarkers of the worst object
 let assetLabelSprite=null;
 
+// SCRUM-447 follow-up. Labels default on, and every sprite goes in one array --
+// the asset's and the RED/AMBER objects' -- so LABELS flips them together, the
+// same pattern globeNominalParts uses for the haze.
+let globeShowLabels=true;
+let globeLabelParts=[];
+// The worst conjunction, kept from the payload so FOCUS WORST does not have to
+// re-derive which object that was.
+let globeWorstNorad=null;
+let globeWorstMeta=null;
+let globeWorstTrackEci=null;
+const GLOBE_AUTOROTATE_SPEED=0.5;   // a gentle drift, not a spin
+
+function toggleGlobeAutoRotate(){
+  if(!globeControls)return;
+  globeControls.autoRotate=!globeControls.autoRotate;
+  globeControls.autoRotateSpeed=GLOBE_AUTOROTATE_SPEED;
+  document.getElementById('globeRotateBtn')?.classList.toggle('on',globeControls.autoRotate);
+  // The render loop already calls globeControls.update() every frame, so there is
+  // nothing else to drive here.
+}
+
+function toggleGlobeLabels(){
+  globeShowLabels=!globeShowLabels;
+  document.getElementById('globeLabelsBtn')?.classList.toggle('on',globeShowLabels);
+  globeLabelParts.forEach(sprite=>{ if(sprite) sprite.visible=globeShowLabels; });
+}
+
+// FOCUS WORST frames the highest-Pc conjunction, reusing the same hook the 2D
+// table uses when an operator clicks a row. Preference order for what to hand it:
+// the live row if that conjunction is on the loaded page, otherwise a minimal
+// stand-in built from the globe payload, so the button still works when the
+// worst object is not in the current table page.
+function focusWorstConjunction(){
+  if(currentView!=='3d')return;
+  if(globeWorstNorad===null||globeWorstNorad===undefined){
+    setGlobeMessage('No conjunction to focus');
+    return;
+  }
+  const row=(conjunctionData?.conjunctions||[]).find(
+    c=>String(c.secondary_norad)===String(globeWorstNorad));
+  const meta=globeWorstMeta||{};
+  // Shallow-copied, not used in place: r_asset_km is set below, and writing that
+  // onto the live table row would quietly mutate shared state the 2D table and
+  // the evaluate path also read.
+  const conj=(row?{...row}:null)||{
+    object_id:meta.name||meta.secondary_designator||('NORAD '+globeWorstNorad),
+    risk_level:meta.risk_level||'NOMINAL',
+    pc:meta.pc,
+    miss_distance_m:meta.miss_distance_m,
+    time_to_tca_s:0,
+    secondary_norad:globeWorstNorad
+  };
+  // globeFocusOnConj frames conj.r_asset_km and falls back to a hardcoded
+  // [6878,0,0] when the row has none -- and a live row never carries one, so
+  // without this the camera would swing to a fixed point in inertial space
+  // rather than to the conjunction. Point it at the worst object's own track.
+  if(globeWorstTrackEci&&globeWorstTrackEci.length){
+    conj.r_asset_km=globeWorstTrackEci[0];
+  }
+  globeFocusOnConj(conj);
+  const label=conj.object_id||('NORAD '+globeWorstNorad);
+  setGlobeMessage('Focused '+label+(conj.risk_level?(' — '+conj.risk_level):''));
+}
+
 function toggleGlobeNominal(){
   globeShowNominal=!globeShowNominal;
   const btn=document.getElementById('globeNominalBtn');
@@ -3556,7 +3648,8 @@ function clearGlobeTracks(){
   if(globeWorstLink){globeScene.remove(globeWorstLink);globeWorstLink=null;}
   objectTrackLines=[];debrisMarkers=[];debrisLabelSprites=[];
   debrisTrackPoints=[];debrisMarkerOffsets=[];globeNominalParts=[];
-  globeWorstIndex=-1;
+  globeLabelParts=[];
+  globeWorstIndex=-1;globeWorstNorad=null;globeWorstMeta=null;globeWorstTrackEci=null;
   assetTrackLine=null;
 }
 
@@ -3584,7 +3677,9 @@ function updateGlobeOrbits(orbits){
     if(orbits.live&&assetTrackPoints.length>0){
       assetLabelSprite=makeTextSprite(liveAssetName||('NORAD '+liveAssetNorad),'#4ff8e8');
       assetLabelSprite.position.copy(assetTrackPoints[0]).multiplyScalar(1.10);
+      assetLabelSprite.visible=globeShowLabels;
       globeScene.add(assetLabelSprite);
+      globeLabelParts.push(assetLabelSprite);
     }
   }
 
@@ -3639,7 +3734,11 @@ function updateGlobeOrbits(orbits){
         const name=(orbits.objects&&orbits.objects[objId]&&orbits.objects[objId].name)||objId;
         label=makeTextSprite(name,GLOBE_RISK_HEX[risk]||GLOBE_RISK_HEX.NOMINAL);
         label.position.copy(scenePts[0]).multiplyScalar(1.06);
+        // A refetch rebuilds every sprite, so honour the toggle's current state
+        // rather than springing the labels back on behind the operator.
+        label.visible=globeShowLabels;
         globeScene.add(label);
+        globeLabelParts.push(label);
       }
       // One slot per marker either way, so the loop's index alignment between
       // debrisMarkers and debrisLabelSprites holds for unlabelled objects too.
@@ -3647,6 +3746,13 @@ function updateGlobeOrbits(orbits){
       if(orbits.worst_object!==undefined&&orbits.worst_object!==null
          &&String(orbits.worst_object)===String(objId)){
         globeWorstIndex=debrisMarkers.length-1;
+        // Kept so FOCUS WORST can name and frame it without re-deriving which
+        // object the payload called worst.
+        globeWorstNorad=(orbits.objects&&orbits.objects[objId]
+          &&orbits.objects[objId].secondary_norad!=null)
+          ? orbits.objects[objId].secondary_norad : objId;
+        globeWorstMeta=(orbits.objects&&orbits.objects[objId])||null;
+        globeWorstTrackEci=pts;
       }
     });
   }
