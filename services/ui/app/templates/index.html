@@ -493,7 +493,11 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
       <div style="display:flex;align-items:center;gap:4px">
         <span class="encounter-alert" id="encounterAlert">CONJUNCTION ALERT</span>
         <button class="view-toggle-btn active" id="btn2D" onclick="setView('2d')">2D</button>
-        <button class="view-toggle-btn" id="btn3D" onclick="setView('3d')">3D GLOBE</button>
+        <!-- SCRUM-446: 3D globe hidden until it can be driven by live LeoLabs data.
+             It renders surrogate propagator orbits, not the live conjunctions, so it
+             stays on surrogate data. The globe code below is left intact and dormant;
+             unhide this button to re-enable once the globe reads live data. -->
+        <button class="view-toggle-btn" id="btn3D" onclick="setView('3d')" style="display:none">3D GLOBE</button>
         <div class="speed-control" id="speedControl">
           <label>Orbit Speed</label>
           <input type="range" id="speedSlider" min="1" max="10" step="1" value="5"
