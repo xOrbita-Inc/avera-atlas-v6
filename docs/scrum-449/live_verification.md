@@ -73,19 +73,45 @@ belongs to a previously selected object.
 
 The diff is `services/ui/app/templates/index.html` only.
 
-## Observed but NOT fixed here — out of scope
+## 5. The stale alert chip — found during this work, then fixed
 
-The `#encounterAlert` chip keeps stale text when a scored result is neither RED
-nor AMBER. `updateRiskBar` resets its class (which hides it) but only rewrites
-`textContent` on the RED and AMBER branches, so after the burst it still read
+The `#encounterAlert` chip kept the previous object's text whenever a scored
+result was neither RED nor AMBER. `.encounter-alert` is `display:none` unless it
+also carries `.red` or `.amber`, and **three** places reset the class to hide the
+chip without touching `textContent`: `updateRiskBar`, the source-switch clear,
+and `clearAll`. After the rapid-selection burst it still read
 `AMBER — STARLINK-38092 (100012)` while the panel showed ELECTRON KICK STAGE R/B.
 
-It is **not user-visible**: computed `display: none`, bounding width 0, and the
-last scored object was neither maneuver-required nor monitor-only, so hiding the
-chip is correct. This is pre-existing behaviour, unrelated to the race, and the
-plan is explicit that this change is the race and nothing else. Worth a one-line
-follow-up (clear the text on the else branch) so it cannot surface if that chip
-is ever shown in another state.
+It was never user-visible — computed `display: none`, bounding width 0 — so the
+chip was only correct by virtue of being invisible. Show it in any other state,
+or read the DOM, and it names an object the panel is no longer about. On a
+ticket whose whole subject is "the panel names the wrong conjunction", leaving
+that in place was the wrong call.
+
+Fixed by routing all three sites through one `setEncounterAlert(risk, label)`,
+so the class and the text can no longer drift apart. Below the watch line, or on
+a clear, the chip is hidden **and** emptied.
+
+Verified twice:
+
+**Directly, over the whole state surface.**
+
+| call | class | display | text |
+|---|---|---|---|
+| `setEncounterAlert('RED', …30994)` | `encounter-alert red` | block | `RED ALERT — STARLINK-30994 (58483)` |
+| `setEncounterAlert('AMBER', …38092)` | `encounter-alert amber` | block | `AMBER — STARLINK-38092 (100012)` |
+| `setEncounterAlert('GREEN', …68293)` | `encounter-alert` | none | *(empty)* |
+| `setEncounterAlert(null)` | `encounter-alert` | none | *(empty)* |
+
+**Through the real path**, on the transition that exposed it. Selecting row 0
+scored AMBER, giving `AMBER — STARLINK-30994 (58483)`, visible. Selecting row 12
+scored GREEN:
+
+    text ''            (was: 'AMBER — STARLINK-30994 (58483)')
+    display none
+    header  Encounter: STARLINK-38296 (100376) — Miss 24675m
+
+`keptPreviousObjectText: false`.
 
 ## Limits of this verification
 

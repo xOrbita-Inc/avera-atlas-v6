@@ -938,8 +938,7 @@ function clearScoredResultForSourceSwitch(){
   const card=document.getElementById('decisionCard');
   if(card)card.className='decision-card';
   ['dTarget','dTCA','dDir','dDv','pcPre','pcPost','m2Pre','m2Post','utilBar'].forEach(id=>set(id,'--'));
-  const alert=document.getElementById('encounterAlert');
-  if(alert)alert.className='encounter-alert';
+  setEncounterAlert(null);
   set('encounterTitleText','Encounter Geometry');
   if(typeof encounterCtx!=='undefined'&&encounterCtx)drawEncounterEmpty();
   if(typeof clearAtlasArtifact==='function')clearAtlasArtifact();
@@ -2239,12 +2238,36 @@ function updateRiskBar(result,conj){
   document.getElementById('m2Pre').textContent=fmtM2(m.m2_pre||0);
   document.getElementById('m2Post').textContent=fmtM2(m.m2_post||0);
   document.getElementById('utilBar').textContent=(result.recommendation?.utility||0).toFixed(3);
-  const al=document.getElementById('encounterAlert');al.className='encounter-alert';
-  if(dctx.risk==='RED'){al.className='encounter-alert red';al.textContent='RED ALERT \u2014 '+dctx.label}
-  else if(dctx.risk==='AMBER'){al.className='encounter-alert amber';al.textContent='AMBER \u2014 '+dctx.label}
+  setEncounterAlert(dctx.risk, dctx.label);
   document.getElementById('encounterTitleText').textContent='Encounter: '+dctx.label+' \u2014 Miss '+dctx.missM.toFixed(0)+'m';
 }
 
+
+// SCRUM-449: the alert chip's class and its text have to move together.
+// .encounter-alert is display:none unless it also carries .red or .amber, and
+// three places reset the class to hide the chip without touching textContent --
+// so the previous object's text stayed in the DOM. Not visible today, because
+// hidden is hidden, but it means the chip is only correct by virtue of being
+// invisible: show it in any other state, or read the DOM, and it names an object
+// the panel is no longer about. One setter, so the two cannot drift apart.
+function setEncounterAlert(risk, label){
+  const el=document.getElementById('encounterAlert');
+  if(!el)return;
+  if(risk==='RED'){
+    el.className='encounter-alert red';
+    el.textContent='RED ALERT \u2014 '+label;
+    return;
+  }
+  if(risk==='AMBER'){
+    el.className='encounter-alert amber';
+    el.textContent='AMBER \u2014 '+label;
+    return;
+  }
+  // Below the watch line, or cleared: hide it AND empty it. An empty hidden chip
+  // is honest; a hidden chip still naming the last RED object is not.
+  el.className='encounter-alert';
+  el.textContent='';
+}
 
 function clearAll(){
   userCleared=true;
@@ -2270,7 +2293,7 @@ function clearAll(){
   ['mTotal','mClosest','mMaxPc'].forEach(id=>document.getElementById(id).textContent='--');
   ['mRed','mAmber','mGreen'].forEach(id=>document.getElementById(id).textContent='0');
   ['pcPre','pcPost','m2Pre','m2Post','utilBar'].forEach(id=>document.getElementById(id).textContent='--');
-  document.getElementById('encounterAlert').className='encounter-alert';
+  setEncounterAlert(null);
   document.getElementById('encounterTitleText').textContent='Encounter Geometry';
   document.getElementById('scenarioMsg').textContent='Select scenario and run';
   document.getElementById('sliderLv').value=0.01;document.getElementById('sliderLl').value=0.005;document.getElementById('sliderDv').value=1.0;
