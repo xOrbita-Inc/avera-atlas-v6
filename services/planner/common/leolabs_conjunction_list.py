@@ -28,7 +28,7 @@ so a cdm_id that lost its dedupe still resolves.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from common.leolabs_cdm_parser import ParsedLeoLabsCDM
 
@@ -203,20 +203,27 @@ def conjunction_row(
 
 def dedupe_by_event(
     conjunctions: Sequence[ParsedLeoLabsCDM],
+    key: Callable[[ParsedLeoLabsCDM], str] = event_key,
 ) -> List[ParsedLeoLabsCDM]:
     """One entry per conjunction event, keeping the first seen.
 
     Callers pass an already risk-ordered sequence, so "first seen" is the
     highest-risk CDM for that event, which is the one a triage table should show.
     Order is otherwise preserved.
+
+    `key` defaults to event_key, which is right for the live conjunction feed. The
+    on-demand screen passes its own: SCRUM-458 found that screening result CDMs
+    carry COMMENT_EVENT_ID = "0" and COMMENT_ID = the screening id, so event_key
+    returns one identity for every CDM in the screening and this function would
+    collapse the entire screened set into a single conjunction.
     """
     seen = set()
     kept: List[ParsedLeoLabsCDM] = []
     for parsed in conjunctions:
-        key = event_key(parsed)
-        if key in seen:
+        key_value = key(parsed)
+        if key_value in seen:
             continue
-        seen.add(key)
+        seen.add(key_value)
         kept.append(parsed)
     return kept
 
