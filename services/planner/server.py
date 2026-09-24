@@ -192,6 +192,14 @@ def _fetch_cdm_covariance(
 
     Returns (p_rel_km2, covariance_source, cdm_record_id).
 
+    SCRUM-454 note: this returns only the COMBINED covariance, and cannot return
+    the primary's own. The ingest endpoint behind it computes c_primary and
+    c_secondary separately and then returns only their sum, so the primary-only
+    block is not on the wire; exposing it is an ingest change, and SCRUM-454 is
+    planner-only. The LeoLabs path does not call this function at all -- a test
+    asserts that -- and takes the primary's own covariance straight off the
+    parsed CDM instead, which is where the demo path gets its seed.
+
     SCRUM-369: always returns a real, usable covariance. Falls back to
     the documented elliptical surrogate (_surrogate_covariance) on any
     failure, including missing NORAD IDs -- previously, missing NORAD
@@ -2072,6 +2080,8 @@ async def post_evaluate(request: Request):
     # above. Skip the ingest CDM fetch so it cannot overwrite the UDL source.
     _conj_block = body.get("conjunction", {}) or {}
     _is_leolabs = str(_conj_block.get("source", "")).lower() == "leolabs"
+    # SCRUM-454: set only on the LeoLabs path, where a parsed CDM exists.
+    _cdm_primary_cov_km2 = None
     if leolabs_used:
         # SCRUM-412: the LeoLabs fetch above rebuilt the request from a parsed
         # CDM, so the real per-object covariance is already in the block. Keep it
@@ -2086,6 +2096,23 @@ async def post_evaluate(request: Request):
         # untouched: it still comes from the block, still reads real_cdm. This
         # only writes the CDM down and remembers where.
         cdm_record_id = _persist_leolabs_cdm(parsed_ll)
+        # SCRUM-454: the asset's OWN pre-burn position covariance, as distinct
+        # from the combined relative one the scorer needs. Both are in this same
+        # CDM and the parser has already separated them -- primary resolved
+        # against our catalog id rather than by assuming SAT1 -- so the screening
+        # seed can stop growing an over-estimate. km^2, to match the seed units.
+        try:
+            _cdm_primary_cov_km2 = [
+                [float(c) / 1.0e6 for c in row]
+                for row in parsed_ll.primary.cov_eci_pos_m2
+            ]
+        except Exception as exc:
+            _cdm_primary_cov_km2 = None
+            log.info(
+                "primary-only covariance unavailable from the parsed CDM",
+                extra={"event": "cdm_primary_covariance_unavailable",
+                       "exc": str(exc)},
+            )
     elif UDL_ENABLED:
         covariance_source = "UDL"
         cdm_record_id = None
@@ -2252,12 +2279,26 @@ async def post_evaluate(request: Request):
                                "exc": str(exc)},
                     )
 
+            if _p_post is None and _cdm_primary_cov_km2 is not None:
+                # SCRUM-454: the asset's own covariance out of the same CDM this
+                # decision is being made from.
+                #
+                # This is a PRE-burn covariance, and naming it honestly matters.
+                # The CDM block is P_pre, the SCRUM-452 execution-error block is
+                # what the burn adds, and the two grown together are the
+                # post-burn covariance -- the same P_pre + P_burn structure
+                # post_burn_covariance_km2 formalises, with P_pre coming from the
+                # CDM here rather than from a GNC assessment.
+                _p_post = _cdm_primary_cov_km2
+                _p_post_source = "cdm_primary_own"
+
             if _p_post is None:
-                # No GNC report on this call. p_rel_km2 is the COMBINED relative
-                # covariance, so as a primary-only seed it is an over-estimate --
-                # conservative for a screen, but not the right quantity. It is
-                # used rather than failing the screen closed, and it is labelled
-                # so the difference is visible in the record instead of implied.
+                # No GNC report and no parsed CDM. p_rel_km2 is the COMBINED
+                # relative covariance, so as a primary-only seed it is an
+                # over-estimate -- conservative for a screen, but not the right
+                # quantity. Kept as a fallback rather than failing the screen
+                # closed, and labelled so the difference is visible in the record
+                # instead of implied.
                 _p_rel = (body.get("conjunction") or {}).get("p_rel_km2")
                 if _p_rel:
                     try:
@@ -2281,6 +2322,18 @@ async def post_evaluate(request: Request):
                             extra={"event": "secondary_screen_no_catalog",
                                    "primary_norad": _ll_norad, "exc": str(exc)},
                         )
+
+            if SECONDARY_SCREEN_ENABLED and _p_post is not None:
+                # Which quantity seeded the screen, at the point it is chosen.
+                # Without this the only record of it is the persisted screening
+                # row, and that write depends on an ingest endpoint that does not
+                # exist yet (SCRUM-442), so the seed source would be invisible in
+                # a running system.
+                log.info(
+                    "screening covariance seed selected",
+                    extra={"event": "screening_seed_selected",
+                           "p_post_source": _p_post_source},
+                )
 
             _screening_capture: Dict[str, Any] = {}
 
