@@ -397,6 +397,84 @@ def test_create_screening_passes_through_screening_limiter():
     assert clock.slept == pytest.approx(120.0)
 
 
+def test_create_screening_posts_multipart_not_json():
+    """SCRUM-441: the create endpoint is multipart form-data with a file upload.
+
+    Posting JSON is what made the first live submit fail: the server's form
+    parser saw no fields and rejected on the first required one. So this asserts
+    the wire shape, not just that a call happened.
+    """
+    session = MagicMock()
+    session.request.return_value = _resp(200, json_body={"id": "scr1"})
+    files = {"file": ("ephemeris.json", b'{"states":[]}', "application/json")}
+    data = {"primaryCatalogNumber": "L3969", "missDistance": 1.0}
+    with _env():
+        _client(session).create_screening(files=files, data=data)
+
+    kwargs = session.request.call_args.kwargs
+    assert kwargs["files"] is files
+    assert kwargs["data"] is data
+    # json must be None, or requests would send a JSON body and a multipart body
+    # in the same request.
+    assert kwargs["json"] is None
+    # Content-Type is never set by hand: requests generates the boundary, and a
+    # hand-set header would replace it with one that has none.
+    assert "Content-Type" not in kwargs["headers"]
+
+
+def test_create_screening_multipart_still_passes_both_limiters():
+    """The transport changed; the rate limiting must not have."""
+    session = MagicMock()
+    session.request.return_value = _resp(200, json_body={"id": "scr1"})
+    clock = FakeClock()
+    org = MinIntervalLimiter(0.25, now=clock.now, sleep=clock.sleep)
+    screening = SlidingWindowLimiter(3, 120.0, now=clock.now, sleep=clock.sleep)
+    client = LeoLabsClient(
+        session=session, org_limiter=org, screening_limiter=screening,
+        sleep=clock.sleep, jitter=lambda base: base,
+    )
+    files = {"file": ("ephemeris.json", b"{}", "application/json")}
+    with _env():
+        for _ in range(4):        # one past the 3-per-window screening limit
+            client.create_screening(files=files, data={"primaryCatalogNumber": "L1"})
+
+    assert session.request.call_count == 4
+    # The fourth had to wait for the sliding window to open.
+    assert clock.slept >= 120.0 - 1.0
+
+
+def test_create_screening_still_accepts_a_json_body():
+    """The positional body path is retained so an existing caller keeps working."""
+    session = MagicMock()
+    session.request.return_value = _resp(200, json_body={"id": "scr1"})
+    with _env():
+        _client(session).create_screening({"legacy": True})
+    kwargs = session.request.call_args.kwargs
+    assert kwargs["json"] == {"legacy": True}
+    assert kwargs["files"] is None
+
+
+def test_a_multipart_request_is_retried_with_the_same_bytes():
+    """File parts are bytes precisely so a retry re-sends the same body.
+
+    An open file object would be consumed by the first attempt and upload empty
+    on the second, which is the kind of failure that looks like a server problem.
+    """
+    session = MagicMock()
+    session.request.side_effect = [
+        _resp(503, text="unavailable"),
+        _resp(200, json_body={"id": "scr1"}),
+    ]
+    files = {"file": ("ephemeris.json", b'{"states":[1]}', "application/json")}
+    with _env():
+        out = _client(session).create_screening(files=files, data={"a": 1})
+
+    assert out == {"id": "scr1"}
+    assert session.request.call_count == 2
+    first, second = session.request.call_args_list
+    assert first.kwargs["files"]["file"][1] == second.kwargs["files"]["file"][1]
+
+
 def test_wait_for_screening_polls_until_complete():
     session = MagicMock()
     session.request.side_effect = [

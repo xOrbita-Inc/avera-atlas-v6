@@ -30,6 +30,7 @@ no path through this module that turns a failure into an empty result.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
@@ -128,58 +129,106 @@ def thresholds_from_policy(policy: Any, primary_radius_m: float) -> ScreeningThr
 # The request body
 # ---------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class ScreeningRequest:
+    """A create-screening request, ready to post as multipart form-data.
+
+    Two parts, because the endpoint takes two: `files` carries the ephemeris
+    document as an uploaded file, `data` carries the flat form fields. Kept as
+    one object so the builder can be unit-tested without a client and so
+    run_screening hands the client exactly what it assembled.
+    """
+
+    files: Dict[str, Any]
+    data: Dict[str, Any]
+
+    @property
+    def ephemeris_bytes(self) -> bytes:
+        """The uploaded document, for tests and for logging its size."""
+        return self.files["file"][1]
+
+
+EPHEMERIS_FILENAME = "ephemeris.json"
+EPHEMERIS_CONTENT_TYPE = "application/json"
+
+
 def build_screening_request(
     ephemeris: Dict[str, Any],
     thresholds: ScreeningThresholds,
     primary_object: str,
     *,
     extra: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """The create_screening body.
+) -> ScreeningRequest:
+    """The multipart create-screening request.
 
-    Every LeoLabs JSON field name lives in this one function, deliberately. These
-    names are the open item the SCRUM-439 spike left: the lifecycle is confirmed
-    but the request-body field names are not, and they are confirmed on the first
-    live submit. Keeping them here means that confirmation is a change to one
-    function rather than a hunt.
+    Every LeoLabs field name lives in this one function, deliberately.
 
-    What is being asked for:
+    Transport (SCRUM-441 fix)
+    ------------------------
+    This endpoint is multipart form-data with a file upload, not JSON --
+    "Parameters must be sent as a multipart form" in the LeoLabs reference. Our
+    first live submit posted JSON and was rejected with
+    `422 {"error": "Invalid Miss Distance"}` on all three probes, including one
+    with every threshold removed. That was not a field-name problem: the form
+    parser saw no fields at all and failed on the first required one. Hence a
+    file part plus flat form fields rather than a nested body.
 
-      screenAgainstAllObjects  the full LeoLabs catalog, which is the wide
-                               secondary-screen volume SCRUM-433 wants -- not
-                               just our subscribed vehicles.
-      useFileUncertainty       screen against the covariance in the uploaded
-                               ephemeris, not a LeoLabs default. Our uploaded
-                               covariance is the one that should decide the
-                               result, and SCRUM-440's covariance floor is what
-                               it is -- substituting a default would hide that.
-      thresholds               our clear contract, from thresholds_from_policy.
-      hardBodyRadius           the 15 m combined override.
+    The fields, and their units
+    ---------------------------
+      file                    the SCRUM-440 ephemeris, JSON bytes, uploaded.
+      primaryCatalogNumber    the LeoLabs catalog number, e.g. L3969.
+      missDistance            KILOMETRES, max 100. policy.min_miss_distance_km
+                              goes here directly: no conversion, because this one
+                              field is km while the rest of the API is metres.
+      probabilityOfCollision  minimum PoC to return, as a STRING.
+      mahalanobisDistance     our screen threshold. See the open decision below.
+      primaryHardBodyRadius   METRES. See the open decision below.
 
-    `extra` merges last, so the first live submit can add or correct a field
-    without editing this signature.
+    What is omitted, and why omission is the instruction
+    ----------------------------------------------------
+    There is no screenAgainstAllObjects flag and no useFileUncertainty flag. Both
+    behaviours are selected by leaving fields out, which means an accidental
+    addition silently changes the screen rather than erroring:
 
-    STATUS OF THESE FIELD NAMES: NOT CONFIRMED, and the first live submit did not
-    confirm them -- it rejected the body. On 2026-09-24 three creates against the
-    real API all returned
+      secondaryCatalogNumber, secondaryFile
+          omitted -> screen against the whole catalog, which is the wide
+          secondary-screen volume SCRUM-433 wants.
+      radialUncertainty, inTrackUncertainty, crossTrackUncertainty
+          omitted -> the covariance in our uploaded file is what gets screened,
+          rather than a LeoLabs default. SCRUM-440's covariance floor is what it
+          is, and substituting a default would hide that.
 
-        HTTP 422 {"error": "Invalid Miss Distance"}
+    Deliberately never sent: the deprecated combined `hardBodyRadius`,
+    `primaryObject`, an inline `ephemeris`, `screenAgainstAllObjects`,
+    `useFileUncertainty`, or a nested `thresholds` object. None exists in the API.
+    The offline tests assert each of those is absent.
 
-    including one with the `thresholds` block removed entirely and one adding a
-    top-level `missDistance` in metres. So a required miss-distance parameter is
-    expected under a name not in this body, and it is not derivable by probing a
-    rate-limited production endpoint. It needs LeoLabs' API documentation or a
-    question to Lois Reid. Full trace in docs/scrum-441/live_verification.md.
+    Two open decisions, interim defaults only -- for John or Sreejit
+    ---------------------------------------------------------------
+    1. Hard body radius. Our convention is one inflated 15 m *combined* value; the
+       API takes primaryHardBodyRadius and secondaryHardBodyRadius separately.
+       Interim: put the 15 m combined value in primaryHardBodyRadius and omit the
+       secondary, so each catalog object keeps its own radius. The effective
+       combined radius per event is then larger than 15 m, which raises Pc and
+       returns more conjunctions -- the safe direction for a screen, but it does
+       over-count. The true split is a physics call.
+    2. mahalanobisDistance. The reference calls it "Supplied Mahalanobis distance
+       for ephemerides file", which does not clearly match our max-Mahalanobis
+       result filter. Interim: send our 4.0 threshold. The corrected live submit
+       accepted it without a 422, so the contingency of dropping it was not
+       needed -- but acceptance is not confirmation of meaning, and it remains a
+       candidate contributor to the 0-conjunction result below.
 
-    Everything above the thresholds is therefore also unconfirmed. The names are
-    isolated in this one function, and `extra` merges last, so correcting them is
-    a one-line change and needs no edit here once the real schema is known.
+    One more thing the live submit revealed, which the field name hides:
+    missDistance is expanded by LeoLabs into a per-axis box. Sending 1.0 comes
+    back echoed as missDistanceR/I/C all "1.0", i.e. a 1 x 1 x 1 km RIC box --
+    not a 1 km sphere, and far tighter than the 2 x 50 x 50 km volume LeoLabs
+    uses for its own reporting. policy.min_miss_distance_km is our *action*
+    floor, the distance at which a maneuver is required; using it here also makes
+    it the distance we look out to, which are not the same question. Recorded in
+    docs/scrum-441/live_verification.md.
 
-    Also unconfirmed, and separate: whether LeoLabs combines the thresholds as AND
-    or OR. Our own contract ORs them -- is_maneuver_required treats Pc or miss as
-    sufficient alone -- so an AND would make the screen narrower than our contract
-    and return fewer conjunctions than intended. That is the dangerous direction
-    for a safety screen.
+    `extra` merges into the form fields last, so a correction needs no edit here.
     """
     if not isinstance(ephemeris, dict) or not ephemeris.get("states"):
         raise LeoLabsScreeningError(
@@ -188,23 +237,25 @@ def build_screening_request(
     if not primary_object:
         raise LeoLabsScreeningError("primary_object is required")
 
-    body: Dict[str, Any] = {
-        "primaryObject": str(primary_object),
-        "ephemeris": ephemeris,
-        # Screen Against All Objects: the full catalog, not the subscription.
-        "screenAgainstAllObjects": True,
-        # Use File Uncertainty: our covariance decides, not a LeoLabs default.
-        "useFileUncertainty": True,
-        "thresholds": {
-            "minProbabilityOfCollision": thresholds.min_probability_of_collision,
-            "maxMissDistanceKm": thresholds.max_miss_distance_km,
-            "maxMahalanobisDistance": thresholds.max_mahalanobis,
-        },
-        "hardBodyRadius": thresholds.combined_hbr_m,
+    payload = json.dumps(ephemeris).encode("utf-8")
+
+    data: Dict[str, Any] = {
+        "primaryCatalogNumber": str(primary_object),
+        # Kilometres, straight from the policy. The one km field in a metres API.
+        "missDistance": thresholds.max_miss_distance_km,
+        # A string by the reference's own typing, not a float.
+        "probabilityOfCollision": str(thresholds.min_probability_of_collision),
+        "mahalanobisDistance": thresholds.max_mahalanobis,
+        # Metres. The 15 m combined value, per the interim decision above.
+        "primaryHardBodyRadius": thresholds.combined_hbr_m,
     }
     if extra:
-        body.update(extra)
-    return body
+        data.update(extra)
+
+    return ScreeningRequest(
+        files={"file": (EPHEMERIS_FILENAME, payload, EPHEMERIS_CONTENT_TYPE)},
+        data=data,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -316,13 +367,15 @@ def run_screening(
     except Exception as exc:
         raise _classify(exc, "on-demand screening could not build a client") from exc
 
-    body = build_screening_request(
+    request = build_screening_request(
         ephemeris, thresholds, primary_object, extra=extra_body
     )
 
     # -- create ----------------------------------------------------------
+    # Multipart: the ephemeris as a file part, the thresholds as form fields.
+    # The client's screening limiter, org limiter and backoff are unchanged.
     try:
-        created = client.create_screening(body)
+        created = client.create_screening(files=request.files, data=request.data)
     except Exception as exc:
         raise _classify(exc, "on-demand screening create failed") from exc
     screening_id = _screening_id(created)

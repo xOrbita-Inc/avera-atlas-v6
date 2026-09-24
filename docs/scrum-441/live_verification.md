@@ -1,104 +1,137 @@
-# SCRUM-441 live verification — first on-demand screening submit
+# SCRUM-441 live verification — on-demand screening, first and corrected submits
 
-Run 2026-09-24 against the real LeoLabs API from inside the rebuilt planner
-container, asset SWARM C / L3969.
+Asset SWARM C / L3969, from inside the rebuilt planner container against the real
+LeoLabs API.
 
-## Outcome: the submit was rejected. The request body is NOT confirmed.
+## Summary
 
-The plan expected the first live submit to confirm the request-body field names
-and the terminal status enum. It did not confirm them — it rejected the body, and
-the three things step 7 was meant to answer are consequently still open.
+The corrected multipart submit is **accepted**. Transport, field names, the
+screening id and the terminal status enum are all confirmed, and LeoLabs accepted
+the 865-state 300 s ephemeris without complaint.
 
-This is recorded as a blocking finding rather than worked around. **SCRUM-442 must
-not make this screen load-bearing until the request body is confirmed.**
+But the screening returns **0 conjunctions where the catalog has 64**, and that
+discrepancy is not explained by the code. It points at the two physics questions
+SCRUM-440 flagged. **SCRUM-442 must not make this screen load-bearing until that
+is resolved** — a screen that returns nothing is indistinguishable from a clear
+sky, which is the exact failure this path is supposed to prevent.
 
-## What was attempted
+---
 
-Three `create_screening` calls, the full quota for one 2-minute window, run
-deliberately and not in a loop. Each used a real ephemeris built by the SCRUM-440
-builder from SWARM C's live state and its own position covariance:
+## 1. The original failure, explained (2026-09-24, first round)
 
-    asset            L3969, epoch 2026-09-24T11:34:28.729701Z
-    P_post (km^2)    diag [1.182e-4, 2.767e-5, 9.74e-6]
-    position sigmas  10.87, 5.26, 3.12 m
-    ephemeris        865 states, 460,923 bytes,
-                     2026-09-24T11:34:28Z .. 2026-09-27T11:34:28Z
+Three JSON submits, all `422 {"error": "Invalid Miss Distance"}`, including one
+with the thresholds block removed and one adding a top-level `missDistance`.
 
-| # | body | response |
+Root cause, confirmed: the endpoint is **multipart form-data with a file upload**,
+not JSON. The form parser saw no fields in a JSON body and failed on the first
+required one, which is `missDistance` — so every probe failed identically
+regardless of its JSON content. Not a field rename; a transport change.
+
+## 2. The corrected submit — accepted
+
+    POST /catalog/conjunctions/screenings   multipart/form-data
+    file  ephemeris.json  application/json  865 states, 460,923 bytes
+    form  {"primaryCatalogNumber": "L3969", "missDistance": 1.0,
+           "probabilityOfCollision": "0.0001", "mahalanobisDistance": 4.0,
+           "primaryHardBodyRadius": 15.0}
+
+    -> ACCEPTED in 0.9 s, screening id 602816
+
+**Confirmed, previously open:**
+
+- **Request body and field names.** All five fields accepted, and echoed back in
+  `screeningParameters` unchanged.
+- **Screening id.** Integer under key `id` (602816). `_screening_id` handles it.
+- **Terminal status enum.** Observed `pending` → `complete`. **"complete"** is
+  already in the client's default `is_complete` vocabulary, so the default is
+  correct — now verified rather than assumed. Completion took ~23 s.
+- **The SCRUM-440 ephemeris is accepted at 865 states / 300 s.** No complaint
+  about density, step or size, and `filename: ephemeris.json` is echoed back.
+
+**A finding from the echo worth knowing:** our scalar `missDistance` is expanded
+by LeoLabs into a per-axis box —
+
+    "missDistance": "1.0", "missDistanceR": "1.0",
+    "missDistanceI": "1.0", "missDistanceC": "1.0"
+
+So a scalar becomes a **1 x 1 x 1 km RIC box**, not a 1 km radius sphere and not
+the 2 x 50 x 50 km volume LeoLabs uses for its own reporting. That is a much
+tighter screen than the number suggests.
+
+## 3. The result does not match the catalog
+
+| submit | missDistance | conjunctionsCount |
 |---|---|---|
-| 1 | as `build_screening_request` emits it | `422 {"error": "Invalid Miss Distance"}` |
-| 2 | same, with the whole `thresholds` block **removed** | `422 {"error": "Invalid Miss Distance"}` |
-| 3 | same as 1, plus a top-level `"missDistance": 1000.0` (metres) | `422 {"error": "Invalid Miss Distance"}` |
+| 602816 | 1 km | **0** |
+| second | 25 km | **0** |
 
-Probe 2 is the informative one: removing our `thresholds.maxMissDistanceKm`
-entirely did not change the error, so the rejection is **not** our thresholds
-block. A required miss-distance parameter is expected under a name that is not in
-our body at all.
+Cross-checked against `/v1/leolabs/conjunctions` for the same asset over the same
+72 h window (read-only, no screening quota):
 
-Probe 3 tested the most plausible inference — every other distance in this API is
-metres (position, velocity, covariance, and the `maxRelativePosition*` filters),
-so a top-level `missDistance` in metres was the informed guess. Also rejected.
+    events in window        64
+    max Pc                  1.723e-04
+    events with Pc >= 1e-4  1
+    closest miss            1.214 km
+    within 1 km             0
+    within 25 km            64
 
-## Why probing stopped there
+So:
 
-`create_screening` is limited to 3 per 2 minutes on top of the org-wide 4 req/s,
-against the company's production trial account. Converging on an unknown schema by
-guessing field names would mean many more creates with no guarantee of
-convergence, which is not a reasonable use of a rate-limited production endpoint.
+- **At 1 km, 0 is correct.** The closest real approach in the window is 1.214 km,
+  outside a 1 km box. The screen agrees with the catalog.
+- **At 25 km, 0 is a real discrepancy.** 64 events are inside 25 km and one of
+  them carries Pc 1.72e-4, above our `probabilityOfCollision` floor of 1e-4. That
+  event should plausibly have come back, and did not.
 
-Read-only discovery was tried first and found nothing: `/openapi.json`,
-`/swagger.json`, `/docs`, `/schema` and `/catalog/conjunctions/screenings/schema`
-all 404. A `GET /catalog/conjunctions/screenings` returns a LeoLabs-shaped
-`{"error":"HTTP error code 404"}`, so the path exists but does not serve a schema.
+## 4. Two candidate causes, both physics calls — FOR JOHN OR SREEJIT
 
-**What is needed:** LeoLabs' on-demand screening API documentation, or the field
-list from Lois Reid. It is one question, and it unblocks the whole path.
+These cannot be separated without more live creates, and the choice between them
+is not a call to make in this ticket.
 
-## What this DID confirm
+**(a) The SCRUM-440 covariance floor.** The ephemeris carries LeoLabs' own OD
+covariance for SWARM C — position sigmas of 3 to 11 m — held **constant across all
+865 states over 72 h**. The catalog's Pc of 1.72e-4 is computed against LeoLabs'
+propagated, *growing* covariance for both objects. Screening with an
+unrealistically tight and non-growing covariance shrinks the computed Pc, and a
+Pc pushed below the 1e-4 filter returns nothing. This is exactly the concern
+SCRUM-440 flagged, now with live evidence behind it, and it argues for the
+`aps_math.cw_phi_full` option 440 named.
 
-- **The transport and auth are right.** A 422 with a LeoLabs-shaped JSON error
-  body means the request reached the screening endpoint, authenticated, and was
-  parsed. It is a schema rejection, not an access or transport failure.
-- **The account is not blocked from on-demand screening.** A missing entitlement
-  would be 402/403; this is 422 on content.
-- **The SCRUM-440 ephemeris builds and serialises fine** at 865 states / 461 KB
-  from real live state and real covariance, and was accepted as far as the body
-  schema check.
-- **The module fails closed on exactly this.** A rejected body raises
-  `LeoLabsScreeningError` and never returns an empty conjunction set. The real
-  422 is pinned as a test
-  (`test_the_real_422_from_the_first_live_submit_fails_closed`), including that it
-  is *not* classified as `Unavailable`, because the account has access and it was
-  the body that was wrong.
+**(b) The propagator over this horizon.** The ephemeris is propagated with
+`kepler_propagate`, pure two-body, no J2. Over 72 h in LEO, J2 alone precesses the
+orbit plane by several degrees per day, so by the end of the window the submitted
+trajectory is materially not where SWARM C will be. A screen against a diverged
+trajectory would not line up with real conjunctions regardless of covariance.
 
-## Still open — the three step-7 questions, none answered
+Both point the same way: the screen is currently returning a *falsely clear*
+answer, which is the dangerous direction. Neither is a code defect in 441 — the
+client does what it was asked — and neither should be decided silently.
 
-1. **The request-body field names.** Rejected, see above. Needs the schema.
-2. **The terminal status enum.** Not reached; nothing was ever created to poll.
-   `is_complete` remains injectable and the client's default vocabulary
-   (completed/complete/done/finished) is unverified.
-3. **Whether LeoLabs accepted the 440 ephemeris, and its interpolation at the
-   300 s step.** Not reached. The SCRUM-440 step-size question is therefore still
-   open exactly as 440 left it.
+## 5. The two decisions the fix plan flagged, still interim
 
-## The SCRUM-440 covariance floor — still for John or Sreejit
+- **Hard body radius split.** `primaryHardBodyRadius: 15.0` (our inflated combined
+  value) with `secondaryHardBodyRadius` omitted, so each catalog secondary keeps
+  its own. The effective combined radius per event is therefore larger than 15 m,
+  which raises Pc and returns more conjunctions — the safe direction, but it does
+  over-count. Accepted by the API. The true split is a physics call.
+- **mahalanobisDistance.** Sent as our 4.0 threshold. **Accepted without a 422**,
+  so the fix plan's contingency (drop it if the field is named in an error) was
+  not needed. But acceptance is not confirmation of meaning: the reference calls
+  it "Supplied Mahalanobis distance for ephemerides file", which still does not
+  clearly match our max-Mahalanobis result filter, and it is a candidate
+  contributor to the 0-conjunction result.
 
-SCRUM-440 flagged the constant, position-only covariance (velocity block zero,
-same covariance on all 865 states across 72 h) for confirmation here, from what a
-live result showed. **No live result exists**, so nothing here informs that
-decision and it is handed on unchanged.
+## 6. Quota
 
-Worth noting for whoever picks it up: the real covariance used in these probes was
-tiny — 3 to 11 m position sigmas from LeoLabs' own OD of a tracked asset. If a
-real post-burn P_post is of that order, a covariance that does not grow across 72 h
-is a much stronger assumption than it would be with kilometre-scale uncertainty,
-because the screen would be drawing a very tight volume around a trajectory whose
-true uncertainty is fanning out. That is an argument for the
-`aps_math.cw_phi_full` option 440 named, not a decision.
+Five `create_screening` calls total across the day: three rejected JSON probes in
+the first round, two accepted multipart submits in the second. Both rounds
+respected the 3-per-2-minute limit and neither ran in a loop. Read-only GETs were
+used for every question that did not require a create.
 
 ## Suite
 
-    python3 -m pytest services/planner    1547 passed, 2 skipped   (+38)
+    python3 -m pytest services/planner    1565 passed, 2 skipped   (+56 over main)
 
-All offline, mocked client, no network. The offline suite is complete and green;
-it is the live acceptance that is blocked.
+All offline with a mocked client, including the multipart wire shape, both
+limiters still applying to a multipart post, retry re-sending identical bytes, and
+a regression guard on the historical 422.

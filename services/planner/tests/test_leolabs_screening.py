@@ -94,34 +94,102 @@ def _run(client, registry, **kw):
 # ---------------------------------------------------------------------------
 
 class TestRequestBody:
-    def test_it_asks_for_the_full_catalog_and_our_own_uncertainty(self):
-        body = build_screening_request(_EPHEMERIS, _THRESHOLDS, "L2669")
-        assert body["screenAgainstAllObjects"] is True
-        assert body["useFileUncertainty"] is True
-        assert body["primaryObject"] == "L2669"
-        assert body["ephemeris"] is _EPHEMERIS
+    """SCRUM-441 fix: multipart form-data with a file upload, not a JSON body."""
 
-    def test_it_carries_the_clear_contract_thresholds(self):
-        body = build_screening_request(_EPHEMERIS, _THRESHOLDS, "L2669")
-        assert body["thresholds"] == {
-            "minProbabilityOfCollision": 1.0e-4,
-            "maxMissDistanceKm": 1.0,
-            "maxMahalanobisDistance": 4.0,
+    def _req(self, **kw):
+        return build_screening_request(_EPHEMERIS, _THRESHOLDS, "L2669", **kw)
+
+    def test_the_ephemeris_is_an_uploaded_file_part(self):
+        req = self._req()
+        assert set(req.files) == {"file"}
+        filename, payload, content_type = req.files["file"]
+        assert filename == "ephemeris.json"
+        assert content_type == "application/json"
+        # Bytes, not a file object: _request retries, and a file object would be
+        # consumed by the first attempt and upload empty on the second.
+        assert isinstance(payload, bytes)
+        assert json.loads(payload.decode("utf-8")) == _EPHEMERIS
+
+    def test_the_form_fields_use_the_confirmed_names(self):
+        assert set(self._req().data) == {
+            "primaryCatalogNumber",
+            "missDistance",
+            "probabilityOfCollision",
+            "mahalanobisDistance",
+            "primaryHardBodyRadius",
         }
 
-    def test_the_hard_body_radius_override_is_15_m(self):
-        """conventions.DEFAULT_COMBINED_HBR_M, deliberately not configurable."""
-        body = build_screening_request(_EPHEMERIS, _THRESHOLDS, "L2669")
-        assert body["hardBodyRadius"] == 15.0
+    def test_the_primary_catalog_number_is_the_primary_object(self):
+        assert self._req().data["primaryCatalogNumber"] == "L2669"
 
-    def test_extra_merges_last_so_a_live_submit_can_correct_a_field(self):
-        """The field names are the open item; correcting one must not need a patch."""
-        body = build_screening_request(
-            _EPHEMERIS, _THRESHOLDS, "L2669",
-            extra={"screenAgainstAllObjects": False, "newField": 7},
-        )
-        assert body["screenAgainstAllObjects"] is False
-        assert body["newField"] == 7
+    def test_miss_distance_is_kilometres_with_no_conversion(self):
+        """The one km field in an otherwise metres API. 1.0 must stay 1.0."""
+        data = self._req().data
+        assert data["missDistance"] == 1.0
+        assert data["missDistance"] != 1000.0      # not metres
+        assert data["missDistance"] <= 100.0       # the API's stated maximum
+
+    def test_probability_of_collision_is_a_string(self):
+        """Typed as a string by the reference, so it is sent as one."""
+        value = self._req().data["probabilityOfCollision"]
+        assert isinstance(value, str)
+        assert float(value) == 1.0e-4
+
+    def test_the_primary_hard_body_radius_is_the_15_m_combined_value(self):
+        data = self._req().data
+        assert data["primaryHardBodyRadius"] == 15.0
+
+    def test_the_secondary_hard_body_radius_is_omitted(self):
+        """Interim decision: each catalog secondary keeps its own radius."""
+        assert "secondaryHardBodyRadius" not in self._req().data
+
+    def test_mahalanobis_distance_carries_our_threshold(self):
+        assert self._req().data["mahalanobisDistance"] == 4.0
+
+    def test_screening_the_whole_catalog_is_expressed_by_omission(self):
+        """There is no screenAgainstAllObjects flag; absence selects it.
+
+        Which means an accidental addition would silently narrow the screen to
+        one secondary rather than failing, so absence is asserted.
+        """
+        data = self._req().data
+        assert "secondaryCatalogNumber" not in data
+        assert "secondaryFile" not in data
+        assert "secondaryFile" not in self._req().files
+
+    def test_using_the_files_own_uncertainty_is_expressed_by_omission(self):
+        """No useFileUncertainty flag either; omitting these selects it.
+
+        Sending any of them would screen against a LeoLabs default instead of the
+        covariance SCRUM-440 put in the file, hiding that covariance floor.
+        """
+        data = self._req().data
+        for field_name in ("radialUncertainty", "inTrackUncertainty",
+                           "crossTrackUncertainty"):
+            assert field_name not in data
+
+    @pytest.mark.parametrize("dead", [
+        "hardBodyRadius",          # the deprecated combined value
+        "primaryObject",           # our old guess
+        "ephemeris",               # the inline body we used to send
+        "screenAgainstAllObjects",
+        "useFileUncertainty",
+        "thresholds",
+    ])
+    def test_none_of_the_rejected_json_era_fields_is_sent(self, dead):
+        """Each of these was in the body LeoLabs rejected. None exists in the API."""
+        assert dead not in self._req().data
+
+    def test_extra_merges_into_the_form_fields_last(self):
+        req = self._req(extra={"mahalanobisDistance": 9.0, "newField": 7})
+        assert req.data["mahalanobisDistance"] == 9.0
+        assert req.data["newField"] == 7
+
+    def test_extra_can_drop_a_field_a_live_submit_rejects(self):
+        """The plan's contingency: if 422 names mahalanobisDistance, drop it."""
+        req = self._req()
+        req.data.pop("mahalanobisDistance")
+        assert "mahalanobisDistance" not in req.data
 
     @pytest.mark.parametrize("bad", [None, {}, {"states": []}, {"frame": "EME2000"}])
     def test_an_ephemeris_without_states_is_refused(self, bad):
@@ -185,13 +253,17 @@ class TestRunScreening:
         assert float(np.linalg.eigvalsh(cov).min()) >= -1e-6
         assert parsed.t_ca_utc
 
-    def test_the_submitted_body_is_the_built_request(self, cdm, registry):
+    def test_it_posts_the_built_multipart_request(self, cdm, registry):
         client = _client([cdm])
         _run(client, registry)
-        body = client.create_screening.call_args.args[0]
-        assert body["screenAgainstAllObjects"] is True
-        assert body["hardBodyRadius"] == 15.0
-        assert body["ephemeris"] is _EPHEMERIS
+        kwargs = client.create_screening.call_args.kwargs
+
+        # Multipart, not JSON: no positional body is passed at all.
+        assert client.create_screening.call_args.args == ()
+        assert set(kwargs) == {"files", "data"}
+        assert kwargs["data"]["primaryCatalogNumber"] == "L2669"
+        assert kwargs["data"]["primaryHardBodyRadius"] == 15.0
+        assert json.loads(kwargs["files"]["file"][1].decode("utf-8")) == _EPHEMERIS
 
     def test_results_are_deduped_to_one_row_per_event(self, cdm, registry):
         """Reissues of one event collapse, the same way the live listing collapses."""
