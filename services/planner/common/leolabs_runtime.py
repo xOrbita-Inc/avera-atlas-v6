@@ -602,6 +602,92 @@ def fetch_leolabs_conjunction_page(
     )
 
 
+# ---------------------------------------------------------------------------
+# Live state vectors for the globe (SCRUM-447)
+# ---------------------------------------------------------------------------
+
+# LeoLabs returns state vectors in metres and metres/second under
+# frames.EME2000. Confirmed against the live API on 2026-09-23 rather than
+# assumed: SWARM C came back with |r| = 6.79e6 and |v| = 7.66e3, which are only
+# sane read as m and m/s. The globe and the shared propagator work in km, so
+# everything crossing this boundary is divided by 1000 exactly once, here.
+_M_PER_KM = 1000.0
+STATE_FRAME = "EME2000"
+
+
+class LeoLabsStateError(LeoLabsError):
+    """An object's state vector was missing or unusable."""
+
+
+def _state_vector_km(state: Dict[str, Any]) -> tuple[List[float], List[float]]:
+    """Pull (r_km, v_km_s) out of one LeoLabs state record.
+
+    Raises LeoLabsStateError rather than returning a half-built vector: a track
+    drawn from a partial state is worse than no track, because it looks real.
+    """
+    frames = (state or {}).get("frames") or {}
+    frame = frames.get(STATE_FRAME) or {}
+    position = frame.get("position")
+    velocity = frame.get("velocity")
+    if not (isinstance(position, (list, tuple)) and len(position) == 3):
+        raise LeoLabsStateError(f"state has no 3-component {STATE_FRAME} position")
+    if not (isinstance(velocity, (list, tuple)) and len(velocity) == 3):
+        raise LeoLabsStateError(f"state has no 3-component {STATE_FRAME} velocity")
+    try:
+        r_km = [float(c) / _M_PER_KM for c in position]
+        v_km_s = [float(c) / _M_PER_KM for c in velocity]
+    except (TypeError, ValueError) as exc:
+        raise LeoLabsStateError(f"state vector is not numeric: {exc}") from exc
+    if not any(r_km):
+        raise LeoLabsStateError("state position is the origin")
+    return r_km, v_km_s
+
+
+def latest_state_km(
+    catalog_number: str,
+    *,
+    client: Optional[LeoLabsClient] = None,
+) -> tuple[List[float], List[float], Optional[str]]:
+    """The object's latest state as (r_km, v_km_s, epoch_utc).
+
+    `states` comes back as a list newest-first; [0] is the latest. Raises
+    LeoLabsStateError when the list is empty or the record is unusable, and
+    propagates LeoLabsError subclasses (including the 403 an unsubscribed object
+    returns) untouched so a caller can tell "no state" from "not allowed".
+    """
+    client = client or get_client()
+    data = client.get_states(str(catalog_number), latest=True)
+    states = (data or {}).get("states") if isinstance(data, dict) else None
+    if not states:
+        raise LeoLabsStateError(f"no states returned for {catalog_number}")
+    record = states[0]
+    r_km, v_km_s = _state_vector_km(record)
+    return r_km, v_km_s, record.get("timestamp")
+
+
+def catalog_for_norad(
+    primary_norad: int,
+    *,
+    client: Optional[LeoLabsClient] = None,
+    registry: Optional[AssetRegistry] = None,
+) -> str:
+    """Our NORAD id to its LeoLabs catalog number, or LeoLabsRuntimeError.
+
+    get_states is keyed on the catalog number, not the NORAD id -- passing the
+    NORAD is a 404 from the API, which is how the SCRUM-447 confirm-live step
+    started. Callers go through this so that mistake cannot be made twice.
+    """
+    client = client or get_client()
+    registry = registry or get_registry(client)
+    catalog = registry.leolabs_for_norad(int(primary_norad))
+    if catalog is None:
+        raise LeoLabsRuntimeError(
+            f"NORAD {primary_norad} is not in the LeoLabs subscribed-objects "
+            f"registry; it cannot be screened on this account."
+        )
+    return catalog
+
+
 def fetch_leolabs_conjunction(
     primary_norad: int,
     *,

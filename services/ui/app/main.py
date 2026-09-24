@@ -18,6 +18,11 @@ from fastapi.templating import Jinja2Templates
 # SCRUM-392: single source of truth for the demo conjunction scenarios.
 from app import demo_presets
 
+# SCRUM-447: the globe's two-body propagator is shared with the planner so both
+# services draw an orbit the same way. The UI image builds from the repository
+# root and copies libs/aps_math/ for this, mirroring the planner image.
+from aps_math.orbits import propagate_two_body
+
 app = FastAPI(title="AVERA-ATLAS Dashboard", version="6.0.0")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
@@ -152,6 +157,44 @@ async def planner_leolabs_conjunctions(request: Request):
     except ValueError:
         return JSONResponse(status_code=502, content={
             "error": f"planner conjunction list returned invalid JSON "
+                     f"(HTTP {resp.status_code})"
+        })
+
+
+@app.get("/api/orbits/live")
+async def get_orbits_live(request: Request):
+    """SCRUM-447: proxy the planner's live globe tracks.
+
+    Relays the upstream status code verbatim, the same as the conjunctions proxy
+    and for the same reason: 404 means the asset is not in the LeoLabs
+    subscription, 422 means the request was bad, and 503 means the feed is off or
+    the asset has no state. A globe drawn empty under a 200 would tell an operator
+    their asset has a clear sky when the truth is that we cannot see.
+
+    /api/orbits keeps serving the scenario globe from the npz artifact; this is
+    the live path, and the two stay separate so switching source cannot silently
+    mix them.
+
+    Timeout matches the conjunctions proxy: this route does that same fetch plus
+    one state call.
+    """
+    try:
+        resp = requests.get(
+            f"{PLANNER_SERVICE_URL}/v1/leolabs/orbits",
+            params=dict(request.query_params),
+            timeout=60,
+        )
+    except requests.exceptions.ConnectionError:
+        return JSONResponse(status_code=503, content={
+            "error": "Planner service unavailable"
+        })
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    try:
+        return JSONResponse(status_code=resp.status_code, content=resp.json())
+    except ValueError:
+        return JSONResponse(status_code=502, content={
+            "error": f"planner globe orbits returned invalid JSON "
                      f"(HTTP {resp.status_code})"
         })
 
@@ -601,42 +644,13 @@ async def get_orbits():
     This is independent of the short-window prop_multi.npz artifact
     and is used exclusively by the 3D globe view.
     """
+    # SCRUM-447: propagate_two_body used to be defined inline here. It now lives in
+    # libs/aps_math/orbits.py so the planner's live-globe route draws its rings with
+    # the same propagator this one does -- two copies could drift and render the
+    # same orbit two ways. Behaviour is unchanged; the function moved.
     STATES_PATH = os.path.join(DATA_DIR, "states_multi.npz.processed")
     if not os.path.exists(STATES_PATH):
         STATES_PATH = os.path.join(DATA_DIR, "states_multi.npz")
-    MU = 398600.4418  # km^3/s^2
-
-    def propagate_two_body(r0, v0, n_steps=90, dt_s=None):
-        # Compute exact orbital period from vis-viva so the track closes perfectly.
-        # T = 2π * sqrt(a³/μ) where a = |r0| for near-circular orbit.
-        a = float(np.linalg.norm(r0))
-        period_s = 2 * np.pi * np.sqrt(a**3 / MU)
-        if dt_s is None:
-            dt_s = period_s / n_steps
-        """Simple two-body RK4 propagation. Returns list of [x,y,z] km."""
-        r = np.array(r0, dtype=float)
-        v = np.array(v0, dtype=float)
-        points = [r.tolist()]
-
-        def accel(r):
-            rmag = np.linalg.norm(r)
-            return -MU / rmag**3 * r
-
-        for _ in range(n_steps):
-            # RK4
-            k1v = accel(r)
-            k1r = v
-            k2v = accel(r + 0.5*dt_s*k1r)
-            k2r = v + 0.5*dt_s*k1v
-            k3v = accel(r + 0.5*dt_s*k2r)
-            k3r = v + 0.5*dt_s*k2v
-            k4v = accel(r + dt_s*k3r)
-            k4r = v + dt_s*k3v
-            r = r + (dt_s/6.0)*(k1r + 2*k2r + 2*k3r + k4r)
-            v = v + (dt_s/6.0)*(k1v + 2*k2v + 2*k3v + k4v)
-            points.append(r.tolist())
-
-        return points
 
     if not os.path.exists(STATES_PATH):
         return JSONResponse(content={"status": "no_data", "asset": [], "objects": {}})

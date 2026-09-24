@@ -71,7 +71,7 @@ services:
     restart: unless-stopped
 
   ui:
-    build: {context: ./services/ui}
+    build: {context: ., dockerfile: services/ui/Dockerfile}   # SCRUM-447: root context for libs/aps_math
     image: avera/ui:v6
     ports: ["8080:8000"]
     environment:
