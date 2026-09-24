@@ -156,6 +156,64 @@ class TestPostBurnCovariance:
         assembled = assessed(report)
         assert assembled.post_maneuver_od["p_post_source"] == "p_pre_plus_p_burn"
 
+    def test_case_2_rotates_p_burn_from_rtn_to_eci_before_summing(self):
+        """SCRUM-428. p_burn_rtn_km2 is RTN, p_pre is ECI; summing them
+        naively would silently produce a frame-inconsistent P_post whenever
+        the burn covariance is non-isotropic and the state is not
+        axis-aligned to ECI. Neither condition holds in this file's shared
+        fixture (_P_BURN is isotropic, a_report()'s r_sat/v_sat are
+        axis-aligned), which is exactly why that fixture cannot exercise
+        this fix -- rotating an isotropic matrix, or rotating at the
+        identity, both leave a matrix unchanged either way. This test uses
+        a deliberately non-isotropic p_burn and a non-axis-aligned state,
+        and checks against a rotation built by hand from the RTN
+        definition, not by calling aps_math.frames, so it verifies the
+        actual physics rather than the module's self-consistency.
+        """
+        r_sat = np.array([6878.0, 500.0, 300.0])
+        v_sat = np.array([-0.05, 7.5, 0.4])
+
+        p_burn_rtn_flat = [
+            4.0e-5, 1.0e-5, 0.0,
+            1.0e-5, 1.0e-5, 0.0,
+            0.0, 0.0, 2.0e-6,
+        ]
+
+        report = a_report()
+        report["post_burn_state"]["r_sat_km"] = r_sat.tolist()
+        report["post_burn_state"]["v_sat_km_s"] = v_sat.tolist()
+        report["post_burn_state"].pop("p_post_km2")
+        report["execution_error"]["p_burn_rtn_km2"] = p_burn_rtn_flat
+
+        p_post = post_burn_covariance_km2(report, _P_PRE)
+
+        # Independent rotation: R = r_hat, N = (r x v)/|r x v|, T = N x R.
+        r_hat = r_sat / np.linalg.norm(r_sat)
+        h = np.cross(r_sat, v_sat)
+        n_hat = h / np.linalg.norm(h)
+        t_hat = np.cross(n_hat, r_hat)
+        rot = np.column_stack([r_hat, t_hat, n_hat])
+
+        p_burn_rtn_matrix = np.array(p_burn_rtn_flat).reshape(3, 3)
+        expected_p_burn_eci = rot @ p_burn_rtn_matrix @ rot.T
+        expected = np.array(_P_PRE).reshape(3, 3) + expected_p_burn_eci
+
+        assert p_post == pytest.approx(expected)
+
+        # Explicitly not the naive, unrotated sum -- the trap this closes.
+        naive = np.array(_P_PRE).reshape(3, 3) + p_burn_rtn_matrix
+        assert not np.allclose(p_post, naive)
+
+    def test_case_2_without_r_sat_v_sat_returns_none_rather_than_guess(self):
+        """SCRUM-428. A covariance this function cannot honestly place in
+        one frame is not a covariance to hand to compute_pc_post."""
+        report = a_report()
+        report["post_burn_state"].pop("p_post_km2")
+        report["post_burn_state"].pop("r_sat_km")
+        report["post_burn_state"].pop("v_sat_km_s")
+
+        assert post_burn_covariance_km2(report, _P_PRE) is None
+
 
 class TestPcPostIsDelegated:
     def test_the_post_maneuver_pc_comes_from_the_scorer(self):
