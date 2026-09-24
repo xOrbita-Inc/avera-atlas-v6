@@ -276,6 +276,10 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
   border-radius:3px;padding:4px 8px;pointer-events:none;max-width:60%}
 /* SCRUM-447 follow-up: the floating control cluster over the globe, bottom-right,
    opposite the bottom-left status line. Hidden with the rest of the globe in 2D. */
+.globe-cov-note{position:absolute;right:10px;bottom:46px;z-index:6;font-size:9px;
+  letter-spacing:0.5px;color:var(--text-dim);background:rgba(0,0,0,0.55);
+  border:1px solid var(--border);border-radius:3px;padding:4px 8px;pointer-events:none;
+  max-width:60%;text-align:right}
 .globe-controls{display:none;position:absolute;right:10px;bottom:10px;z-index:6;
   gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end;max-width:70%;
   background:rgba(0,0,0,0.55);border:1px solid var(--border);border-radius:4px;padding:6px 8px}
@@ -556,10 +560,17 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
         <button type="button" class="globe-toggle on" id="globeNominalBtn"
           onclick="toggleGlobeNominal()"
           title="Show conjunctions below the watch line as a dim haze">NOMINAL</button>
+        <button type="button" class="globe-toggle" id="globeCovBtn"
+          onclick="toggleGlobeCovariance()"
+          title="Draw each object's 3-sigma CDM position uncertainty">COVARIANCE</button>
         <button type="button" class="globe-toggle" id="globeFocusWorstBtn"
           onclick="focusWorstConjunction()"
           title="Frame the highest-Pc conjunction">FOCUS WORST</button>
       </div>
+      <!-- SCRUM-448: while ellipsoids are drawn, the globe states what they are
+           and at what scale. An uncertainty volume with no stated scale is not
+           an honest thing to put on an operator's screen. -->
+      <div id="globeCovNote" class="globe-cov-note" style="display:none"></div>
     </div>
     <div class="risk-bar">
       <div class="label">Pc</div>
@@ -3536,6 +3547,7 @@ async function fetchLiveGlobeOrbits(){
     object_tracks:data.object_tracks,
     risk:data.risk,
     objects:data.objects,
+    asset:data.asset,
     worst_object:data.worst_object,
     live:true
   });
@@ -3572,6 +3584,30 @@ let assetLabelSprite=null;
 // same pattern globeNominalParts uses for the haze.
 let globeShowLabels=true;
 let globeLabelParts=[];
+
+// SCRUM-448 covariance ellipsoids. Default off: they are large, and the globe
+// should open readable.
+//
+// SIGMA_MULTIPLIER 3 is the conventional 3-sigma (~99.7%) volume an operator
+// expects when a covariance is drawn.
+//
+// EXAGGERATION is 1.0 -- these are drawn at TRUE scale, and that is a
+// measurement, not a preference. Real LeoLabs conjunction covariances for SWARM C
+// run from 5.8 km to 1,569 km of along-track one-sigma, so a median 3-sigma major
+// axis is already ~0.07 scene units (about four times a marker) and the worst is
+// ~0.74 Earth radii. There is nothing to exaggerate; scaling these up would bury
+// the globe. The constant stays named and the caption reads the scale off it, so
+// if a future dataset really does need magnification the number changes in one
+// place and the note stops claiming true scale on its own.
+const GLOBE_COV_SIGMA_MULTIPLIER=3;
+const GLOBE_COV_EXAGGERATION=1.0;
+// Purely numerical: a principal axis can be metres against a neighbour of
+// megametres, and a literally zero scale gives a non-invertible transform. This
+// floor is ~6 m in scene units, far below anything visible, so it changes the
+// picture nowhere while keeping the matrix well-formed.
+const GLOBE_COV_MIN_SCALE=1e-6;
+let globeShowCovariance=false;
+let globeCovParts=[];
 // The worst conjunction, kept from the payload so FOCUS WORST does not have to
 // re-derive which object that was.
 let globeWorstNorad=null;
@@ -3586,6 +3622,79 @@ function toggleGlobeAutoRotate(){
   document.getElementById('globeRotateBtn')?.classList.toggle('on',globeControls.autoRotate);
   // The render loop already calls globeControls.update() every frame, so there is
   // nothing else to drive here.
+}
+
+function toggleGlobeCovariance(){
+  globeShowCovariance=!globeShowCovariance;
+  document.getElementById('globeCovBtn')?.classList.toggle('on',globeShowCovariance);
+  globeCovParts.forEach(m=>{ if(m) m.visible=globeShowCovariance; });
+  renderGlobeCovNote();
+}
+
+// The caption reads the scale off the constants rather than asserting one, so it
+// cannot drift out of step with what is actually drawn.
+function renderGlobeCovNote(){
+  const el=document.getElementById('globeCovNote');
+  if(!el)return;
+  if(!globeShowCovariance||globeCovParts.length===0){
+    el.style.display='none';
+    return;
+  }
+  const scale=(GLOBE_COV_EXAGGERATION===1)
+    ? 'true scale'
+    : ('not to scale \u2014 \u00d7'+GLOBE_COV_EXAGGERATION);
+  el.textContent=GLOBE_COV_SIGMA_MULTIPLIER+'\u03c3 CDM position uncertainty \u2014 '+scale;
+  el.style.display='block';
+}
+
+// One ellipsoid from a cov block: a unit sphere scaled along the covariance's
+// principal axes and oriented by them. Parented to the object's marker, so it
+// follows the marker every frame for free and inherits the marker's visibility --
+// which is exactly the rule wanted for the NOMINAL haze: a nominal object's
+// ellipsoid disappears with its object, while COVARIANCE governs its own .visible.
+function buildCovEllipsoid(cov,colorHex,marker){
+  if(!cov||!Array.isArray(cov.axes)||!Array.isArray(cov.sigmas_m))return null;
+  if(cov.axes.length!==3||cov.sigmas_m.length!==3)return null;
+  if(!cov.sigmas_m.every(v=>typeof v==='number'&&isFinite(v)&&v>=0))return null;
+
+  // Covariance axes are ECI. eciToScene is a rotation plus a uniform scale, so
+  // running a direction through it and normalising gives the same axis in scene
+  // space -- the axes must not be used raw, or the ellipsoid is oriented in the
+  // wrong frame while looking perfectly plausible.
+  const axes=cov.axes.map(a=>eciToScene(a[0],a[1],a[2]).normalize());
+  const basis=new THREE.Matrix4().makeBasis(axes[0],axes[1],axes[2]);
+
+  const mesh=new THREE.Mesh(
+    new THREE.SphereGeometry(1,16,12),
+    new THREE.MeshBasicMaterial({
+      color:colorHex,transparent:true,opacity:0.18,
+      depthWrite:false,side:THREE.DoubleSide
+    })
+  );
+  mesh.quaternion.setFromRotationMatrix(basis);
+  // sigmas are metres; scene units are Earth radii.
+  const k=GLOBE_COV_SIGMA_MULTIPLIER*GLOBE_COV_EXAGGERATION/(EARTH_RADIUS_KM*1000);
+  mesh.scale.set(
+    Math.max(cov.sigmas_m[0]*k,GLOBE_COV_MIN_SCALE),
+    Math.max(cov.sigmas_m[1]*k,GLOBE_COV_MIN_SCALE),
+    Math.max(cov.sigmas_m[2]*k,GLOBE_COV_MIN_SCALE)
+  );
+  mesh.visible=globeShowCovariance;
+  mesh.renderOrder=1;
+  marker.add(mesh);      // rides the marker: position, and visibility, inherited
+  return mesh;
+}
+
+// Largest one-sigma extent in metres, which is what "the uncertainty" means when
+// a single number is wanted for a wildly anisotropic ellipsoid.
+function covSigmaSummary(cov){
+  if(!cov||!Array.isArray(cov.sigmas_m))return null;
+  const s=cov.sigmas_m;
+  const fmt=v=>v>=1000?((v/1000).toFixed(1)+' km'):(v.toFixed(0)+' m');
+  return {
+    major:s[0], text:'1\u03c3 '+s.map(fmt).join(' / '),
+    majorText:fmt(s[0])
+  };
 }
 
 function toggleGlobeLabels(){
@@ -3628,7 +3737,11 @@ function focusWorstConjunction(){
   }
   globeFocusOnConj(conj);
   const label=conj.object_id||('NORAD '+globeWorstNorad);
-  setGlobeMessage('Focused '+label+(conj.risk_level?(' — '+conj.risk_level):''));
+  // SCRUM-448: the true uncertainty in metres, not the exaggerated drawing, so
+  // the number an operator reads is the measurement.
+  const sig=covSigmaSummary(meta.cov);
+  setGlobeMessage('Focused '+label+(conj.risk_level?(' — '+conj.risk_level):'')
+    +(sig?(' — '+sig.text):''));
 }
 
 function toggleGlobeNominal(){
@@ -3649,6 +3762,13 @@ function clearGlobeTracks(){
   objectTrackLines=[];debrisMarkers=[];debrisLabelSprites=[];
   debrisTrackPoints=[];debrisMarkerOffsets=[];globeNominalParts=[];
   globeLabelParts=[];
+  // Object ellipsoids ride markers that are themselves removed here, but the
+  // ASSET marker is persistent -- it is built once in initGlobe and never
+  // removed -- so its ellipsoid would survive a refetch and a second one would
+  // be added beside it, invisible to the toggle. Detach explicitly rather than
+  // relying on the parent going away.
+  globeCovParts.forEach(m=>{ if(m&&m.parent) m.parent.remove(m); });
+  globeCovParts=[];
   globeWorstIndex=-1;globeWorstNorad=null;globeWorstMeta=null;globeWorstTrackEci=null;
   assetTrackLine=null;
 }
@@ -3674,6 +3794,11 @@ function updateGlobeOrbits(orbits){
     markerAnimT=0;
     // The asset is always labelled: it is the one object on the globe the
     // operator is responsible for, so it should never be the unlabelled dot.
+    // SCRUM-448: the asset's own uncertainty, from the worst row's SAT1 block.
+    if(orbits.asset&&orbits.asset.cov&&assetMarker){
+      const ell=buildCovEllipsoid(orbits.asset.cov,0x4ff8e8,assetMarker);
+      if(ell) globeCovParts.push(ell);
+    }
     if(orbits.live&&assetTrackPoints.length>0){
       assetLabelSprite=makeTextSprite(liveAssetName||('NORAD '+liveAssetNorad),'#4ff8e8');
       assetLabelSprite.position.copy(assetTrackPoints[0]).multiplyScalar(1.10);
@@ -3726,6 +3851,14 @@ function updateGlobeOrbits(orbits){
         line.visible=globeShowNominal;
         m.visible=globeShowNominal;
       }
+      // SCRUM-448: the object's real CDM position uncertainty. Absent cov means
+      // no ellipsoid -- the object is still drawn, it just makes no claim about
+      // its uncertainty, which is the honest rendering of "we were not told".
+      const objCov=(orbits.objects&&orbits.objects[objId]&&orbits.objects[objId].cov)||null;
+      if(objCov){
+        const ell=buildCovEllipsoid(objCov,col,m);
+        if(ell) globeCovParts.push(ell);
+      }
       // Labels on the asset and on RED/AMBER only. A label per object on a dense
       // asset is an unreadable wall of text, and the objects below the watch line
       // are not the ones being triaged.
@@ -3756,6 +3889,10 @@ function updateGlobeOrbits(orbits){
       }
     });
   }
+
+  // A refetch rebuilds every ellipsoid, so the caption follows the new set and
+  // the meshes were created already honouring globeShowCovariance.
+  renderGlobeCovNote();
 
   // Dashed closest-approach link from the asset to the worst conjunction. Drawn
   // once here and re-pointed each frame in the globe loop, since both ends move.
