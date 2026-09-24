@@ -51,6 +51,167 @@ def _clean_caches():
 
 
 # ---------------------------------------------------------------------------
+# SCRUM-450: the short-TTL conjunction-window cache
+# ---------------------------------------------------------------------------
+
+class TestCdmWindowCache:
+    """The fetch is ~13 to 20 s, so the question is only how often it is made.
+
+    Every test here counts client calls. The autouse _clean_caches fixture above
+    resets the cache around each one, so nothing leaks between them.
+    """
+
+    @staticmethod
+    def _client(cdms):
+        client = MagicMock()
+        client.search_conjunction_cdms.return_value = cdms
+        return client
+
+    def _fetch(self, client, registry, **kw):
+        return leolabs_runtime.fetch_leolabs_conjunctions(
+            36508, client=client, registry=registry, now=_NOW, **kw
+        )
+
+    def test_a_second_fetch_in_the_ttl_does_not_call_the_client_again(
+        self, cdm, registry
+    ):
+        client = self._client([cdm])
+        first = self._fetch(client, registry)
+        second = self._fetch(client, registry)
+
+        assert client.search_conjunction_cdms.call_count == 1
+        # And the caller is not shortchanged for the hit.
+        assert len(second) == len(first) == 1
+        assert second[0].primary.designator == first[0].primary.designator
+
+    def test_the_cached_result_matches_the_uncached_one_exactly(
+        self, cdm, registry
+    ):
+        """Nothing downstream may notice whether a fetch was served from cache."""
+        client = self._client([cdm])
+        uncached = self._fetch(client, registry)
+        leolabs_runtime.reset_caches()
+        client2 = self._client([cdm])
+        fresh = self._fetch(client2, registry)
+        cached = self._fetch(client2, registry)   # a hit
+
+        assert client2.search_conjunction_cdms.call_count == 1
+        for a, b in ((uncached, fresh), (fresh, cached)):
+            assert [p.provenance.get("cdm_id") for p in a] == \
+                   [p.provenance.get("cdm_id") for p in b]
+            assert [p.t_ca_utc for p in a] == [p.t_ca_utc for p in b]
+
+    def test_a_different_asset_is_a_miss(self, cdm, registry):
+        two_assets = AssetRegistry.from_objects([
+            {"catalogNumber": "L2669", "noradCatalogNumber": 36508, "name": "A"},
+            {"catalogNumber": "L9999", "noradCatalogNumber": 44444, "name": "B"},
+        ])
+        client = self._client([cdm])
+        leolabs_runtime.fetch_leolabs_conjunctions(
+            36508, client=client, registry=two_assets, now=_NOW)
+        leolabs_runtime.fetch_leolabs_conjunctions(
+            44444, client=client, registry=two_assets, now=_NOW)
+
+        assert client.search_conjunction_cdms.call_count == 2
+
+    @pytest.mark.parametrize("kw", [
+        {"lookahead_days": 3},
+        {"lookback_days": 2},
+    ])
+    def test_a_different_window_in_days_is_a_miss(self, cdm, registry, kw):
+        client = self._client([cdm])
+        self._fetch(client, registry)
+        self._fetch(client, registry, **kw)
+
+        assert client.search_conjunction_cdms.call_count == 2
+
+    def test_a_different_volume_filter_is_a_miss(self, cdm, registry):
+        """The evaluate path fetches unfiltered and the listing path does not.
+
+        They are genuinely different result sets and must never be served to each
+        other, so the filters are part of the key.
+        """
+        client = self._client([cdm])
+        leolabs_runtime.fetch_leolabs_conjunctions(
+            36508, client=client, registry=registry, now=_NOW)          # no filter
+        leolabs_runtime.fetch_leolabs_conjunction_page(
+            36508, client=client, registry=registry, now=_NOW,
+            volume_filters=dict(leolabs_runtime.DEFAULT_REPORTING_VOLUME_M),
+        )                                                                # filtered
+        assert client.search_conjunction_cdms.call_count == 2
+
+        # A narrower volume than the default is a third distinct entry.
+        leolabs_runtime.fetch_leolabs_conjunction_page(
+            36508, client=client, registry=registry, now=_NOW,
+            volume_filters={"maxRelativePositionR": 500.0},
+        )
+        assert client.search_conjunction_cdms.call_count == 3
+
+    def test_the_two_paths_share_an_entry_when_their_filters_match(
+        self, cdm, registry
+    ):
+        """Same asset, window and filters is one window, fetched once."""
+        client = self._client([cdm])
+        leolabs_runtime.fetch_leolabs_conjunctions(
+            36508, client=client, registry=registry, now=_NOW)
+        leolabs_runtime.fetch_leolabs_conjunction_page(
+            36508, client=client, registry=registry, now=_NOW,
+            volume_filters={},                      # also unfiltered
+        )
+        assert client.search_conjunction_cdms.call_count == 1
+
+    def test_the_entry_expires_after_the_ttl(self, cdm, registry, monkeypatch):
+        """Driven by moving the clock, not by sleeping through the TTL."""
+        client = self._client([cdm])
+        fake_now = {"t": 1000.0}
+        monkeypatch.setattr(
+            leolabs_runtime.time, "monotonic", lambda: fake_now["t"])
+
+        self._fetch(client, registry)
+        assert client.search_conjunction_cdms.call_count == 1
+
+        # Just inside the TTL: still a hit.
+        fake_now["t"] += leolabs_runtime._CDM_CACHE_TTL_SECONDS - 0.01
+        self._fetch(client, registry)
+        assert client.search_conjunction_cdms.call_count == 1
+
+        # Past it: fetched again.
+        fake_now["t"] += 0.02
+        self._fetch(client, registry)
+        assert client.search_conjunction_cdms.call_count == 2
+
+    def test_reset_caches_empties_it(self, cdm, registry):
+        client = self._client([cdm])
+        self._fetch(client, registry)
+        assert leolabs_runtime._cdm_cache
+
+        leolabs_runtime.reset_caches()
+        assert leolabs_runtime._cdm_cache == {}
+
+        self._fetch(client, registry)
+        assert client.search_conjunction_cdms.call_count == 2
+
+    def test_a_cache_hit_still_sends_the_right_request_when_it_does_fetch(
+        self, cdm, registry
+    ):
+        """The cached fetch is the same request it always was."""
+        client = self._client([cdm])
+        self._fetch(client, registry)
+
+        kwargs = client.search_conjunction_cdms.call_args.kwargs
+        assert kwargs["object1"] == "L2669"
+        assert kwargs["cdm_source"] == "LeoLabs"
+        assert kwargs["min_tca"] < kwargs["max_tca"]
+
+    def test_an_empty_window_is_cached_too(self, registry):
+        """Otherwise a quiet asset pays the full fetch on every selection."""
+        client = self._client([])
+        assert self._fetch(client, registry) == []
+        assert self._fetch(client, registry) == []
+        assert client.search_conjunction_cdms.call_count == 1
+
+
+# ---------------------------------------------------------------------------
 # fetch_leolabs_conjunction
 # ---------------------------------------------------------------------------
 
