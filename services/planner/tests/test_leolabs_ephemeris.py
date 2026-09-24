@@ -32,7 +32,7 @@ from common.leolabs_ephemeris import (
     FRAME,
     LeoLabsEphemerisError,
     build_screening_ephemeris,
-    covariance_6x6_from_position_3x3,
+    seed_post_burn_covariance_km2,
 )
 from common.orbit_propagation import (
     MU_EARTH,
@@ -117,11 +117,12 @@ class TestUnits:
         first = _build()["states"][0]
         assert first["velocity"] == pytest.approx([c * 1000.0 for c in _V_KM_S])
 
-    def test_the_covariance_position_block_is_p_post_times_1e6(self):
+    def test_the_seed_covariance_position_block_is_p_post_times_1e6(self):
+        """The FIRST state is the seed, since Phi(0) is the identity."""
         cov = np.array(_build()["states"][0]["covariance"], dtype=float)
-        assert np.allclose(cov[:3, :3], _P_KM2 * 1.0e6, rtol=1e-12)
+        assert np.allclose(cov[:3, :3], _P_KM2 * 1.0e6, rtol=1e-9, atol=1e-6)
         # Sanity in the units a human reads: 0.04 km^2 is a 200 m one-sigma.
-        assert math.isclose(math.sqrt(cov[0][0]), 200.0, rel_tol=1e-9)
+        assert math.isclose(math.sqrt(cov[0][0]), 200.0, rel_tol=1e-6)
 
     def test_positions_are_metres_scale_not_kilometres(self):
         """The conversion is the likeliest bug, so check the magnitude directly."""
@@ -140,23 +141,44 @@ class TestUnits:
 # ---------------------------------------------------------------------------
 
 class TestCovarianceBlock:
-    def test_the_velocity_block_and_cross_terms_are_zero(self):
-        """We have no post-burn velocity covariance, so we assert none."""
-        cov = np.array(covariance_6x6_from_position_3x3(_P_KM2), dtype=float)
+    def test_the_seed_velocity_block_is_zero_without_a_burn(self):
+        """No burn, no execution error -- so no velocity uncertainty asserted."""
+        cov = np.array(
+            seed_post_burn_covariance_km2(_P_KM2, [0.0, 0.0, 0.0], 0.0, 0.0),
+            dtype=float)
         assert np.all(cov[3:, 3:] == 0.0)
         assert np.all(cov[:3, 3:] == 0.0)
         assert np.all(cov[3:, :3] == 0.0)
 
     def test_the_result_is_symmetric_and_psd(self):
-        cov = np.array(covariance_6x6_from_position_3x3(_P_KM2), dtype=float)
+        cov = np.array(
+            seed_post_burn_covariance_km2(_P_KM2, [0.0, 0.0, 0.0], 0.0, 0.0),
+            dtype=float)
         assert np.allclose(cov, cov.T)
         assert float(np.linalg.eigvalsh(cov).min()) >= -1e-9
 
-    def test_every_state_carries_the_same_covariance(self):
-        """Documented limitation: uncertainty does not grow across the horizon."""
+    def test_the_covariance_grows_across_the_horizon(self):
+        """SCRUM-452 replaced the constant floor this once asserted.
+
+        Real uncertainty fans out, most of it along-track. A repeated covariance
+        was the thing that made the screen falsely confident, so growth is now
+        the property under test rather than sameness.
+        """
+        states = _build(horizon_hours=24.0, step_s=3600.0,
+                        dv_eci_km_s=[0.0, 1.0e-4, 0.0],
+                        execution_error_magnitude_fraction=0.02,
+                        execution_error_pointing_sigma_rad=0.0174532925)["states"]
+        traces = [np.trace(np.array(st["covariance"], dtype=float)[:3, :3])
+                  for st in states]
+        assert traces[-1] > traces[0]
+        # Monotone across the window, not merely bigger at the end.
+        assert all(b >= a * 0.999 for a, b in zip(traces, traces[1:]))
+        # And materially bigger: this is the fan-out the floor did not have.
+        assert traces[-1] > 100.0 * traces[0]
+
+    def test_states_no_longer_share_one_covariance_object(self):
         states = _build()["states"]
-        first = states[0]["covariance"]
-        assert all(s["covariance"] == first for s in states)
+        assert states[-1]["covariance"] != states[0]["covariance"]
 
 
 # ---------------------------------------------------------------------------

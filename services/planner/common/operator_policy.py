@@ -201,6 +201,20 @@ class OperatorPolicy:
     # LeoLabs API maximum of 100 km.
     screening_volume_km: float          = 50.0
 
+    # SCRUM-452: burn execution error, the Gates model, seeding the post-burn
+    # velocity covariance the screening ephemeris grows from.
+    #
+    # execution_error_magnitude_fraction is the magnitude 1-sigma as a fraction
+    # of the commanded delta-v; execution_error_pointing_sigma_rad is the
+    # pointing 1-sigma half-angle. The defaults below -- 2% and 1 degree -- are
+    # typical small-thruster values and are a STARTING POINT FOR JOHN TO CONFIRM,
+    # not a measured property of this spacecraft. They matter: over a 72 h
+    # horizon a velocity 1-sigma integrates into an along-track position 1-sigma
+    # of order sigma_v * t, so these two numbers dominate the uncertainty the
+    # secondary screen is judged against.
+    execution_error_magnitude_fraction: float   = 0.02
+    execution_error_pointing_sigma_rad: float   = 0.017453292519943295  # 1 degree
+
     # -- Tier 1: maneuver constraints (configurable) ----------------------
     max_dv_per_event_ms: float          = 2.0
     max_maneuvers_per_week: int         = 3
@@ -256,6 +270,10 @@ class OperatorPolicy:
                 f"screening_volume_km must be > 0 and <= "
                 f"{SCREENING_VOLUME_MAX_KM} (the LeoLabs API maximum)"
             )
+        if self.execution_error_magnitude_fraction < 0:
+            raise ValueError("execution_error_magnitude_fraction must be >= 0")
+        if self.execution_error_pointing_sigma_rad < 0:
+            raise ValueError("execution_error_pointing_sigma_rad must be >= 0")
         if self.screening_volume_km < self.min_miss_distance_km:
             raise ValueError(
                 "screening_volume_km must be >= min_miss_distance_km: a screen "
@@ -338,6 +356,10 @@ class OperatorPolicy:
             min_miss_distance_km       = float(rt.get("min_miss_distance_km",  1.0)),
             mahalanobis_screen_threshold = float(rt.get("mahalanobis_screen_threshold", 4.0)),
             screening_volume_km        = float(rt.get("screening_volume_km",    50.0)),
+            execution_error_magnitude_fraction = float(
+                rt.get("execution_error_magnitude_fraction", 0.02)),
+            execution_error_pointing_sigma_rad = float(
+                rt.get("execution_error_pointing_sigma_rad", 0.017453292519943295)),
             max_dv_per_event_ms        = float(mc.get("max_dv_per_event_ms",   2.0)),
             max_maneuvers_per_week     = int(mc.get("max_maneuvers_per_week",   3)),
             min_hours_before_tca       = float(mc.get("min_hours_before_tca",  4.0)),
@@ -456,6 +478,8 @@ class OperatorPolicy:
             "pc_monitor_threshold":         self.pc_monitor_threshold,
             "min_miss_distance_km":         self.min_miss_distance_km,
             "screening_volume_km":          self.screening_volume_km,
+            "execution_error_magnitude_fraction": self.execution_error_magnitude_fraction,
+            "execution_error_pointing_sigma_rad": self.execution_error_pointing_sigma_rad,
             "mahalanobis_screen_threshold": self.mahalanobis_screen_threshold,
             "max_dv_per_event_ms":          self.max_dv_per_event_ms,
             "max_maneuvers_per_week":       self.max_maneuvers_per_week,

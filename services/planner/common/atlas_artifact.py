@@ -321,6 +321,7 @@ def _run_on_demand_secondary_check(
     cap: SatelliteCapability,
     primary_catalog_number: Optional[str],
     screening_sink: Optional[Any] = None,
+    dv_eci_km_s: Optional[Any] = None,
 ) -> "SecondaryConflictCheck":
     """SCRUM-442: the real secondary screen, against the live LeoLabs catalog.
 
@@ -338,10 +339,10 @@ def _run_on_demand_secondary_check(
     only safe because every failure mode in run_screening raises rather than
     returning empty, which SCRUM-441 asserts as a property.
 
-    Covariance caveat: the submitted covariance is SCRUM-440's constant
-    position-only floor, which does not grow across the 72 h horizon. It is a
-    floor, not a model; the honest growth model is the tracked fast-follow and is
-    deliberately not implemented here.
+    The submitted covariance is the real post-burn one (SCRUM-452): the primary's
+    own post-burn position covariance seeded with the burn execution error as a
+    velocity block, grown along the trajectory by the state transition matrix of
+    the same J2 dynamics the states were generated with.
     """
     from common.leolabs_ephemeris import LeoLabsEphemerisError, build_screening_ephemeris
     from common.leolabs_screening import (
@@ -369,7 +370,12 @@ def _run_on_demand_secondary_check(
 
     try:
         ephemeris = build_screening_ephemeris(
-            screening_epoch_utc, r_post_km, v_post_km_s, p_post_eci_km2
+            screening_epoch_utc, r_post_km, v_post_km_s, p_post_eci_km2,
+            dv_eci_km_s=dv_eci_km_s,
+            execution_error_magnitude_fraction=(
+                policy.execution_error_magnitude_fraction),
+            execution_error_pointing_sigma_rad=(
+                policy.execution_error_pointing_sigma_rad),
         )
     except (LeoLabsEphemerisError, Exception) as exc:
         return _screen_failed_check(f"ephemeris could not be built: {exc}")
@@ -403,8 +409,7 @@ def _run_on_demand_secondary_check(
             f"(Pc >= {policy.pc_maneuver_threshold:g}, miss < "
             f"{policy.min_miss_distance_km:g} km, or Mahalanobis <= "
             f"{policy.mahalanobis_screen_threshold:g}). Screening id "
-            f"{result.screening_id}. Submitted covariance is a constant "
-            f"position-only floor; the growth model is a tracked fast-follow."
+            f"{result.screening_id}."
         )
     else:
         limbs = sorted({limb for b in verdict.breaches for limb in b["limbs"]})
@@ -412,9 +417,7 @@ def _run_on_demand_secondary_check(
             f"On-demand secondary screen NOT CLEAR: {len(verdict.breaches)} of "
             f"{verdict.evaluated} returned conjunction(s) breach the clear "
             f"contract on {', '.join(limbs)}. MAF requires M4 safe hold. "
-            f"Screening id {result.screening_id}. Submitted covariance is a "
-            f"constant position-only floor; the growth model is a tracked "
-            f"fast-follow."
+            f"Screening id {result.screening_id}."
         )
 
     return SecondaryConflictCheck(
@@ -1184,6 +1187,7 @@ def build_atlas_artifact(
             cap=cap,
             primary_catalog_number=primary_catalog_number,
             screening_sink=screening_sink,
+            dv_eci_km_s=getattr(scoring, "dv_eci_km_s", None),
         )
     else:
         secondary = _deferred_secondary_check()
