@@ -1677,7 +1677,28 @@ function autoEvaluateSelectedOrFirstPlannable(){
   if(idx>=0)evaluateConjunction(rows[idx],idx);
 }
 
+// SCRUM-449: an evaluate is a long round-trip -- a live one re-fetches the whole
+// LeoLabs window, measured at ~13 s -- and several can be in flight at once,
+// because autoEvaluateSelectedOrFirstPlannable fires one for the worst row after
+// every fetch and on every setView. Without ordering, whichever response lands
+// last repaints the panel, so a stale worst-row evaluate would overwrite the row
+// the operator actually clicked. These two make the latest selection win instead
+// of the latest response.
+let evalSeq = 0;          // monotonic; only the newest evaluate may paint
+let evalAbort = null;     // in-flight controller, cancelled when superseded
+
 async function evaluateConjunction(conj,idx){
+  // Claim this evaluate as the current one before anything else. Every await
+  // below re-checks it, so an older call that is still in flight can no longer
+  // touch the UI once this line has run.
+  const seq = ++evalSeq;
+  // Cancel the previous request. The seq guard alone already prevents a stale
+  // response from painting; aborting additionally frees the browser's connection
+  // so the new evaluate is not queued behind a reply nobody wants any more.
+  if(evalAbort) evalAbort.abort();
+  evalAbort = new AbortController();
+  const signal = evalAbort.signal;
+
   panX=0;panY=0;zoomLevel=2.5;
   document.getElementById('plannerDetails').innerHTML='<div class="empty-state"><span class="spinner"></span>Evaluating conjunction...</div>';
   document.getElementById('candidatesBody').innerHTML='<tr><td colspan="4" class="empty-state"><span class="spinner"></span>Planning...</td></tr>';
@@ -1735,9 +1756,19 @@ async function evaluateConjunction(conj,idx){
   updatePayloadModalIfOpen();
   let resp, result;
   try{
-    resp=await fetch('/api/planner/evaluate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)});
+    resp=await fetch('/api/planner/evaluate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request),signal:signal});
+    // A newer selection was made while this was in flight: it owns the panel now.
+    if(seq!==evalSeq) return;
     try{result=await resp.json();}catch(_){result={};}
-  }catch(e){showEvaluateError('planner unreachable: '+e.message);return;}
+    if(seq!==evalSeq) return;
+  }catch(e){
+    // A request cancelled because the operator moved on is not a failure, and
+    // must never surface as EVALUATE FAILED.
+    if(e&&e.name==='AbortError') return;
+    // Nor may a stale failure repaint over a newer selection.
+    if(seq!==evalSeq) return;
+    showEvaluateError('planner unreachable: '+e.message);return;
+  }
   if(resp.status===404&&live){
     // SCRUM-422 returns 404 when the selector matches nothing, rather than
     // silently scoring a different conjunction. The row is stale, so say so and
