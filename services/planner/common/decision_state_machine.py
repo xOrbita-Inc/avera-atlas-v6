@@ -380,6 +380,13 @@ class GuardInputs:
     # deferred means the check is out of scope for this build, so it is omitted
     # from the staging AND rather than failing it.
     secondary_screen_deferred: bool = False
+    # SCRUM-456: the screen is running in the background and has not resolved.
+    # Distinct from both of the above. Not clear, so guard_secondary_clear fails
+    # and the M1 to M2 staging AND fails -- a pending screen cannot authorize a
+    # maneuver. Not an escalation either: the M1 to M4 clause fires only on a
+    # *performed* check that came back not clear, and pending is not performed, so
+    # the decision is held provisional rather than safeheld.
+    secondary_screen_pending: bool = False
 
     # -- envelope, section 4.1 ----------------------------------------------
     authority_level: Optional[str] = None

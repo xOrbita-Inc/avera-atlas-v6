@@ -153,7 +153,11 @@ _cdm_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
 
 
 def reset_caches() -> None:
-    """Drop the cached client, registry, probe result and CDM windows. For tests."""
+    """Drop the cached client, registry, probe result, CDM windows and screens.
+
+    For tests. The SCRUM-456 async screen store is cleared here too, so a test
+    cannot inherit a resolved screen from a previous one and read it as clear.
+    """
     global _client, _registry, _last_fetch_utc
     global _last_probe_monotonic, _last_probe_result
     with _lock:
@@ -163,6 +167,14 @@ def reset_caches() -> None:
         _last_probe_monotonic = None
         _last_probe_result = None
         _cdm_cache.clear()
+    # Outside the lock: the store has its own, and holding both invites a cycle.
+    # Imported late because secondary_screen_async reaches the planner's artifact
+    # path, which imports this module.
+    try:
+        from common.secondary_screen_async import reset_store
+        reset_store()
+    except Exception:
+        pass
 
 
 def _our_norads() -> Optional[Set[int]]:

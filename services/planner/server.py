@@ -2357,6 +2357,10 @@ async def post_evaluate(request: Request):
                 p_post_eci_km2=_p_post,
                 primary_catalog_number=_screen_catalog,
                 screening_sink=_capture_screening,
+                # SCRUM-456: the screen runs in the background, so the sink above
+                # fires only on the inline path. The seed provenance goes onto the
+                # store entry instead, where the poll endpoint reports it.
+                p_post_source=_p_post_source,
             )
             result["atlas_artifact"] = artifact.to_dict()
             # Read once: both the decision-log block and the SCRUM-379 block
@@ -2503,3 +2507,41 @@ async def post_evaluate_batch(request: Request):
             status_code=500,
             content=error_response("Internal error: " + str(exc)),
         )
+
+
+# ---------------------------------------------------------------------------
+# SCRUM-456: the asynchronous secondary screen
+# ---------------------------------------------------------------------------
+
+@svc.get("/v1/secondary-screen/{job_id}")
+async def get_secondary_screen(job_id: str):
+    """Poll one asynchronous on-demand secondary screen.
+
+    Evaluate starts the screen in the background and returns the burn decision
+    immediately with the secondary check PENDING and this job id (SCRUM-456),
+    because the screen takes 30 s to 2 min and the dashboard's evaluate call times
+    out at 60 s. This endpoint is read-only and does no LeoLabs work: it reports
+    what the worker has written into the process-local store.
+
+    Status is one of pending, clear, not_clear, error. `clear` is a derived
+    boolean and is True for exactly one of those, so a pending or errored screen
+    can never be read as a passed screen. A screen that errored, timed out, was
+    rate-limited or had no access reports error, which is NOT CLEAR and escalates
+    exactly as the inline SCRUM-442 screen did.
+
+    404 for an unknown or evicted job id. That is also not clear: a caller that
+    cannot find its screen has not been told the screen passed, and the decision
+    still carries the pending check, which fails closed.
+    """
+    from common.secondary_screen_async import entry_to_dict, get_entry
+
+    entry = get_entry(job_id)
+    if entry is None:
+        return JSONResponse(
+            status_code=404,
+            content=error_response(
+                f"no secondary screen with id {job_id!r}; it never existed or has "
+                f"been evicted. This is NOT a clear screen."
+            ),
+        )
+    return JSONResponse(status_code=200, content=entry_to_dict(entry))

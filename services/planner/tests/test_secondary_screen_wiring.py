@@ -357,6 +357,10 @@ class TestScreenIsOnlyRunWhenItIsNeeded:
             r_post_km=_R_POST, v_post_km_s=_V_POST,
             secondary_screen_enabled=True,
             p_post_eci_km2=_P_POST, primary_catalog_number="L2669",
+            # SCRUM-456: the screen runs in the background now, so the submit is
+            # run inline here to keep the count deterministic. The property under
+            # test is unchanged -- whether the gate lets a screen happen at all.
+            screen_submit=lambda job: job(),
         )
         return calls["n"]
 

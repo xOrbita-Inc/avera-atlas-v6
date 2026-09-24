@@ -264,6 +264,23 @@ class SecondaryConflictCheck:
     # verification or block a decision. Collapsing the two would make a
     # deliberate deferral indistinguishable from a broken catalog.
     screen_deferred: bool = False
+    # SCRUM-456: the screen was started in the background and has not resolved.
+    # A third state, and its own flag for the same reason screen_deferred is its
+    # own flag -- collapsing it into anything else loses a real distinction:
+    #   not performed : the screen should have run and could not. NOT CLEAR, and
+    #                   the M1->M4 clause fires on it once performed is True with
+    #                   clear False.
+    #   deferred      : deliberately out of scope. Omitted from the staging AND.
+    #   pending       : running now. NOT CLEAR (so it cannot authorize a
+    #                   maneuver), but not an escalation either -- the decision is
+    #                   provisional until the screen returns.
+    # secondary_conjunction_clear stays False while pending, so there is no path
+    # by which a pending screen reads as a clear one.
+    screen_pending: bool = False
+    # The poll key for GET /v1/secondary-screen/{id} while pending. Our own job
+    # id, not LeoLabs' screening id, which does not exist until the worker's
+    # create returns.
+    screen_job_id: Optional[str] = None
 
 
 SECONDARY_SCREEN_DEFERRED_NOTE = (
@@ -312,6 +329,115 @@ def _screen_failed_check(reason: str) -> "SecondaryConflictCheck":
     )
 
 
+def _pending_secondary_check(
+    job_id: str, screening_epoch_utc: Optional[str]
+) -> "SecondaryConflictCheck":
+    """SCRUM-456: the screen is running in the background. Provisional, not clear.
+
+    performed=False and clear=False, which is the literal truth -- no screen has
+    completed -- and is what keeps a pending screen from authorizing a maneuver:
+    guard_secondary_clear fails, so the M1 to M2 staging AND fails. It does not
+    escalate to M4, because that clause fires only on a performed check that came
+    back not clear. The decision is held provisional until the poll resolves.
+    """
+    return SecondaryConflictCheck(
+        secondary_check_performed=False,
+        secondary_conjunction_clear=False,
+        flagged_objects=[],
+        operator_note=(
+            f"On-demand secondary screen running in the background; the maneuver "
+            f"is provisional and is NOT authorized as secondary-clear until it "
+            f"resolves. Poll GET /v1/secondary-screen/{job_id}."
+        ),
+        screening_epoch_utc=screening_epoch_utc,
+        screen_deferred=False,
+        screen_pending=True,
+        screen_job_id=job_id,
+    )
+
+
+def _missing_screen_inputs(
+    r_post_km: Optional[List[float]],
+    v_post_km_s: Optional[List[float]],
+    p_post_eci_km2: Optional[Any],
+    screening_epoch_utc: Optional[str],
+    primary_catalog_number: Optional[str],
+) -> List[str]:
+    """The inputs the screen cannot run without.
+
+    Shared by the synchronous screen and the SCRUM-456 async start so the two
+    cannot disagree about what counts as runnable. Missing inputs fail closed on
+    the calling thread rather than being deferred into a worker: there is nothing
+    to wait for, and a pending screen that can never resolve would leave the
+    decision provisional forever.
+    """
+    missing = []
+    if not r_post_km:
+        missing.append("post-burn position")
+    if not v_post_km_s:
+        missing.append("post-burn velocity")
+    if p_post_eci_km2 is None:
+        missing.append("post-burn covariance")
+    if not screening_epoch_utc:
+        missing.append("screening epoch")
+    if not primary_catalog_number:
+        missing.append("primary catalog number")
+    return missing
+
+
+def _start_on_demand_secondary_check(
+    r_post_km: Optional[List[float]],
+    v_post_km_s: Optional[List[float]],
+    p_post_eci_km2: Optional[Any],
+    screening_epoch_utc: Optional[str],
+    policy: OperatorPolicy,
+    cap: SatelliteCapability,
+    primary_catalog_number: Optional[str],
+    dv_eci_km_s: Optional[Any] = None,
+    p_post_source: Optional[str] = None,
+    submit: Optional[Any] = None,
+) -> "SecondaryConflictCheck":
+    """SCRUM-456: start the screen in the background, return PENDING immediately.
+
+    No network and no propagation on this thread, so evaluate's latency no longer
+    depends on LeoLabs. The work is the same _run_on_demand_secondary_check the
+    inline path ran, called by the worker, so the ephemeris, covariance, seed
+    priority, parse and clear contract are unchanged -- only when they run moves.
+
+    Missing inputs still fail closed here, immediately.
+    """
+    from common.secondary_screen_async import start_screen
+
+    missing = _missing_screen_inputs(
+        r_post_km, v_post_km_s, p_post_eci_km2, screening_epoch_utc,
+        primary_catalog_number,
+    )
+    if missing:
+        return _screen_failed_check(
+            "missing required input(s): " + ", ".join(missing)
+        )
+
+    try:
+        job_id = start_screen(
+            r_post_km=r_post_km,
+            v_post_km_s=v_post_km_s,
+            p_post_eci_km2=p_post_eci_km2,
+            screening_epoch_utc=screening_epoch_utc,
+            policy=policy,
+            cap=cap,
+            primary_catalog_number=primary_catalog_number,
+            dv_eci_km_s=dv_eci_km_s,
+            seed_source=p_post_source,
+            submit=submit,
+        )
+    except Exception as exc:
+        # Could not even start it. That is a screen that should have run and
+        # could not, which is NOT CLEAR, not pending.
+        return _screen_failed_check(f"screen could not be started: {exc}")
+
+    return _pending_secondary_check(job_id, screening_epoch_utc)
+
+
 def _run_on_demand_secondary_check(
     r_post_km: Optional[List[float]],
     v_post_km_s: Optional[List[float]],
@@ -352,17 +478,10 @@ def _run_on_demand_secondary_check(
         thresholds_from_policy,
     )
 
-    missing = []
-    if not r_post_km:
-        missing.append("post-burn position")
-    if not v_post_km_s:
-        missing.append("post-burn velocity")
-    if p_post_eci_km2 is None:
-        missing.append("post-burn covariance")
-    if not screening_epoch_utc:
-        missing.append("screening epoch")
-    if not primary_catalog_number:
-        missing.append("primary catalog number")
+    missing = _missing_screen_inputs(
+        r_post_km, v_post_km_s, p_post_eci_km2, screening_epoch_utc,
+        primary_catalog_number,
+    )
     if missing:
         return _screen_failed_check(
             "missing required input(s): " + ", ".join(missing)
@@ -710,7 +829,18 @@ def _build_verification_result(
         and secondary.secondary_conjunction_clear
     )
     if not secondary_clear and not secondary_deferred:
-        if not secondary.secondary_check_performed:
+        if secondary.screen_pending:
+            # SCRUM-456: still a failure -- the burn is not verified
+            # secondary-clear and must not read as verified -- but not the same
+            # failure. Saying "M4 safe hold is required" here would contradict
+            # what actually happens: a pending screen does not escalate, it holds
+            # the decision provisional until it resolves.
+            failures.append(
+                f"Secondary conjunction screen is still running; the maneuver is "
+                f"provisional and not verified secondary-clear until it resolves "
+                f"(poll /v1/secondary-screen/{secondary.screen_job_id})."
+            )
+        elif not secondary.secondary_check_performed:
             failures.append(
                 "Secondary conjunction screen was not performed; safety could not "
                 "be established and M4 safe hold is required."
@@ -1128,6 +1258,16 @@ def build_atlas_artifact(
     p_post_eci_km2: Optional[Any] = None,
     primary_catalog_number: Optional[str] = None,
     screening_sink: Optional[Any] = None,
+    # SCRUM-456. Default True: the screen runs in the background and the secondary
+    # check comes back PENDING, because inline it outlives the dashboard's 60 s
+    # evaluate timeout. False runs it inline and returns a resolved verdict in one
+    # call, which is what the SCRUM-442 suite exercises.
+    secondary_screen_async: bool = True,
+    # Provenance of the seed covariance (SCRUM-454), carried onto the store entry
+    # so a poll result says what the screen was seeded from.
+    p_post_source: Optional[str] = None,
+    # Injectable submit for deterministic tests; the pool is used when None.
+    screen_submit: Optional[Any] = None,
 ) -> ATLASManeuverArtifact:
     """Assemble a complete ATLASManeuverArtifact from a ManeuverScoringResult.
 
@@ -1204,18 +1344,40 @@ def build_atlas_artifact(
     # half of poll on a result nothing reads -- and would exhaust the quota after
     # a handful of routine evaluates, at which point the screen starts failing
     # closed for the decisions that do need it.
+    #
+    # SCRUM-456: the screen now runs in the background and this returns PENDING
+    # immediately. The screen takes 30 s to 2 min and the dashboard's evaluate
+    # times out at 60 s, so running it inline failed the very decisions it exists
+    # to check. PENDING is not clear and does not authorize a maneuver; the
+    # decision is provisional until GET /v1/secondary-screen/{job_id} resolves.
+    # Pass secondary_screen_async=False to run it inline, which is what the
+    # SCRUM-442 tests and any caller that wants a resolved verdict in one call do.
     if secondary_screen_enabled and scoring.is_maneuver_recommended():
-        secondary = _run_on_demand_secondary_check(
-            r_post_km=r_post_km,
-            v_post_km_s=v_post_km_s,
-            p_post_eci_km2=p_post_eci_km2,
-            screening_epoch_utc=scoring.t_burn_utc,
-            policy=policy,
-            cap=cap,
-            primary_catalog_number=primary_catalog_number,
-            screening_sink=screening_sink,
-            dv_eci_km_s=getattr(scoring, "dv_eci_km_s", None),
-        )
+        if secondary_screen_async:
+            secondary = _start_on_demand_secondary_check(
+                r_post_km=r_post_km,
+                v_post_km_s=v_post_km_s,
+                p_post_eci_km2=p_post_eci_km2,
+                screening_epoch_utc=scoring.t_burn_utc,
+                policy=policy,
+                cap=cap,
+                primary_catalog_number=primary_catalog_number,
+                dv_eci_km_s=getattr(scoring, "dv_eci_km_s", None),
+                p_post_source=p_post_source,
+                submit=screen_submit,
+            )
+        else:
+            secondary = _run_on_demand_secondary_check(
+                r_post_km=r_post_km,
+                v_post_km_s=v_post_km_s,
+                p_post_eci_km2=p_post_eci_km2,
+                screening_epoch_utc=scoring.t_burn_utc,
+                policy=policy,
+                cap=cap,
+                primary_catalog_number=primary_catalog_number,
+                screening_sink=screening_sink,
+                dv_eci_km_s=getattr(scoring, "dv_eci_km_s", None),
+            )
     else:
         secondary = _deferred_secondary_check()
 

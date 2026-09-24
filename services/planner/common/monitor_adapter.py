@@ -88,21 +88,28 @@ def _maneuver_command(scoring: Any) -> Optional[ManeuverCommand]:
     )
 
 
-def _secondary_check(artifact: Any) -> tuple[bool, bool, bool]:
-    """Section 4.2's two booleans plus the SCRUM-431 deferred flag.
+def _secondary_check(artifact: Any) -> tuple[bool, bool, bool, bool]:
+    """Section 4.2's two booleans plus the deferred and pending flags.
 
     A no-go artifact has no post_maneuver block and therefore no screen, which
     is 'not performed' and so NOT CLEAR -- and not deferred, because a missing
-    projection is not a deliberate deferral.
+    projection is not a deliberate deferral, and not pending, because nothing
+    was started.
+
+    SCRUM-456 adds the fourth: pending means the screen is running in the
+    background. It is carried separately because it must fail the staging guard
+    (not clear) without firing the M1 to M4 escalation (not performed), and
+    because the record should say "still running" rather than "was not performed".
     """
     post = getattr(artifact, "post_maneuver", None)
     check = getattr(post, "secondary_conflict", None) if post is not None else None
     if check is None:
-        return False, False, False
+        return False, False, False, False
     return (
         bool(check.secondary_check_performed),
         bool(check.secondary_conjunction_clear),
         bool(getattr(check, "screen_deferred", False)),
+        bool(getattr(check, "screen_pending", False)),
     )
 
 
@@ -255,7 +262,7 @@ def build_guard_inputs(
     monitor = body.get(MONITOR_KEY) or {}
 
     tca_utc = parse_utc(conjunction.get("t_ca_utc"))
-    performed, clear, deferred = _secondary_check(artifact)
+    performed, clear, deferred, pending = _secondary_check(artifact)
 
     # SCRUM-380: an abort on this request, otherwise one already standing. A
     # ground clearance is the only thing that lifts it, and that is handled by
@@ -289,6 +296,7 @@ def build_guard_inputs(
         secondary_check_performed=performed,
         secondary_conjunction_clear=clear,
         secondary_screen_deferred=deferred,
+        secondary_screen_pending=pending,
         covariance_source=covariance_source,
         operator_ack_surrogate_covariance=bool(
             authorization.get("operator_ack_surrogate_covariance", False)
