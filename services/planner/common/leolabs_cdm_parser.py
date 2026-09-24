@@ -38,6 +38,7 @@ trail and the golden cross-check.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -45,6 +46,8 @@ import numpy as np
 
 from aps_math import frames
 from aps_math.pc_utils import compute_pc
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Tolerances and constants
@@ -64,6 +67,26 @@ _MISS_ATOL_M = 1.0
 # Symmetry / positive-semidefiniteness tolerances for the rotated covariance.
 _SYM_RTOL = 1.0e-6
 _PSD_EIG_RTOL = 1.0e-8
+
+# SCRUM-458: the band inside which a negative eigenvalue is numerical noise
+# rather than a real covariance fault, and may be repaired by clipping to zero.
+#
+# LeoLabs writes the covariance into a result CDM at fixed precision. Our
+# submitted post-burn covariance (SCRUM-452) is strongly anisotropic over 72 h --
+# kilometres along-track, metres radially -- so the round trip through that
+# precision, plus the RTN->ECI rotation, drives the small axes slightly negative.
+# Measured over all 1255 result CDMs of screening 603312: 1249 of them have a
+# negative minimum eigenvalue, and the largest |min_eig| / max|eig| seen is
+# 5.37e-3 (0.54%), against a median of 2.0e-9. 1e-2 covers every observed case
+# with 1.86x in hand and is still two orders of magnitude tighter than the
+# anisotropy itself, so a genuinely broken covariance does not slip through.
+#
+# The direction matters and is not symmetric. Clipping a negative eigenvalue to
+# zero claims *more* certainty along that axis, which raises the Mahalanobis
+# distance and therefore pushes toward CLEAR. That is only acceptable for a
+# negative of numerical scale; beyond this band the covariance is flagged and the
+# event fails the screen closed instead (see _repair_or_flag_psd).
+_PSD_REPAIR_RTOL = 1.0e-2
 
 _CALCULATED = "CALCULATED"
 _EME2000 = "EME2000"
@@ -113,6 +136,17 @@ class ParsedObject:
     cov_rtn_m2: np.ndarray         # 6x6 RTN covariance, m^2
     cov_eci_m2: np.ndarray         # 6x6 ECI covariance (rotated), m^2
 
+    # SCRUM-458: how the rotated covariance came out of the PSD check.
+    # covariance_repaired: negative eigenvalues of numerical scale were clipped
+    # to zero, and cov_eci_m2 below is the repaired matrix.
+    # covariance_untrusted: the covariance is non-PSD beyond the repair band and
+    # was left exactly as read. Covariance-derived quantities (Pc, Mahalanobis)
+    # must not be believed for this object; the event is still carried so that it
+    # can fail closed rather than vanish from the result.
+    covariance_repaired: bool = False
+    covariance_untrusted: bool = False
+    covariance_min_eigenvalue_m2: Optional[float] = None
+
     @property
     def cov_eci_pos_m2(self) -> np.ndarray:
         """Top-left 3x3 position block of the ECI covariance, m^2."""
@@ -135,6 +169,38 @@ class ParsedLeoLabsCDM:
     # SCRUM-417: RTN relative geometry straight from the CDM, for the encounter viz.
     relative_position_rtn_m: Optional[List[float]] = None
     relative_velocity_rtn_m_s: Optional[List[float]] = None
+
+    # -- covariance conditioning (SCRUM-458) -----------------------------
+
+    @property
+    def covariance_untrusted(self) -> bool:
+        """True when either object's covariance is non-PSD beyond the repair band.
+
+        The event is still a real conjunction with a real miss distance; only the
+        covariance-derived limbs of the clear contract are unusable. Consumers
+        must treat it as not assessable-clear rather than dropping it.
+        """
+        return bool(self.primary.covariance_untrusted
+                    or self.secondary.covariance_untrusted)
+
+    @property
+    def covariance_repaired(self) -> bool:
+        """True when either object's covariance had numerical negatives clipped."""
+        return bool(self.primary.covariance_repaired
+                    or self.secondary.covariance_repaired)
+
+    def covariance_conditioning(self) -> Dict[str, Any]:
+        """Per-object PSD outcome, for the audit trail and the operator note."""
+        return {
+            o.role: {
+                "sat_key": o.sat_key,
+                "designator": o.designator,
+                "repaired": o.covariance_repaired,
+                "untrusted": o.covariance_untrusted,
+                "min_eigenvalue_m2": o.covariance_min_eigenvalue_m2,
+            }
+            for o in (self.primary, self.secondary)
+        }
 
     # -- relative geometry, ECI ------------------------------------------
 
@@ -333,17 +399,87 @@ def _rotation_6x6(rot3: np.ndarray) -> np.ndarray:
 # Covariance validation (design section 6.4)
 # ---------------------------------------------------------------------------
 
-def _assert_symmetric_psd(cov: np.ndarray, label: str) -> None:
+def _assert_symmetric(cov: np.ndarray, label: str) -> None:
+    """Symmetry stays a hard error.
+
+    An asymmetric covariance is a real parse or convention fault, not precision
+    noise: the RTN lower triangle is mirrored on read, so asymmetry means the
+    mirroring or the rotation is wrong. Unlike a small negative eigenvalue there
+    is no benign reading of it, so it is never repaired.
+    """
     if not np.allclose(cov, cov.T, rtol=_SYM_RTOL, atol=0.0):
         raise LeoLabsGuardError(f"{label} covariance is not symmetric after rotation")
-    sym = 0.5 * (cov + cov.T)
-    eigvals = np.linalg.eigvalsh(sym)
-    tol = _PSD_EIG_RTOL * float(np.max(np.abs(eigvals)) or 1.0)
-    if float(np.min(eigvals)) < -tol:
-        raise LeoLabsGuardError(
-            f"{label} covariance is not positive semidefinite after rotation "
-            f"(min eigenvalue {float(np.min(eigvals)):.3e})"
+
+
+def _repair_or_flag_psd(
+    obj: ParsedObject,
+    *,
+    strict: bool,
+    event_id: Optional[Any] = None,
+) -> None:
+    """Make the rotated covariance usable, or mark it untrusted. SCRUM-458.
+
+    Three outcomes, in order:
+
+    1. Already PSD to the tight tolerance: nothing changes.
+    2. Negative eigenvalues of numerical scale (|min_eig| <= _PSD_REPAIR_RTOL *
+       max|eig|): clip them to zero, rebuild the symmetric matrix, and mark the
+       object repaired. The event stays in the conjunction set and is evaluated
+       normally, which is the whole point -- before SCRUM-458 this raised, and
+       run_screening dropped 348 of 349 conjunctions on it.
+    3. Negative beyond that band: this is not precision noise and must not be
+       repaired toward clear. With strict=True (the live listing and evaluate
+       paths, unchanged behaviour) it raises, so the event is not scored. With
+       strict=False (the on-demand screen) the covariance is left exactly as read
+       and the object is marked untrusted, so the caller can fail the event closed
+       instead of omitting it from a result that then reads CLEAR.
+
+    Case 3 never shrinks an uncertainty and never invents one: the matrix is not
+    touched, only labelled.
+    """
+    sym = 0.5 * (obj.cov_eci_m2 + obj.cov_eci_m2.T)
+    eigvals, eigvecs = np.linalg.eigh(sym)
+    min_eig = float(np.min(eigvals))
+    scale = float(np.max(np.abs(eigvals)) or 1.0)
+    obj.covariance_min_eigenvalue_m2 = min_eig
+
+    if min_eig >= -_PSD_EIG_RTOL * scale:
+        return
+
+    if abs(min_eig) <= _PSD_REPAIR_RTOL * scale:
+        repaired = eigvecs @ np.diag(np.clip(eigvals, 0.0, None)) @ eigvecs.T
+        obj.cov_eci_m2 = 0.5 * (repaired + repaired.T)
+        obj.covariance_repaired = True
+        log.debug(
+            "clipped numerically negative covariance eigenvalues",
+            extra={"event": "leolabs_covariance_psd_repaired",
+                   "sat_key": obj.sat_key, "designator": obj.designator,
+                   "role": obj.role, "event_id": event_id,
+                   "min_eigenvalue_m2": min_eig,
+                   "relative_to_max": abs(min_eig) / scale},
         )
+        return
+
+    detail = (
+        f"{obj.sat_key} ({obj.designator}) covariance is not positive "
+        f"semidefinite after rotation (min eigenvalue {min_eig:.3e} m^2, "
+        f"{abs(min_eig) / scale:.3%} of the largest, beyond the "
+        f"{_PSD_REPAIR_RTOL:.1%} repair band)"
+    )
+    if strict:
+        raise LeoLabsGuardError(detail)
+
+    obj.covariance_untrusted = True
+    log.warning(
+        "covariance is non-PSD beyond the repair band; covariance-derived "
+        "limbs cannot be trusted for this event and it will fail closed",
+        extra={"event": "leolabs_covariance_untrusted",
+               "sat_key": obj.sat_key, "designator": obj.designator,
+               "role": obj.role, "event_id": event_id,
+               "min_eigenvalue_m2": min_eig,
+               "relative_to_max": abs(min_eig) / scale,
+               "detail": detail},
+    )
 
 
 def _assert_diagonal_matches_comments(
@@ -479,7 +615,11 @@ def _check_guards(primary: ParsedObject, secondary: ParsedObject) -> None:
                 f"{obj.sat_key} ({obj.designator}) REF_FRAME is "
                 f"{obj.ref_frame!r}, not {_EME2000!r}; refusing to score."
             )
-        _assert_symmetric_psd(obj.cov_eci_m2, obj.sat_key)
+        # Symmetry is a hard error here. The PSD limb is deliberately not
+        # checked yet: it runs after the diagonal-comment validation, because a
+        # repair changes the diagonal and would otherwise trip that guard
+        # (SCRUM-458 measured shifts past _DIAG_RTOL on 1992 of 7494 entries).
+        _assert_symmetric(obj.cov_eci_m2, obj.sat_key)
 
 
 # ---------------------------------------------------------------------------
@@ -492,6 +632,7 @@ def parse_leolabs_cdm(
     *,
     validate_diagonals: bool = True,
     validate_miss_distance: bool = True,
+    strict_psd: bool = True,
 ) -> ParsedLeoLabsCDM:
     """Parse one LeoLabs CDM JSON object into a ParsedLeoLabsCDM.
 
@@ -508,12 +649,24 @@ def parse_leolabs_cdm(
     validate_miss_distance
         If True (default), assert the miss distance recomputed from the two ECI
         states matches the CDM's MISS_DISTANCE (design section 6.4).
+    strict_psd
+        If True (default), a covariance that is non-PSD beyond the numerical
+        repair band raises, so the event is not scored. This is the live listing
+        and evaluate behaviour and is unchanged by SCRUM-458.
+
+        If False, such a covariance instead marks the object untrusted and the
+        parse succeeds, so the caller keeps the event and can fail it closed. The
+        on-demand screen uses this: a conjunction it could not fully assess must
+        make the screen NOT CLEAR, never disappear from a result that then reads
+        CLEAR. Either way, negatives of numerical scale are clipped to zero and
+        the parse succeeds (SCRUM-458).
 
     Raises
     ------
     LeoLabsGuardError
-        On any guard failure (method not CALCULATED, frame not EME2000, non-PSD
-        covariance, diagonal mismatch, miss-distance mismatch).
+        On any guard failure (method not CALCULATED, frame not EME2000, an
+        asymmetric covariance, a covariance non-PSD beyond the repair band when
+        strict_psd, diagonal mismatch, miss-distance mismatch).
     LeoLabsParseError
         On missing required fields or unresolvable object identity.
     """
@@ -523,9 +676,20 @@ def parse_leolabs_cdm(
 
     _check_guards(primary, secondary)
 
+    # Validate the diagonals against the covariance exactly as rotated, before
+    # any PSD repair touches it. That keeps this guard measuring what it was
+    # written to measure -- the rotation and the covariance convention -- rather
+    # than measuring the repair (SCRUM-458).
     if validate_diagonals:
         _assert_diagonal_matches_comments(primary, cdm)
         _assert_diagonal_matches_comments(secondary, cdm)
+
+    # Only now repair or flag. SCRUM-458: a small negative eigenvalue is CDM
+    # precision noise and is clipped; a large one is a real fault and either
+    # raises or marks the event unassessable, never silently drops it.
+    event_id = cdm.get("COMMENT_EVENT_ID")
+    _repair_or_flag_psd(primary, strict=strict_psd, event_id=event_id)
+    _repair_or_flag_psd(secondary, strict=strict_psd, event_id=event_id)
 
     combined_hbr_m = primary.radius_m + secondary.radius_m
     miss_distance_m = _num(cdm, "MISS_DISTANCE")

@@ -393,6 +393,21 @@ def _run_on_demand_secondary_check(
 
     verdict = evaluate_clear_contract(result.conjunctions, policy)
 
+    # SCRUM-458: a CLEAR verdict is a claim about every conjunction in the screened
+    # volume, so it is only sound over a complete set. A skipped result CDM is an
+    # event that was never assessed, and certifying CLEAR over it is exactly the
+    # silent under-report this ticket exists to remove. Non-PSD covariance no
+    # longer lands here (it is repaired, or carried as untrusted and breaches), so
+    # in practice this trips only on a genuine parse fault.
+    if verdict.clear and not result.is_complete:
+        reasons = sorted({str(sk.get("reason", "unknown")) for sk in result.skipped})
+        return _screen_failed_check(
+            f"screening {result.screening_id} returned "
+            f"{len(result.skipped)} result CDM(s) that could not be parsed, so "
+            f"the conjunction set is incomplete and cannot be certified clear: "
+            + "; ".join(reasons[:3])
+        )
+
     # Hand the raw result to the caller for persistence, the way SCRUM-429 links
     # a decision to the CDM it was made on. Never allowed to affect the verdict.
     if screening_sink is not None:
@@ -401,6 +416,13 @@ def _run_on_demand_secondary_check(
         except Exception:
             pass
 
+    # SCRUM-458: say how many covariances needed clipping, so a screen resting on
+    # repaired covariance is visible in the record rather than implied.
+    repaired_note = (
+        f" {result.repaired_count} of {verdict.evaluated} carried a covariance "
+        f"repaired for numerical non-PSD."
+        if result.repaired_count else ""
+    )
     if verdict.clear:
         note = (
             f"On-demand secondary screen clear: {verdict.evaluated} conjunction(s) "
@@ -409,15 +431,20 @@ def _run_on_demand_secondary_check(
             f"(Pc >= {policy.pc_maneuver_threshold:g}, miss < "
             f"{policy.min_miss_distance_km:g} km, or Mahalanobis <= "
             f"{policy.mahalanobis_screen_threshold:g}). Screening id "
-            f"{result.screening_id}."
+            f"{result.screening_id}.{repaired_note}"
         )
     else:
         limbs = sorted({limb for b in verdict.breaches for limb in b["limbs"]})
+        unassessable = (
+            f" {result.untrusted_count} of them could not be fully assessed "
+            f"(covariance not positive semidefinite) and fail closed."
+            if result.untrusted_count else ""
+        )
         note = (
             f"On-demand secondary screen NOT CLEAR: {len(verdict.breaches)} of "
             f"{verdict.evaluated} returned conjunction(s) breach the clear "
-            f"contract on {', '.join(limbs)}. MAF requires M4 safe hold. "
-            f"Screening id {result.screening_id}."
+            f"contract on {', '.join(limbs)}.{unassessable} MAF requires M4 safe "
+            f"hold. Screening id {result.screening_id}.{repaired_note}"
         )
 
     return SecondaryConflictCheck(

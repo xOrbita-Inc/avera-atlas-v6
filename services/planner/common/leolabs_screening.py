@@ -288,6 +288,11 @@ class ScreeningResult:
     included, deduped the same way the live listing dedupes. Empty means the
     screen ran and found nothing -- a clear sky. It never means the screen did
     not run; that raises.
+
+    `skipped` is the CDMs that could not be parsed at all. It should be empty:
+    since SCRUM-458 a non-PSD covariance no longer skips an event, it keeps it and
+    marks it untrusted. A non-empty `skipped` means the conjunction set is
+    incomplete, which `is_complete` reports and the decision path fails closed on.
     """
 
     screening_id: str
@@ -300,6 +305,31 @@ class ScreeningResult:
     def is_clear(self) -> bool:
         """No conjunctions came back. Only meaningful because failures raise."""
         return not self.conjunctions
+
+    @property
+    def repaired_count(self) -> int:
+        """Events whose covariance had numerical negatives clipped (SCRUM-458)."""
+        return sum(1 for c in self.conjunctions if c.covariance_repaired)
+
+    @property
+    def untrusted_count(self) -> int:
+        """Events carried but not fully assessable: covariance non-PSD (SCRUM-458).
+
+        These are the events that used to be dropped. They are counted here so a
+        caller can see that the set it is judging contains events whose
+        covariance-derived limbs are unusable.
+        """
+        return sum(1 for c in self.conjunctions if c.covariance_untrusted)
+
+    @property
+    def is_complete(self) -> bool:
+        """Every retrieved result CDM parsed into the conjunction set.
+
+        False means at least one CDM was skipped, so the set being judged is
+        incomplete and a CLEAR verdict over it would be a claim about events that
+        were never assessed. The decision path fails closed on this.
+        """
+        return not self.skipped
 
 
 @dataclass(frozen=True)
@@ -319,6 +349,29 @@ class ContractVerdict:
     closest_object_id: Optional[str] = None
     max_pc: Optional[float] = None
     flagged_objects: List[str] = field(default_factory=list)
+
+
+def screening_event_key(parsed: ParsedLeoLabsCDM) -> str:
+    """The conjunction identity inside one on-demand screening result. SCRUM-458.
+
+    The live feed's event_key cannot be used here. Measured on screening 603312's
+    1255 result CDMs: COMMENT_EVENT_ID is the constant "0" and COMMENT_ID is the
+    screening id "603312", so event_key returns the same string for every CDM in
+    the screening and dedupe collapses the whole screened set to one conjunction.
+    That is a silent drop of the entire result, and it was invisible while the PSD
+    guard was already dropping nearly every CDM before dedupe ran.
+
+    A conjunction within one screening is one close approach: one secondary at one
+    TCA. The same secondary genuinely recurs at different TCAs across a 72 h
+    horizon -- on 603312, 185 secondaries have more than one TCA and one has 29 --
+    so the secondary alone would discard 303 real conjunctions.
+
+    Identical (secondary, TCA) CDMs do collapse, which is the intent: 217 pairs on
+    603312 appear more than once. A reissue carrying a marginally refined TCA
+    counts as two events rather than one, which over-counts rather than drops, and
+    that is the safe direction for a screen.
+    """
+    return f"{parsed.secondary.designator}@{parsed.t_ca_utc}"
 
 
 def _mahalanobis_distance(parsed: ParsedLeoLabsCDM) -> Optional[float]:
@@ -367,6 +420,13 @@ def evaluate_clear_contract(
     An empty sequence is CLEAR. That is the honest reading of a screen that ran
     and found nothing, and it is only safe because every way of *failing* to run
     raises instead of returning empty.
+
+    SCRUM-458: an event whose covariance is non-PSD beyond the numerical repair
+    band is *not assessable-clear*. It breaches on the "covariance_untrusted"
+    limb, so it can never be part of a CLEAR verdict, and its Mahalanobis limb is
+    not evaluated because the number would be meaningless. Such an event used to
+    be dropped by the parser before it ever reached here, which let a screen
+    certify CLEAR over events it had never looked at.
     """
     breaches: List[Dict[str, Any]] = []
     flagged: List[str] = []
@@ -381,7 +441,14 @@ def evaluate_clear_contract(
         pc = parsed.cdm_collision_probability
         miss_km = (parsed.miss_distance_m / 1000.0
                    if parsed.miss_distance_m is not None else None)
-        mahalanobis = _mahalanobis_distance(parsed)
+        # SCRUM-458: with a non-PSD covariance the Mahalanobis distance is not a
+        # number worth having -- inverting a matrix with a real negative
+        # eigenvalue can read as arbitrarily many sigma, i.e. as clear. So it is
+        # not computed for an untrusted event, and the event breaches outright
+        # below. The CDM's own Pc is LeoLabs' figure from LeoLabs' covariance, not
+        # ours, so it is unaffected and its limb still applies.
+        untrusted = parsed.covariance_untrusted
+        mahalanobis = None if untrusted else _mahalanobis_distance(parsed)
 
         if miss_km is not None and (closest_miss_km is None
                                     or miss_km < closest_miss_km):
@@ -404,6 +471,11 @@ def evaluate_clear_contract(
                     limbs.append("miss_distance")
         if mahalanobis is not None and policy.passes_pre_screen(mahalanobis):
             limbs.append("mahalanobis")
+        if untrusted:
+            # Not assessable-clear. The miss limb above still applies (it is
+            # covariance-free), but the covariance limbs cannot clear this event,
+            # so it fails closed rather than being omitted from the result.
+            limbs.append("covariance_untrusted")
 
         if limbs:
             flagged.append(obj_id)
@@ -417,6 +489,13 @@ def evaluate_clear_contract(
                 "miss_distance_km": miss_km,
                 "mahalanobis": mahalanobis,
                 "limbs": limbs,
+                "covariance_untrusted": untrusted,
+                "covariance_min_eigenvalue_m2": min(
+                    (e for e in (parsed.primary.covariance_min_eigenvalue_m2,
+                                 parsed.secondary.covariance_min_eigenvalue_m2)
+                     if e is not None),
+                    default=None,
+                ),
             })
 
     return ContractVerdict(
@@ -573,7 +652,12 @@ def run_screening(
     for cdm in cdms:
         try:
             our_id = _our_id_for(cdm, registry, primary_object)
-            parsed.append(parse_leolabs_cdm(cdm, our_id))
+            # strict_psd=False: SCRUM-458. A covariance that is non-PSD beyond
+            # the numerical repair band marks the event untrusted instead of
+            # raising, so it stays in the set and fails the contract closed.
+            # Dropping it would under-report conflicts and push toward a false
+            # CLEAR, which is the dangerous direction.
+            parsed.append(parse_leolabs_cdm(cdm, our_id, strict_psd=False))
         except (LeoLabsParseError, LookupError, ValueError) as exc:
             # One unparseable result CDM does not invalidate the screening, but
             # it is not silently dropped either: it is counted and returned so a
@@ -589,12 +673,19 @@ def run_screening(
                        "screening_id": screening_id, "reason": str(exc)},
             )
 
-    events = dedupe_by_event(parsed)
+    events = dedupe_by_event(parsed, key=screening_event_key)
+    repaired = sum(1 for e in events if e.covariance_repaired)
+    untrusted = sum(1 for e in events if e.covariance_untrusted)
     log.info(
         "on-demand screening complete",
         extra={"event": "leolabs_screening_complete",
                "screening_id": screening_id, "cdms": len(cdms),
-               "conjunctions": len(events), "skipped": len(skipped)},
+               "conjunctions": len(events), "skipped": len(skipped),
+               # SCRUM-458: repaired counts events kept by clipping numerical
+               # negatives; untrusted counts events kept but not assessable-clear.
+               # Both used to be skipped instead.
+               "covariance_repaired": repaired,
+               "covariance_untrusted": untrusted},
     )
     return ScreeningResult(
         screening_id=screening_id,
