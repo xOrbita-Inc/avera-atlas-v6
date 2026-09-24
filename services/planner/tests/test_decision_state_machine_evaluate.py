@@ -160,9 +160,20 @@ def _ingest_get(cdm_available: bool = True, cdm_zero_filled: bool = False):
 
 
 def _evaluate(body: dict, cdm_available: bool = True,
-              cdm_zero_filled: bool = False):
+              cdm_zero_filled: bool = False,
+              secondary_screen: bool = False):
+    """Drive /v1/evaluate with the external world stubbed out.
+
+    SCRUM-442 defaults SECONDARY_SCREEN_ENABLED on, and with it on an evaluate
+    needs a live LeoLabs on-demand screen to reach M2 -- a screen that cannot run
+    is NOT CLEAR, which is the guard doing its job. These tests are about the
+    validity seam, the state machine and mode persistence, not about LeoLabs
+    reachability, so the screen is explicitly off here rather than implicitly off
+    via a default. Its own behaviour is covered in test_secondary_screen_*.
+    """
     posts = MagicMock(return_value=MagicMock(status_code=201))
     with patch.object(server, "UDL_ENABLED", False), \
+         patch.object(server, "SECONDARY_SCREEN_ENABLED", secondary_screen), \
          patch.object(server.http_requests, "post", posts), \
          patch.object(server.http_requests, "get",
                       side_effect=_ingest_get(cdm_available, cdm_zero_filled)):
