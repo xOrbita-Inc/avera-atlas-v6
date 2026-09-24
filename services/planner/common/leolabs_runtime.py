@@ -33,7 +33,7 @@ import threading
 import time
 from dataclasses import dataclass, field as dc_field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterator, List, Optional, Set
+from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -75,6 +75,19 @@ MAX_WINDOW_DAYS = 30
 _ASSET_NORADS_ENV = "LEOLABS_ASSET_NORADS"
 
 _PROBE_INTERVAL_SECONDS = 1800  # 30 minutes, matches the UDL probe cadence
+
+# SCRUM-450. A live evaluate re-fetches the whole LeoLabs window -- ~1,850 CDMs,
+# measured at 13 to 20 s -- before selecting the single CDM a clicked row names,
+# so every row selection paid the full pull again. This is how long a fetched
+# window may be served from memory instead.
+#
+# 45 s is a deliberate compromise, not a tuned number: long enough that an
+# operator working through a list of rows hits the cache on every selection after
+# the first, short enough that a window is re-pulled well inside the cadence at
+# which LeoLabs issues and refines CDMs. The staleness it admits is bounded and
+# visible -- a cached window is at most this old -- and it never affects what is
+# fetched, only how often.
+_CDM_CACHE_TTL_SECONDS = 45.0
 
 # Paging (SCRUM-445). The listing used to fetch and parse every scorable CDM in
 # the window in one synchronous call. Once SCRUM-438 made the pull complete, a
@@ -132,9 +145,15 @@ _last_fetch_utc: Optional[str] = None
 _last_probe_monotonic: Optional[float] = None
 _last_probe_result: Optional[Dict[str, Any]] = None
 
+# SCRUM-450: fingerprint -> (monotonic timestamp, raw CDM list). Raw on purpose:
+# both consumers order, dedupe and parse it differently, so caching anything
+# further along would either serve one of them the other's view or duplicate the
+# work it was meant to save.
+_cdm_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
+
 
 def reset_caches() -> None:
-    """Drop the cached client, registry and probe result. For tests."""
+    """Drop the cached client, registry, probe result and CDM windows. For tests."""
     global _client, _registry, _last_fetch_utc
     global _last_probe_monotonic, _last_probe_result
     with _lock:
@@ -143,6 +162,7 @@ def reset_caches() -> None:
         _last_fetch_utc = None
         _last_probe_monotonic = None
         _last_probe_result = None
+        _cdm_cache.clear()
 
 
 def _our_norads() -> Optional[Set[int]]:
@@ -195,6 +215,109 @@ def last_fetch_utc() -> Optional[str]:
 # ---------------------------------------------------------------------------
 # Fetch + select + parse
 # ---------------------------------------------------------------------------
+
+def _cdm_cache_key(
+    catalog: str,
+    lookback_days: int,
+    lookahead_days: int,
+    volume_filters: Dict[str, float],
+) -> str:
+    """The identity of a fetched window.
+
+    Keyed on the *requested* window in days, deliberately not on the resolved
+    minTca..maxTca. conjunction_window derives those from the wall clock on every
+    call, so two calls seconds apart carry different absolute timestamps and a key
+    built from them would miss every single time -- the cache would cost a dict
+    write and save nothing. This mirrors the reasoning _query_fingerprint already
+    records for the paging cursor.
+
+    The volume filters are part of the key because the evaluate path fetches with
+    none and the listing path fetches with the reporting volume. They are
+    genuinely different result sets, so they are separate entries and must never
+    be served to each other.
+    """
+    payload = json.dumps(
+        {
+            "c": str(catalog),
+            "lb": int(lookback_days),
+            "la": int(lookahead_days),
+            "v": {k: volume_filters[k] for k in sorted(volume_filters or {})},
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _search_cdms_cached(
+    client: LeoLabsClient,
+    catalog: str,
+    min_tca: str,
+    max_tca: str,
+    volume_filters: Optional[Dict[str, float]] = None,
+    *,
+    lookback_days: int,
+    lookahead_days: int,
+) -> List[Dict[str, Any]]:
+    """search_conjunction_cdms, served from a short-TTL process cache.
+
+    SCRUM-450. The fetch itself is unchanged -- same endpoint, same parameters,
+    same result -- this only decides whether to make it. A hit inside
+    _CDM_CACHE_TTL_SECONDS returns the window already pulled for this asset,
+    window and filter set; a miss fetches once and stores it.
+
+    The absolute window does drift by the few seconds between a store and a hit,
+    since min_tca/max_tca are recomputed per call while the key is not. That is
+    accepted: on a multi-day horizon a few seconds of edge is far smaller than the
+    staleness the TTL already admits, and it is the same trade the paging cursor
+    makes.
+
+    Returns the cached list itself rather than a copy. Every caller treats it as
+    read-only -- both sort into a new list -- and copying ~1,850 dicts per call
+    would give back part of what the cache is for. A caller that ever needs to
+    mutate must copy first.
+    """
+    filters = dict(volume_filters or {})
+    key = _cdm_cache_key(catalog, lookback_days, lookahead_days, filters)
+
+    with _lock:
+        entry = _cdm_cache.get(key)
+        if entry is not None:
+            stored_at, cached = entry
+            age = time.monotonic() - stored_at
+            if age < _CDM_CACHE_TTL_SECONDS:
+                log.info(
+                    "LeoLabs CDM window served from cache",
+                    extra={"event": "leolabs_cdm_cache_hit", "catalog": catalog,
+                           "age_s": round(age, 2), "cdms": len(cached),
+                           "in_volume": bool(filters)},
+                )
+                return cached
+
+    # Fetched outside the lock: this is the 13-to-20 s call, and holding the lock
+    # across it would serialise every other caller behind it -- including ones
+    # wanting a different asset entirely. The cost is that two callers racing the
+    # same cold key may both fetch; they then store the same thing, so the result
+    # is correct and the waste is bounded by how many miss at once.
+    cdms = client.search_conjunction_cdms(
+        object1=catalog,
+        min_tca=min_tca,
+        max_tca=max_tca,
+        cdm_source="LeoLabs",
+        **filters,
+    )
+    result = list(cdms or [])
+
+    with _lock:
+        _cdm_cache[key] = (time.monotonic(), result)
+    log.info(
+        "LeoLabs CDM window fetched and cached",
+        extra={"event": "leolabs_cdm_cache_miss", "catalog": catalog,
+               "cdms": len(result), "ttl_s": _CDM_CACHE_TTL_SECONDS,
+               "in_volume": bool(filters)},
+    )
+    return result
+
 
 def _risk_key(cdm: Dict[str, Any]):
     """Order CDMs by risk: highest Pc first, earliest TCA as tie-break."""
@@ -256,8 +379,12 @@ def _scorable_in_risk_order(
 
     min_tca, max_tca = conjunction_window(now, lookback_days, lookahead_days)
 
-    cdms = client.search_conjunction_cdms(
-        object1=catalog, min_tca=min_tca, max_tca=max_tca, cdm_source="LeoLabs"
+    # SCRUM-450: same fetch, but served from the short-TTL window cache when one
+    # was pulled recently for this asset and window. No volume filter here, so
+    # this is a different cache entry from the listing path's.
+    cdms = _search_cdms_cached(
+        client, catalog, min_tca, max_tca, None,
+        lookback_days=lookback_days, lookahead_days=lookahead_days,
     )
     if not cdms:
         log.info(
@@ -490,12 +617,12 @@ def _raw_cdms_in_risk_order(
         )
 
     min_tca, max_tca = conjunction_window(now, lookback_days, lookahead_days)
-    cdms = client.search_conjunction_cdms(
-        object1=catalog,
-        min_tca=min_tca,
-        max_tca=max_tca,
-        cdm_source="LeoLabs",
-        **volume_filters,
+    # SCRUM-450: same fetch through the short-TTL window cache. The volume filters
+    # are part of the key, so this never shares an entry with the unfiltered
+    # evaluate path.
+    cdms = _search_cdms_cached(
+        client, catalog, min_tca, max_tca, volume_filters,
+        lookback_days=lookback_days, lookahead_days=lookahead_days,
     )
     raw = list(cdms or [])
     ordered = dedupe_raw_by_event(sorted(raw, key=_risk_key))
