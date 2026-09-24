@@ -256,6 +256,8 @@ class LeoLabsClient:
         path: str,
         params: Optional[Dict[str, Any]] = None,
         json_body: Optional[Dict[str, Any]] = None,
+        files: Optional[Dict[str, Any]] = None,
+        data: Optional[Dict[str, Any]] = None,
     ) -> Any:
         """Perform one API call with rate limiting and retry/backoff.
 
@@ -264,9 +266,27 @@ class LeoLabsClient:
         retried, since a bad key will not fix itself) and LeoLabsHTTPError on any
         other non-2xx or when retries are exhausted. The auth header, and thus
         the secret, is never logged.
+
+        Bodies, and why there are two kinds (SCRUM-441)
+        ----------------------------------------------
+        Most of this API takes JSON. The on-demand screening create does not: it
+        is multipart form-data with a file upload, which is why our first live
+        submit was rejected with 422 on the first required form field -- the
+        server's form parser saw no fields at all in a JSON body.
+
+        So when `files` (or `data`) is given, they are passed to requests and
+        `json` is not: sending both would put a JSON body and a multipart body in
+        the same request. Content-Type is deliberately not set here either --
+        requests generates the multipart boundary, and a hand-set header would
+        replace it with one that has no boundary and break the parse.
+
+        File parts must be bytes, not open file objects. This method retries, and
+        a file object would be consumed by the first attempt and upload empty on
+        the second.
         """
         url = f"{self._base_url}{path}"
         headers = _auth_header()  # may raise LeoLabsAuthError
+        multipart = bool(files or data)
 
         attempt = 0
         while True:
@@ -276,7 +296,9 @@ class LeoLabsClient:
                     method,
                     url,
                     params=params,
-                    json=json_body,
+                    json=None if multipart else json_body,
+                    files=files,
+                    data=data,
                     headers=headers,
                     timeout=self._timeout,
                 )
@@ -504,15 +526,32 @@ class LeoLabsClient:
 
     # -- on-demand screenings ---------------------------------------------
 
-    def create_screening(self, body: Dict[str, Any]) -> Dict[str, Any]:
+    def create_screening(
+        self,
+        body: Optional[Dict[str, Any]] = None,
+        *,
+        files: Optional[Dict[str, Any]] = None,
+        data: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Create an on-demand screening.
 
         Rate-limited to 3 per 2 minutes by the screening limiter, on top of the
-        org-wide 4 req/s. The body carries the target object, the time/TCA
-        window, and thresholds; exact field names are confirmed against the live
-        doc at build time (design section 3, Appendix A).
+        org-wide 4 req/s. Both limiters and the retry/backoff are _request's, and
+        are the same whichever body shape is used.
+
+        SCRUM-441: the endpoint is multipart form-data with a file upload, not
+        JSON -- "Parameters must be sent as a multipart form" in the LeoLabs
+        reference. Callers pass `files` (the ephemeris part) and `data` (the flat
+        form fields); leolabs_screening.build_screening_request assembles both and
+        owns the field names. The positional `body` is retained only so an
+        existing JSON caller keeps working, and is ignored when files/data are
+        given.
         """
         self._screening_limiter.acquire()
+        if files or data:
+            return self._request(
+                "POST", "/catalog/conjunctions/screenings", files=files, data=data
+            )
         return self._request(
             "POST", "/catalog/conjunctions/screenings", json_body=body
         )
