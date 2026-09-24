@@ -236,11 +236,17 @@ class TestGuardBooleans:
         assert check.flagged_objects
         assert "NOT CLEAR" in check.operator_note
 
-    def test_the_note_records_the_covariance_caveat(self, monkeypatch, policy, cap):
-        """Required by SCRUM-442: the floor must be stated, not assumed."""
+    def test_the_note_no_longer_carries_a_covariance_caveat(
+        self, monkeypatch, policy, cap
+    ):
+        """SCRUM-452 made the covariance real, so the caveat is gone.
+
+        Asserted rather than just deleted: a stale caveat on a real covariance
+        would understate the screen, which is its own kind of wrong.
+        """
         check = _check(monkeypatch, conjunctions=[], policy=policy, cap=cap)
-        assert "floor" in check.operator_note
-        assert "fast-follow" in check.operator_note
+        assert "floor" not in check.operator_note
+        assert "fast-follow" not in check.operator_note
 
 
 # ---------------------------------------------------------------------------

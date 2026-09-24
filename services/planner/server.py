@@ -62,7 +62,11 @@ from common.gnc_operator import (
     record_veto,
     veto_ack,
 )
-from common.gnc_report import assess_post_burn, build_report_ack
+from common.gnc_report import (
+    assess_post_burn,
+    build_report_ack,
+    post_burn_covariance_km2,
+)
 from common.satellite_capability import SatelliteCapability
 from common.logging_setup import build_logger, _POLICY_CONFIG_PATH, SERVICE_NAME, SERVICE_VERSION
 from common.operator_policy import OperatorPolicy, CovarianceSurrogate
@@ -296,7 +300,9 @@ def _resolve_evaluate_source(
     return "surrogate"
 
 
-def _persist_screening_result(result, verdict, decision_log_id) -> Optional[str]:
+def _persist_screening_result(
+    result, verdict, decision_log_id, p_post_source: Optional[str] = None
+) -> Optional[str]:
     """SCRUM-442: store the on-demand screening a decision was made on.
 
     NOT YET LANDING. The ingest service has no /screening/persist endpoint and no
@@ -353,13 +359,15 @@ def _persist_screening_result(result, verdict, decision_log_id) -> Optional[str]
             "clear": bool(verdict.clear) if verdict is not None else None,
             "breaches": list(verdict.breaches) if verdict is not None else [],
             "conjunctions": conjunctions,
-            # Stated on the record itself, not only in the code: the submitted
-            # covariance is a constant position-only floor, and the growth model
-            # is a tracked fast-follow.
-            "covariance_caveat": (
-                "submitted primary covariance is a constant position-only floor; "
-                "growth model is a tracked fast-follow"
-            ),
+            # SCRUM-452: the covariance is real -- an execution-error seed grown
+            # along the trajectory by the J2 state transition matrix -- so the
+            # record states its provenance rather than a caveat about it.
+            "covariance_model": "execution_error_seed_grown_by_stm",
+            # Which quantity seeded the position block. "gnc_post_burn_covariance"
+            # is the primary's own; "combined_relative_stand_in" is the
+            # over-estimate used when the call carried no GNC report. Recorded so
+            # an audit can tell the two apart rather than inferring it.
+            "p_post_source": p_post_source,
         }
     except Exception as exc:
         log.warning(
@@ -2214,27 +2222,51 @@ async def post_evaluate(request: Request):
                     for i in range(3)
                 ]
 
-            # SCRUM-442: what the on-demand secondary screen needs.
+            # SCRUM-452: the seed for the screening ephemeris covariance.
             #
-            # p_post: the screening ephemeris wants the PRIMARY's post-burn
-            # position covariance. What this path holds is p_rel_km2, the
-            # COMBINED relative covariance -- primary plus secondary. Passing it
-            # as the primary's over-states the primary's own uncertainty, and
-            # that is the deliberately conservative direction for a screen: a
-            # larger covariance lowers Mahalanobis distance, so more events fall
-            # inside the risk-relevant radius and more breach the contract. It is
-            # a stand-in, not the right quantity, and it is one of the two
-            # covariance items the tracked fast-follow replaces -- the other
-            # being SCRUM-440's constant-in-time floor. Flagged, not silent.
+            # The ephemeris wants the PRIMARY's own post-burn position
+            # covariance. post_burn_covariance_km2 is the single source of truth
+            # for that -- it prefers GNC's own p_post_km2, else rebuilds
+            # P_pre + P_burn frame-consistently (SCRUM-428), else returns None
+            # meaning unknown.
+            #
+            # It takes a GNC report, and /v1/evaluate is not the GNC endpoint, so
+            # it is used when the caller supplies a report-shaped block and not
+            # otherwise. Field names are the ones POST /v1/gnc/report already
+            # uses, so a caller has one shape to learn rather than two.
             _p_post = None
-            _p_rel = (body.get("conjunction") or {}).get("p_rel_km2")
-            if _p_rel:
+            _p_post_source = None
+            _gnc = body.get("gnc_report") or body.get("gnc") or {}
+            if isinstance(_gnc, dict) and _gnc:
                 try:
-                    _flat = [float(c) for c in _p_rel]
-                    if len(_flat) == 9:
-                        _p_post = [_flat[0:3], _flat[3:6], _flat[6:9]]
-                except (TypeError, ValueError):
-                    _p_post = None
+                    _risk = _gnc.get("aps_risk_context") or {}
+                    _m = post_burn_covariance_km2(
+                        _gnc, p_pre_km2=_risk.get("p_pre_km2"))
+                    if _m is not None:
+                        _p_post = [[float(c) for c in row] for row in _m]
+                        _p_post_source = "gnc_post_burn_covariance"
+                except Exception as exc:
+                    log.info(
+                        "post-burn covariance could not be read from the GNC report",
+                        extra={"event": "post_burn_covariance_unavailable",
+                               "exc": str(exc)},
+                    )
+
+            if _p_post is None:
+                # No GNC report on this call. p_rel_km2 is the COMBINED relative
+                # covariance, so as a primary-only seed it is an over-estimate --
+                # conservative for a screen, but not the right quantity. It is
+                # used rather than failing the screen closed, and it is labelled
+                # so the difference is visible in the record instead of implied.
+                _p_rel = (body.get("conjunction") or {}).get("p_rel_km2")
+                if _p_rel:
+                    try:
+                        _flat = [float(c) for c in _p_rel]
+                        if len(_flat) == 9:
+                            _p_post = [_flat[0:3], _flat[3:6], _flat[6:9]]
+                            _p_post_source = "combined_relative_stand_in"
+                    except (TypeError, ValueError):
+                        _p_post = None
 
             # The screen is keyed on the LeoLabs catalog number, not the NORAD.
             _screen_catalog = None
@@ -2256,6 +2288,7 @@ async def post_evaluate(request: Request):
                 """Hold the screening result so it can be persisted with the decision."""
                 _screening_capture["result"] = result
                 _screening_capture["verdict"] = verdict
+                _screening_capture["p_post_source"] = _p_post_source
 
             artifact = build_atlas_artifact(
                 scoring=scoring,
@@ -2295,6 +2328,7 @@ async def post_evaluate(request: Request):
                     _screening_capture.get("result"),
                     _screening_capture.get("verdict"),
                     decision_log.log_id,
+                    p_post_source=_screening_capture.get("p_post_source"),
                 )
                 if _sc_id:
                     result["screening_record_id"] = _sc_id
