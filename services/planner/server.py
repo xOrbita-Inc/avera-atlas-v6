@@ -74,6 +74,7 @@ from common.leolabs_runtime import (
     LeoLabsRuntimeError,
     LeoLabsStateError,
     catalog_for_norad,
+    object_covariance_block,
     fetch_leolabs_conjunction,
     fetch_leolabs_conjunction_page,
     fetch_leolabs_conjunctions,
@@ -1625,6 +1626,9 @@ async def leolabs_orbits(
     risk: Dict[str, str] = {}
     objects: Dict[str, Dict[str, Any]] = {}
     skipped: List[Dict[str, Any]] = []
+    # The parsed row behind the first drawn object, kept so the asset covariance
+    # can come from its SAT1 block.
+    worst_row_parsed = None
 
     for parsed in rows:
         # conjunction_row is reused rather than reimplemented so the globe's risk
@@ -1653,8 +1657,17 @@ async def leolabs_orbits(
                        "secondary_norad": norad, "reason": str(exc)},
             )
             continue
+        if not object_tracks:
+            worst_row_parsed = parsed
         object_tracks[key] = track
         risk[key] = row["risk_level"]
+        # SCRUM-448: the CDM's own position covariance for this object, as
+        # principal axes and one-sigma extents. None when the covariance is
+        # missing or not usable -- the key is then absent and the globe draws no
+        # ellipsoid, rather than a default one an operator would read as measured.
+        cov_block = object_covariance_block(
+            getattr(parsed.secondary, "cov_eci_pos_m2", None)
+        )
         objects[key] = {
             "secondary_norad": norad,
             "secondary_designator": row.get("secondary_designator"),
@@ -1671,10 +1684,22 @@ async def leolabs_orbits(
             "epoch_utc": row.get("tca_utc"),
             "state_source": "leolabs_cdm_sat2",
         }
+        if cov_block is not None:
+            objects[key]["cov"] = cov_block
 
     # The worst conjunction is simply the first drawn object, since rows arrive
     # highest Pc first. Named explicitly so the globe does not have to re-sort.
     worst_key = next(iter(object_tracks), None)
+
+    # SCRUM-448: one asset ellipsoid, from the SAT1 block of the worst row. Every
+    # row carries a SAT1 covariance for the same asset, so taking the worst row's
+    # is a choice of epoch rather than of object -- the same epoch caveat the
+    # rings already carry, and asset.epoch_utc already states it.
+    asset_cov = None
+    if worst_row_parsed is not None:
+        asset_cov = object_covariance_block(
+            getattr(worst_row_parsed.primary, "cov_eci_pos_m2", None)
+        )
 
     min_tca, max_tca = leolabs_runtime.conjunction_window(
         now, lookback_days, lookahead_days
@@ -1697,6 +1722,13 @@ async def leolabs_orbits(
                 "catalog_number": catalog,
                 "epoch_utc": asset_epoch,
                 "state_source": "leolabs_get_states",
+                **({"cov": asset_cov} if asset_cov is not None else {}),
+                # The asset's state is live from get_states, but its covariance
+                # comes from a CDM's SAT1 block, so the two are not the same
+                # epoch. Said here rather than left to be inferred.
+                **({"cov_epoch_utc": (
+                    objects.get(worst_key, {}).get("epoch_utc") if worst_key else None
+                )} if asset_cov is not None else {}),
             },
             # The three fields the renderer consumes.
             "asset_track": asset_track,

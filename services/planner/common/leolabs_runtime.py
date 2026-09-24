@@ -35,6 +35,8 @@ from dataclasses import dataclass, field as dc_field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterator, List, Optional, Set
 
+import numpy as np
+
 from common.leolabs_asset_map import AssetRegistry
 from common.leolabs_cdm_parser import (
     LeoLabsParseError,
@@ -663,6 +665,104 @@ def latest_state_km(
     record = states[0]
     r_km, v_km_s = _state_vector_km(record)
     return r_km, v_km_s, record.get("timestamp")
+
+
+class LeoLabsCovarianceError(LeoLabsError):
+    """A covariance matrix was missing or not usable as an uncertainty ellipsoid."""
+
+
+# A covariance that comes back from the parser is already rotated RTN->ECI and
+# guarded, but it has been through a rotation and a sum, so exact symmetry is not
+# guaranteed in floating point. Measured on the real fixture: |A - A^T| peaks at
+# 7.5e-9 against entries of order 1e8, i.e. a relative asymmetry near 1e-17. The
+# tolerance below is relative to the matrix scale so it stays meaningful whether
+# the covariance is metres-squared of a few or of a hundred million.
+_COV_SYMMETRY_RTOL = 1e-6
+# Eigenvalues of a PSD matrix can come back very slightly negative through
+# rounding. Anything within this (relative) band is clamped to zero; anything
+# more negative is a real defect and is rejected rather than square-rooted.
+_COV_PSD_RTOL = 1e-8
+
+
+def cov_eigen_axes_sigmas(cov3: Any) -> tuple[List[List[float]], List[float]]:
+    """Principal axes and one-sigma extents of a 3x3 position covariance.
+
+    Returns (axes, sigmas_m): three orthonormal eigenvectors in ECI, and the
+    corresponding sqrt(eigenvalue) in metres, both sorted largest sigma first.
+
+    The decomposition is done here, in numpy, rather than shipping the raw 3x3 to
+    the browser and asking JavaScript to eigendecompose a symmetric matrix. That
+    is avoidable error surface for a number an operator reads as uncertainty.
+
+    The axes form a right-handed basis. An ellipsoid is symmetric so a reflection
+    would look identical, but the renderer builds a rotation from these vectors
+    and a determinant of -1 is not a rotation.
+
+    Raises LeoLabsCovarianceError when the input is not a usable covariance --
+    wrong shape, non-finite, materially asymmetric, or not positive semi-definite.
+    The caller's contract is to omit the covariance entirely in that case, never
+    to substitute a plausible-looking one.
+    """
+    if cov3 is None:
+        raise LeoLabsCovarianceError("covariance is absent")
+    try:
+        a = np.asarray(cov3, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise LeoLabsCovarianceError(f"covariance is not numeric: {exc}") from exc
+    if a.shape != (3, 3):
+        raise LeoLabsCovarianceError(f"covariance is {a.shape}, expected (3, 3)")
+    if not np.all(np.isfinite(a)):
+        raise LeoLabsCovarianceError("covariance has non-finite entries")
+
+    scale = float(np.max(np.abs(a))) or 1.0
+    if float(np.max(np.abs(a - a.T))) > _COV_SYMMETRY_RTOL * scale:
+        raise LeoLabsCovarianceError("covariance is not symmetric")
+
+    # eigh, not eig: the matrix is symmetric, and eigh returns real, ordered
+    # eigenvalues with an orthonormal basis.
+    values, vectors = np.linalg.eigh(a)
+    if float(np.min(values)) < -_COV_PSD_RTOL * scale:
+        raise LeoLabsCovarianceError(
+            f"covariance is not positive semi-definite (min eigenvalue "
+            f"{float(np.min(values)):.6g})"
+        )
+    values = np.clip(values, 0.0, None)
+
+    order = np.argsort(values)[::-1]          # largest sigma first
+    values = values[order]
+    vectors = vectors[:, order]
+
+    if float(np.linalg.det(vectors)) < 0:     # make it a rotation, not a reflection
+        vectors[:, 0] = -vectors[:, 0]
+
+    axes = [[float(c) for c in vectors[:, i]] for i in range(3)]
+    sigmas_m = [float(np.sqrt(v)) for v in values]
+    return axes, sigmas_m
+
+
+def object_covariance_block(cov3: Any) -> Optional[Dict[str, Any]]:
+    """The cov block for a response, or None when there is nothing trustworthy.
+
+    None is the whole point: an object with no usable covariance gets no cov field
+    and the globe draws no ellipsoid for it, the same rule that skips a secondary
+    with no usable state. A fabricated ellipsoid would be read as measured
+    uncertainty.
+    """
+    try:
+        axes, sigmas_m = cov_eigen_axes_sigmas(cov3)
+    except LeoLabsCovarianceError as exc:
+        log.info(
+            "object has no usable covariance; no ellipsoid will be drawn",
+            extra={"event": "leolabs_covariance_unusable", "reason": str(exc)},
+        )
+        return None
+    return {
+        "axes": axes,
+        "sigmas_m": sigmas_m,
+        # Stated so a consumer does not have to infer it from magnitudes.
+        "frame": STATE_FRAME,
+        "source": "leolabs_cdm_covariance",
+    }
 
 
 def catalog_for_norad(

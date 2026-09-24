@@ -259,6 +259,154 @@ class TestRiskBanding:
 
 
 # ---------------------------------------------------------------------------
+# Covariance (SCRUM-448)
+# ---------------------------------------------------------------------------
+
+class TestCovariance:
+    def test_every_drawn_object_carries_axes_and_sigmas(
+        self, three_cdms, registry, monkeypatch
+    ):
+        tc, _ = _serve(three_cdms, registry, monkeypatch)
+        data = _get(tc).json()
+
+        assert data["objects"]
+        for key, obj in data["objects"].items():
+            cov = obj["cov"]
+            assert len(cov["axes"]) == 3
+            assert len(cov["sigmas_m"]) == 3
+            for axis in cov["axes"]:
+                assert len(axis) == 3
+                assert math.isclose(
+                    math.sqrt(sum(c * c for c in axis)), 1.0, rel_tol=1e-9
+                )
+            assert all(isinstance(v, float) and v >= 0 for v in cov["sigmas_m"])
+            # Sorted largest first, so "3 sigma" has an unambiguous meaning.
+            assert cov["sigmas_m"] == sorted(cov["sigmas_m"], reverse=True)
+            # Labelled, so nobody mistakes it for a synthetic default.
+            assert cov["source"] == "leolabs_cdm_covariance"
+            assert cov["frame"] == "EME2000"
+
+    def test_the_asset_carries_a_covariance_from_the_worst_rows_sat1_block(
+        self, three_cdms, registry, monkeypatch
+    ):
+        tc, _ = _serve(three_cdms, registry, monkeypatch)
+        data = _get(tc).json()
+
+        cov = data["asset"]["cov"]
+        assert len(cov["axes"]) == 3 and len(cov["sigmas_m"]) == 3
+        assert cov["source"] == "leolabs_cdm_covariance"
+        # The asset's state is live but its covariance is a CDM's, so the two are
+        # at different epochs and the response says which.
+        assert data["asset"]["cov_epoch_utc"] == (
+            data["objects"][data["worst_object"]]["epoch_utc"]
+        )
+
+    def test_the_axes_are_a_right_handed_orthonormal_basis(
+        self, three_cdms, registry, monkeypatch
+    ):
+        """The renderer builds a rotation from these."""
+        import numpy as np
+
+        tc, _ = _serve(three_cdms, registry, monkeypatch)
+        data = _get(tc).json()
+        for obj in data["objects"].values():
+            basis = np.array(obj["cov"]["axes"], dtype=float).T
+            assert np.allclose(basis.T @ basis, np.eye(3), atol=1e-9)
+            assert float(np.linalg.det(basis)) == pytest.approx(1.0, abs=1e-9)
+
+    def test_the_covariance_is_the_cdms_own_not_a_default(
+        self, three_cdms, registry, monkeypatch
+    ):
+        """Reconstructing A from the axes and sigmas must give the parsed matrix.
+
+        This is the test that distinguishes 'real covariance plumbed through'
+        from 'something ellipsoid-shaped'.
+        """
+        import numpy as np
+        from common.leolabs_cdm_parser import parse_leolabs_cdm
+
+        tc, _ = _serve(three_cdms, registry, monkeypatch)
+        data = _get(tc).json()
+
+        worst_key = data["worst_object"]
+        cov = data["objects"][worst_key]["cov"]
+        basis = np.array(cov["axes"], dtype=float).T
+        lam = np.diag([s ** 2 for s in cov["sigmas_m"]])
+        reconstructed = basis @ lam @ basis.T
+
+        # three_cdms is ordered worst-first, so its first entry is the worst row.
+        parsed = parse_leolabs_cdm(three_cdms[0], "L2669")
+        assert np.allclose(
+            reconstructed, np.asarray(parsed.secondary.cov_eci_pos_m2), rtol=1e-6,
+            atol=1e-6,
+        )
+
+    def test_the_real_anisotropy_survives(self, three_cdms, registry, monkeypatch):
+        """A conjunction covariance is in-track dominated by a huge ratio.
+
+        If that ever comes back near-spherical, something has normalised away the
+        one thing the ellipsoid is for.
+        """
+        tc, _ = _serve(three_cdms, registry, monkeypatch)
+        data = _get(tc).json()
+        sig = data["objects"][data["worst_object"]]["cov"]["sigmas_m"]
+        assert sig[0] / max(sig[2], 1e-9) > 50
+
+    def test_an_object_with_no_usable_covariance_is_drawn_without_one(
+        self, cdm, registry, monkeypatch
+    ):
+        """No cov field, no fabricated ellipsoid -- but the object still draws.
+
+        Same honesty rule as a stateless secondary: absent is absent, and the
+        object does not disappear from the globe because of it.
+        """
+        import common.leolabs_runtime as rt
+
+        good = _variant(cdm, pc=5.0e-4, tca="2026-08-28T00:00:00Z", norad=100002,
+                        designator="L100002", cdm_id=1002, event_id=9002)
+        broken = _variant(cdm, pc=2.0e-5, tca="2026-08-26T00:00:00Z", norad=100003,
+                          designator="L100003", cdm_id=1003, event_id=9003)
+        tc, _ = _serve([good, broken], registry, monkeypatch)
+
+        # Strip the covariance of the second object only.
+        real = rt.object_covariance_block
+        calls = {"n": 0}
+
+        def _second_has_none(cov3):
+            calls["n"] += 1
+            return None if calls["n"] == 2 else real(cov3)
+
+        monkeypatch.setattr(rt, "object_covariance_block", _second_has_none)
+        import server as srv
+        monkeypatch.setattr(srv, "object_covariance_block", _second_has_none)
+
+        data = _get(tc).json()
+
+        assert set(data["object_tracks"]) == {"100002", "100003"}
+        assert "cov" in data["objects"]["100002"]
+        assert "cov" not in data["objects"]["100003"]
+        # And it is still a fully drawn object, not a skip.
+        assert data["counts"]["drawn"] == 2
+        assert data["counts"]["skipped"] == 0
+
+    def test_covariance_does_not_change_the_status_contract(
+        self, three_cdms, registry, monkeypatch
+    ):
+        tc, _ = _serve(three_cdms, registry, monkeypatch)
+        assert _get(tc).status_code == 200
+        assert _get(tc, primary_norad=99999).status_code == 404
+        assert _get(tc, lookahead_days=60).status_code == 422
+
+    def test_feed_off_is_still_503_with_no_covariance_leaking(self, monkeypatch):
+        monkeypatch.setattr(server, "LEOLABS_ENABLED", False)
+        resp = TestClient(server.svc).get(
+            "/v1/leolabs/orbits", params={"primary_norad": 36508}
+        )
+        assert resp.status_code == 503
+        assert "asset" not in resp.json()
+
+
+# ---------------------------------------------------------------------------
 # Empty set, skipped objects, and the status contract
 # ---------------------------------------------------------------------------
 
