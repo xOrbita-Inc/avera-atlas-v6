@@ -25,6 +25,7 @@ from typing import Any, Dict, Optional, Sequence
 
 import numpy as np
 
+from aps_math import frames
 from common.maneuver_scorer import compute_pc_post
 
 log = logging.getLogger("planner")
@@ -71,21 +72,44 @@ def post_burn_covariance_km2(
     3. Otherwise None, which is not a covariance of zero and must not be read
        as one.
 
-    Note on frames in case 2: p_burn_rtn_km2 is RTN by its name and p_pre is
-    ECI. They are summed here only when the caller has already rotated, or when
-    the burn covariance is effectively isotropic; the caller states which by
-    what it passes. Case 1 is the path the contract intends and the one the
-    demo uses, which is why it is first.
+    SCRUM-428. p_burn_rtn_km2 is RTN by its name and p_pre is ECI, and summing
+    them directly would silently push frame-consistency onto the caller: a
+    real p_pre and the report's genuinely RTN p_burn would produce a
+    plausible, wrong pc_post with no error. Case 2 is now frame-consistent on
+    its own: it rotates p_burn from RTN to ECI internally using the burn-time
+    r_sat/v_sat state on PostBurnState (rtn_to_eci_rotation + rotate_cw_block,
+    the same pair used throughout aps_math.frames -- see that module for the
+    derivation), then sums in ECI.
+
+    If r_sat/v_sat are unavailable when case 2 would otherwise apply, this
+    returns None rather than guess at a frame or fall back to the old
+    mixed-frame sum: a covariance this function cannot honestly place in one
+    frame is not a covariance to hand to compute_pc_post, per this module's
+    own None-means-unknown-not-zero convention.
+
+    Case 1 is the path the contract intends and the one the demo uses, which
+    is why it is first.
     """
     p_post = _matrix_3x3((report.get("post_burn_state") or {}).get("p_post_km2"))
     if p_post is not None:
         return p_post
 
-    p_burn = _matrix_3x3((report.get("execution_error") or {}).get("p_burn_rtn_km2"))
+    p_burn_rtn = _matrix_3x3((report.get("execution_error") or {}).get("p_burn_rtn_km2"))
     p_pre = _matrix_3x3(p_pre_km2)
-    if p_burn is None or p_pre is None:
+    if p_burn_rtn is None or p_pre is None:
         return None
-    return p_pre + p_burn
+
+    post_state = report.get("post_burn_state") or {}
+    r_sat = post_state.get("r_sat_km")
+    v_sat = post_state.get("v_sat_km_s")
+    if r_sat is None or v_sat is None:
+        return None
+
+    rot = frames.rtn_to_eci_rotation(
+        np.asarray(r_sat, dtype=float), np.asarray(v_sat, dtype=float)
+    )
+    p_burn_eci = frames.rotate_cw_block(p_burn_rtn, rot)
+    return p_pre + p_burn_eci
 
 
 @dataclass(frozen=True)
