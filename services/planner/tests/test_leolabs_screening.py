@@ -39,9 +39,10 @@ _FIXTURE = Path(__file__).parent / "fixtures" / "leolabs_cdm_sample.json"
 _OBJECTS = [{"catalogNumber": "L2669", "noradCatalogNumber": 36508, "name": "CRYOSAT 2"}]
 _THRESHOLDS = ScreeningThresholds(
     min_probability_of_collision=1.0e-4,
-    max_miss_distance_km=1.0,
+    max_miss_distance_km=1.0,          # the action floor, decided against locally
     max_mahalanobis=4.0,
     combined_hbr_m=15.0,
+    screening_volume_km=50.0,          # the wide volume actually submitted
 )
 _EPHEMERIS = {
     "frame": "EME2000",
@@ -111,29 +112,40 @@ class TestRequestBody:
         assert json.loads(payload.decode("utf-8")) == _EPHEMERIS
 
     def test_the_form_fields_use_the_confirmed_names(self):
+        """SCRUM-442 narrowed this: no server-side Pc or Mahalanobis filter."""
         assert set(self._req().data) == {
             "primaryCatalogNumber",
             "missDistance",
-            "probabilityOfCollision",
-            "mahalanobisDistance",
             "primaryHardBodyRadius",
         }
 
     def test_the_primary_catalog_number_is_the_primary_object(self):
         assert self._req().data["primaryCatalogNumber"] == "L2669"
 
-    def test_miss_distance_is_kilometres_with_no_conversion(self):
-        """The one km field in an otherwise metres API. 1.0 must stay 1.0."""
+    def test_miss_distance_is_the_wide_screening_volume_not_the_action_floor(self):
+        """SCRUM-442: screen wide, decide narrow.
+
+        Sending the action floor here would conflate "how close is too close"
+        with "how far out do we look", and the screen would never see the events
+        the floor exists to catch.
+        """
         data = self._req().data
-        assert data["missDistance"] == 1.0
-        assert data["missDistance"] != 1000.0      # not metres
+        assert data["missDistance"] == _THRESHOLDS.screening_volume_km == 50.0
+        assert data["missDistance"] != _THRESHOLDS.max_miss_distance_km
         assert data["missDistance"] <= 100.0       # the API's stated maximum
 
-    def test_probability_of_collision_is_a_string(self):
-        """Typed as a string by the reference, so it is sent as one."""
-        value = self._req().data["probabilityOfCollision"]
-        assert isinstance(value, str)
-        assert float(value) == 1.0e-4
+    @pytest.mark.parametrize("server_side_filter", [
+        "probabilityOfCollision",
+        "mahalanobisDistance",
+    ])
+    def test_no_server_side_decision_filter_is_sent(self, server_side_filter):
+        """Our contract ORs Pc, miss and Mahalanobis.
+
+        A server-side Pc floor would drop events breaching on miss or Mahalanobis
+        alone, and the guard would never see them. Full recall in the volume; the
+        verdict is computed locally.
+        """
+        assert server_side_filter not in self._req().data
 
     def test_the_primary_hard_body_radius_is_the_15_m_combined_value(self):
         data = self._req().data
@@ -142,9 +154,6 @@ class TestRequestBody:
     def test_the_secondary_hard_body_radius_is_omitted(self):
         """Interim decision: each catalog secondary keeps its own radius."""
         assert "secondaryHardBodyRadius" not in self._req().data
-
-    def test_mahalanobis_distance_carries_our_threshold(self):
-        assert self._req().data["mahalanobisDistance"] == 4.0
 
     def test_screening_the_whole_catalog_is_expressed_by_omission(self):
         """There is no screenAgainstAllObjects flag; absence selects it.
@@ -181,15 +190,13 @@ class TestRequestBody:
         assert dead not in self._req().data
 
     def test_extra_merges_into_the_form_fields_last(self):
-        req = self._req(extra={"mahalanobisDistance": 9.0, "newField": 7})
-        assert req.data["mahalanobisDistance"] == 9.0
+        req = self._req(extra={"primaryHardBodyRadius": 9.0, "newField": 7})
+        assert req.data["primaryHardBodyRadius"] == 9.0
         assert req.data["newField"] == 7
 
-    def test_extra_can_drop_a_field_a_live_submit_rejects(self):
-        """The plan's contingency: if 422 names mahalanobisDistance, drop it."""
-        req = self._req()
-        req.data.pop("mahalanobisDistance")
-        assert "mahalanobisDistance" not in req.data
+    def test_extra_can_override_the_volume(self):
+        req = self._req(extra={"missDistance": 75.0})
+        assert req.data["missDistance"] == 75.0
 
     @pytest.mark.parametrize("bad", [None, {}, {"states": []}, {"frame": "EME2000"}])
     def test_an_ephemeris_without_states_is_refused(self, bad):

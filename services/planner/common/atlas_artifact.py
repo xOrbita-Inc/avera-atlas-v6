@@ -287,6 +287,148 @@ def _deferred_secondary_check() -> "SecondaryConflictCheck":
     )
 
 
+ON_DEMAND_SCREEN_SOURCE = "leolabs_on_demand"
+
+
+def _screen_failed_check(reason: str) -> "SecondaryConflictCheck":
+    """A screen that could not run. NOT performed, NOT clear, NOT deferred.
+
+    The distinction from _deferred_secondary_check matters: deferred means the
+    screen was deliberately out of scope, which must not fail a verification.
+    This means the screen should have run and could not, which section 4.2 treats
+    as NOT CLEAR and escalates to M4. A screen that could not run must never read
+    as a clear screen.
+    """
+    return SecondaryConflictCheck(
+        secondary_check_performed=False,
+        secondary_conjunction_clear=False,
+        flagged_objects=[],
+        operator_note=(
+            f"On-demand secondary screen could not be completed, so safety could "
+            f"not be established. MAF requires NOT CLEAR and M4 safe hold. "
+            f"Reason: {reason}"
+        ),
+        screen_deferred=False,
+    )
+
+
+def _run_on_demand_secondary_check(
+    r_post_km: Optional[List[float]],
+    v_post_km_s: Optional[List[float]],
+    p_post_eci_km2: Optional[Any],
+    screening_epoch_utc: Optional[str],
+    policy: OperatorPolicy,
+    cap: SatelliteCapability,
+    primary_catalog_number: Optional[str],
+    screening_sink: Optional[Any] = None,
+) -> "SecondaryConflictCheck":
+    """SCRUM-442: the real secondary screen, against the live LeoLabs catalog.
+
+    Builds the SCRUM-440 post-burn ephemeris (J2-propagated since SCRUM-451),
+    submits it for an on-demand screening at the policy's wide screening volume,
+    and judges the returned conjunctions locally against the SCRUM-381 clear
+    contract. Screen wide, decide narrow.
+
+    Fails closed on everything. Missing inputs, a screen that could not run, an
+    ephemeris that could not be built -- all return _screen_failed_check, which
+    the guard escalates on. The only path to CLEAR is a screen that completed and
+    returned no contract-breaching event.
+
+    An empty result is a genuine clear sky: performed=True, clear=True. That is
+    only safe because every failure mode in run_screening raises rather than
+    returning empty, which SCRUM-441 asserts as a property.
+
+    Covariance caveat: the submitted covariance is SCRUM-440's constant
+    position-only floor, which does not grow across the 72 h horizon. It is a
+    floor, not a model; the honest growth model is the tracked fast-follow and is
+    deliberately not implemented here.
+    """
+    from common.leolabs_ephemeris import LeoLabsEphemerisError, build_screening_ephemeris
+    from common.leolabs_screening import (
+        LeoLabsScreeningError,
+        evaluate_clear_contract,
+        run_screening,
+        thresholds_from_policy,
+    )
+
+    missing = []
+    if not r_post_km:
+        missing.append("post-burn position")
+    if not v_post_km_s:
+        missing.append("post-burn velocity")
+    if p_post_eci_km2 is None:
+        missing.append("post-burn covariance")
+    if not screening_epoch_utc:
+        missing.append("screening epoch")
+    if not primary_catalog_number:
+        missing.append("primary catalog number")
+    if missing:
+        return _screen_failed_check(
+            "missing required input(s): " + ", ".join(missing)
+        )
+
+    try:
+        ephemeris = build_screening_ephemeris(
+            screening_epoch_utc, r_post_km, v_post_km_s, p_post_eci_km2
+        )
+    except (LeoLabsEphemerisError, Exception) as exc:
+        return _screen_failed_check(f"ephemeris could not be built: {exc}")
+
+    thresholds = thresholds_from_policy(policy, primary_radius_m=cap.radius_m)
+    try:
+        result = run_screening(
+            ephemeris, thresholds, str(primary_catalog_number)
+        )
+    except LeoLabsScreeningError as exc:
+        return _screen_failed_check(str(exc))
+    except Exception as exc:
+        # Anything unexpected is still a screen that did not produce a verdict.
+        return _screen_failed_check(f"unexpected screening failure: {exc}")
+
+    verdict = evaluate_clear_contract(result.conjunctions, policy)
+
+    # Hand the raw result to the caller for persistence, the way SCRUM-429 links
+    # a decision to the CDM it was made on. Never allowed to affect the verdict.
+    if screening_sink is not None:
+        try:
+            screening_sink(result, verdict)
+        except Exception:
+            pass
+
+    if verdict.clear:
+        note = (
+            f"On-demand secondary screen clear: {verdict.evaluated} conjunction(s) "
+            f"returned within the {policy.screening_volume_km:g} km screening "
+            f"volume, none breaching the clear contract "
+            f"(Pc >= {policy.pc_maneuver_threshold:g}, miss < "
+            f"{policy.min_miss_distance_km:g} km, or Mahalanobis <= "
+            f"{policy.mahalanobis_screen_threshold:g}). Screening id "
+            f"{result.screening_id}. Submitted covariance is a constant "
+            f"position-only floor; the growth model is a tracked fast-follow."
+        )
+    else:
+        limbs = sorted({limb for b in verdict.breaches for limb in b["limbs"]})
+        note = (
+            f"On-demand secondary screen NOT CLEAR: {len(verdict.breaches)} of "
+            f"{verdict.evaluated} returned conjunction(s) breach the clear "
+            f"contract on {', '.join(limbs)}. MAF requires M4 safe hold. "
+            f"Screening id {result.screening_id}. Submitted covariance is a "
+            f"constant position-only floor; the growth model is a tracked "
+            f"fast-follow."
+        )
+
+    return SecondaryConflictCheck(
+        secondary_check_performed=True,
+        secondary_conjunction_clear=verdict.clear,
+        flagged_objects=verdict.flagged_objects,
+        operator_note=note,
+        closest_approach_km=verdict.closest_miss_km,
+        closest_object_id=verdict.closest_object_id,
+        screening_epoch_utc=screening_epoch_utc,
+        screen_deferred=False,
+    )
+
+
 def _run_secondary_conflict_check(
     r_post_km: Optional[List[float]],
     known_objects: Optional[List[Dict[str, Any]]],
@@ -953,6 +1095,9 @@ def build_atlas_artifact(
     r_post_km: Optional[List[float]] = None,
     v_post_km_s: Optional[List[float]] = None,
     secondary_screen_enabled: bool = False,
+    p_post_eci_km2: Optional[Any] = None,
+    primary_catalog_number: Optional[str] = None,
+    screening_sink: Optional[Any] = None,
 ) -> ATLASManeuverArtifact:
     """Assemble a complete ATLASManeuverArtifact from a ManeuverScoringResult.
 
@@ -1011,21 +1156,34 @@ def build_atlas_artifact(
     )
 
     # --- Secondary conflict check ---
-    # SCRUM-431: default off. The SCRUM-381 screen ran on a Space-Track TLE
-    # catalog, which carries no covariance, so it could only ever produce an
-    # assumed-covariance answer -- and with Space-Track retired there is no
-    # catalog at all, so it failed closed and showed VERIFICATION FAILED on
-    # every evaluate. Deferred rather than deleted: flip the flag when the
-    # LeoLabs-backed screen ships and the fail-closed path below returns
-    # unchanged.
-    if secondary_screen_enabled:
-        secondary = _run_secondary_conflict_check(
-            r_post_km,
-            known_objects,
-            scoring.t_burn_utc,
+    # SCRUM-442: with the screen enabled this is now the real, live path -- the
+    # LeoLabs on-demand screen of the actual post-burn trajectory, judged against
+    # the SCRUM-381 clear contract. It replaces the SCRUM-431 deferral, which
+    # existed only because the old SCRUM-381 screen ran on a Space-Track TLE
+    # catalog that carried no covariance and then had no catalog at all.
+    #
+    # The deferral survives for the flag-OFF case and nothing else. Turning the
+    # screen off must not fail every evaluate closed -- that is the regression
+    # SCRUM-431 fixed -- so "off" stays a deliberate deferral, distinguishable
+    # from a screen that should have run and could not.
+    # Only when a burn is actually on the table. The secondary check exists to
+    # answer "is the POST-BURN trajectory clear", it is consumed only by the A4
+    # post-maneuver projection below, and that block is itself built only when a
+    # maneuver is recommended. Running it on a no-burn decision would spend a
+    # rate-limited screening create (3 per 2 minutes) and roughly a minute and a
+    # half of poll on a result nothing reads -- and would exhaust the quota after
+    # a handful of routine evaluates, at which point the screen starts failing
+    # closed for the decisions that do need it.
+    if secondary_screen_enabled and scoring.is_maneuver_recommended():
+        secondary = _run_on_demand_secondary_check(
+            r_post_km=r_post_km,
             v_post_km_s=v_post_km_s,
+            p_post_eci_km2=p_post_eci_km2,
+            screening_epoch_utc=scoring.t_burn_utc,
             policy=policy,
             cap=cap,
+            primary_catalog_number=primary_catalog_number,
+            screening_sink=screening_sink,
         )
     else:
         secondary = _deferred_secondary_check()

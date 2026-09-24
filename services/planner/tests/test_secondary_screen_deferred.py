@@ -287,13 +287,34 @@ class TestEnabledScreenStillFailsClosed:
 
         assert decision.mode is FlightMode.M2_STAGED
 
-    def test_the_flag_defaults_to_off(self):
-        """The whole point: the default build does not run the screen."""
+    def test_the_flag_defaults_to_on(self):
+        """SCRUM-442 flipped this default.
+
+        Under SCRUM-431 the default was off, because the screen could only fail
+        closed: its Space-Track catalog carried no covariance and then did not
+        exist. The screen is now the real LeoLabs on-demand path, so it defaults
+        on -- and it still fails closed, which is the point.
+
+        The consequence is deliberate and worth stating: with the screen on, an
+        environment that cannot reach LeoLabs cannot stage a maneuver at all,
+        because a screen that could not run is NOT CLEAR.
+        """
         import importlib
         import server
 
         importlib.reload(server)
+        assert server.SECONDARY_SCREEN_ENABLED is True
+
+    def test_the_flag_still_turns_the_screen_off(self, monkeypatch):
+        """Turning it off returns the deliberate deferral, not a failure."""
+        import importlib
+        import server
+
+        monkeypatch.setenv("SECONDARY_SCREEN_ENABLED", "false")
+        importlib.reload(server)
         assert server.SECONDARY_SCREEN_ENABLED is False
+        monkeypatch.delenv("SECONDARY_SCREEN_ENABLED", raising=False)
+        importlib.reload(server)
 
     def test_the_flag_turns_the_screen_on(self, monkeypatch):
         import importlib

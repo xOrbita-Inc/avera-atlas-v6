@@ -296,6 +296,101 @@ def _resolve_evaluate_source(
     return "surrogate"
 
 
+def _persist_screening_result(result, verdict, decision_log_id) -> Optional[str]:
+    """SCRUM-442: store the on-demand screening a decision was made on.
+
+    NOT YET LANDING. The ingest service has no /screening/persist endpoint and no
+    table to hold this -- PlannerOutput is a fixed schema with no room for a
+    screening reference, and adding one is an ingest change, while SCRUM-442 is
+    scoped to the planner. So this posts, 404s, logs an audit failure and returns
+    None. Verified live: the evaluate still returns its decision and
+    screening_record_id comes back null.
+
+    That is the correct *failure* behaviour but it is not the feature. What is
+    still needed, and is flagged in docs/scrum-442/live_verification.md: an ingest
+    endpoint and table mirroring cdm_records / PlannerOutput, after which this
+    function works unchanged. Until then a NOT CLEAR verdict is auditable only
+    through the operator note and the service logs, not through the store.
+
+    Mirrors _persist_leolabs_cdm: persist-on-evaluate, guarded, and never allowed
+    to affect the decision. Any failure logs and returns None, and the evaluate
+    returns the decision it already made -- a decision that was made must still be
+    returned even if we could not write down what it was made from.
+
+    The record is the screening id, the verdict and its breaches, and each
+    returned conjunction with its covariance, tied to the decision log id so the
+    CLEAR or NOT CLEAR can be audited against the exact events behind it.
+    """
+    if result is None:
+        return None
+    try:
+        conjunctions = []
+        for parsed in result.conjunctions:
+            entry = {
+                "cdm_id": parsed.provenance.get("cdm_id"),
+                "event_id": parsed.provenance.get("event_id"),
+                "secondary_norad": parsed.secondary.norad_id,
+                "secondary_designator": parsed.secondary.designator,
+                "secondary_name": parsed.secondary.object_name,
+                "tca_utc": parsed.t_ca_utc,
+                "miss_distance_m": parsed.miss_distance_m,
+                "pc": parsed.cdm_collision_probability,
+                # The covariance the verdict was judged on, m^2, EME2000.
+                "cov_eci_pos_m2": [
+                    [float(c) for c in row]
+                    for row in parsed.secondary.cov_eci_pos_m2
+                ],
+            }
+            conjunctions.append(entry)
+
+        record = {
+            "decision_log_id": decision_log_id,
+            "screening_id": result.screening_id,
+            "source": "leolabs_on_demand",
+            "cdm_count": result.cdm_count,
+            "conjunction_count": len(result.conjunctions),
+            "skipped": result.skipped,
+            "clear": bool(verdict.clear) if verdict is not None else None,
+            "breaches": list(verdict.breaches) if verdict is not None else [],
+            "conjunctions": conjunctions,
+            # Stated on the record itself, not only in the code: the submitted
+            # covariance is a constant position-only floor, and the growth model
+            # is a tracked fast-follow.
+            "covariance_caveat": (
+                "submitted primary covariance is a constant position-only floor; "
+                "growth model is a tracked fast-follow"
+            ),
+        }
+    except Exception as exc:
+        log.warning(
+            "screening result could not be mapped for the store",
+            extra={"event": "screening_map_failed", "exc": str(exc)},
+        )
+        return None
+
+    try:
+        resp = http_requests.post(
+            f"{_ingest_url()}/screening/persist", json=record, timeout=5.0
+        )
+        if resp.status_code not in (200, 201):
+            _note_audit_failure(
+                "screening_result", str(result.screening_id),
+                f"status {resp.status_code}",
+            )
+            return None
+        log.info(
+            "on-demand screening result persisted",
+            extra={"event": "screening_persisted",
+                   "screening_id": result.screening_id,
+                   "decision_log_id": decision_log_id,
+                   "conjunctions": len(result.conjunctions)},
+        )
+        return str(result.screening_id)
+    except Exception as exc:
+        _note_audit_failure("screening_result", str(result.screening_id), str(exc))
+        return None
+
+
 def _persist_leolabs_cdm(parsed_ll) -> Optional[int]:
     """SCRUM-429: store the LeoLabs CDM this evaluate is scoring, return its id.
 
@@ -425,8 +520,12 @@ def _post_planner_output(
 # evaluate. Deferred, not deleted: the screen logic is intact and flipping this
 # flag restores today's fail-closed behaviour exactly, which is what the
 # LeoLabs covariance-backed rebuild will do.
+# SCRUM-442: default ON. The screen is now the real LeoLabs on-demand path
+# (SCRUM-440/441/451) rather than the SCRUM-431 deferral, and it fails closed on
+# its own. The flag stays so it can be turned off, which returns the deliberate
+# deferral rather than failing every evaluate.
 SECONDARY_SCREEN_ENABLED = (
-    os.environ.get("SECONDARY_SCREEN_ENABLED", "false").lower() == "true"
+    os.environ.get("SECONDARY_SCREEN_ENABLED", "true").lower() == "true"
 )
 
 _MODE_STORE = build_mode_store()
@@ -2115,6 +2214,49 @@ async def post_evaluate(request: Request):
                     for i in range(3)
                 ]
 
+            # SCRUM-442: what the on-demand secondary screen needs.
+            #
+            # p_post: the screening ephemeris wants the PRIMARY's post-burn
+            # position covariance. What this path holds is p_rel_km2, the
+            # COMBINED relative covariance -- primary plus secondary. Passing it
+            # as the primary's over-states the primary's own uncertainty, and
+            # that is the deliberately conservative direction for a screen: a
+            # larger covariance lowers Mahalanobis distance, so more events fall
+            # inside the risk-relevant radius and more breach the contract. It is
+            # a stand-in, not the right quantity, and it is one of the two
+            # covariance items the tracked fast-follow replaces -- the other
+            # being SCRUM-440's constant-in-time floor. Flagged, not silent.
+            _p_post = None
+            _p_rel = (body.get("conjunction") or {}).get("p_rel_km2")
+            if _p_rel:
+                try:
+                    _flat = [float(c) for c in _p_rel]
+                    if len(_flat) == 9:
+                        _p_post = [_flat[0:3], _flat[3:6], _flat[6:9]]
+                except (TypeError, ValueError):
+                    _p_post = None
+
+            # The screen is keyed on the LeoLabs catalog number, not the NORAD.
+            _screen_catalog = None
+            if SECONDARY_SCREEN_ENABLED:
+                _ll_norad = (body.get("conjunction") or {}).get("primary_norad")
+                if _ll_norad:
+                    try:
+                        _screen_catalog = catalog_for_norad(int(_ll_norad))
+                    except Exception as exc:
+                        log.info(
+                            "secondary screen has no catalog number for the primary",
+                            extra={"event": "secondary_screen_no_catalog",
+                                   "primary_norad": _ll_norad, "exc": str(exc)},
+                        )
+
+            _screening_capture: Dict[str, Any] = {}
+
+            def _capture_screening(result, verdict):
+                """Hold the screening result so it can be persisted with the decision."""
+                _screening_capture["result"] = result
+                _screening_capture["verdict"] = verdict
+
             artifact = build_atlas_artifact(
                 scoring=scoring,
                 cap=cap,
@@ -2126,6 +2268,9 @@ async def post_evaluate(request: Request):
                 r_post_km=r_sat_km_req if r_sat_km_req else None,
                 v_post_km_s=v_post_km_s,
                 secondary_screen_enabled=SECONDARY_SCREEN_ENABLED,
+                p_post_eci_km2=_p_post,
+                primary_catalog_number=_screen_catalog,
+                screening_sink=_capture_screening,
             )
             result["atlas_artifact"] = artifact.to_dict()
             # Read once: both the decision-log block and the SCRUM-379 block
@@ -2142,6 +2287,17 @@ async def post_evaluate(request: Request):
                 result["decision_log_id"] = decision_log.log_id
                 result["decision_log"] = vars(decision_log)
                 _post_decision_log(decision_log)
+                # SCRUM-442: link the screening the verdict was made on to the
+                # decision, the way SCRUM-429 links a decision to its stored CDM
+                # under ADR-008. A NOT CLEAR that cannot be traced back to the
+                # events behind it is an assertion, not an audit record.
+                _sc_id = _persist_screening_result(
+                    _screening_capture.get("result"),
+                    _screening_capture.get("verdict"),
+                    decision_log.log_id,
+                )
+                if _sc_id:
+                    result["screening_record_id"] = _sc_id
                 _ev_id = _post_evidence_record(artifact, decision_log, _pol)
                 if _ev_id:
                     result["evidence_record_id"] = _ev_id

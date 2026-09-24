@@ -38,6 +38,10 @@ import yaml
 # Blackout window
 # ---------------------------------------------------------------------------
 
+# SCRUM-442: the LeoLabs on-demand screening API caps missDistance at 100 km.
+SCREENING_VOLUME_MAX_KM = 100.0
+
+
 @dataclass
 class BlackoutWindow:
     """
@@ -188,6 +192,15 @@ class OperatorPolicy:
     min_miss_distance_km: float         = 1.0
     mahalanobis_screen_threshold: float = 4.0
 
+    # SCRUM-442: how wide the on-demand secondary screen looks, in kilometres.
+    # Deliberately NOT min_miss_distance_km. That is the *action floor* -- the
+    # distance at which a maneuver becomes required -- and using it to size the
+    # screen would conflate "how close is too close" with "how far out do we
+    # look". Screen wide, decide narrow: submit this volume, then judge the
+    # returned events locally against the action floor above. Capped at the
+    # LeoLabs API maximum of 100 km.
+    screening_volume_km: float          = 50.0
+
     # -- Tier 1: maneuver constraints (configurable) ----------------------
     max_dv_per_event_ms: float          = 2.0
     max_maneuvers_per_week: int         = 3
@@ -238,6 +251,17 @@ class OperatorPolicy:
             raise ValueError("min_miss_distance_km must be >= 0")
         if self.mahalanobis_screen_threshold <= 0:
             raise ValueError("mahalanobis_screen_threshold must be > 0")
+        if not (0 < self.screening_volume_km <= SCREENING_VOLUME_MAX_KM):
+            raise ValueError(
+                f"screening_volume_km must be > 0 and <= "
+                f"{SCREENING_VOLUME_MAX_KM} (the LeoLabs API maximum)"
+            )
+        if self.screening_volume_km < self.min_miss_distance_km:
+            raise ValueError(
+                "screening_volume_km must be >= min_miss_distance_km: a screen "
+                "narrower than the action floor could not see the events the "
+                "floor is meant to catch"
+            )
         if self.max_dv_per_event_ms <= 0:
             raise ValueError("max_dv_per_event_ms must be > 0")
         if self.max_maneuvers_per_week < 1:
@@ -313,6 +337,7 @@ class OperatorPolicy:
             pc_monitor_threshold       = float(rt.get("pc_monitor_threshold",  1.0e-5)),
             min_miss_distance_km       = float(rt.get("min_miss_distance_km",  1.0)),
             mahalanobis_screen_threshold = float(rt.get("mahalanobis_screen_threshold", 4.0)),
+            screening_volume_km        = float(rt.get("screening_volume_km",    50.0)),
             max_dv_per_event_ms        = float(mc.get("max_dv_per_event_ms",   2.0)),
             max_maneuvers_per_week     = int(mc.get("max_maneuvers_per_week",   3)),
             min_hours_before_tca       = float(mc.get("min_hours_before_tca",  4.0)),
@@ -430,6 +455,7 @@ class OperatorPolicy:
             "pc_maneuver_threshold":        self.pc_maneuver_threshold,
             "pc_monitor_threshold":         self.pc_monitor_threshold,
             "min_miss_distance_km":         self.min_miss_distance_km,
+            "screening_volume_km":          self.screening_volume_km,
             "mahalanobis_screen_threshold": self.mahalanobis_screen_threshold,
             "max_dv_per_event_ms":          self.max_dv_per_event_ms,
             "max_maneuvers_per_week":       self.max_maneuvers_per_week,

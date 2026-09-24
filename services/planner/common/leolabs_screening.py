@@ -35,6 +35,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+import numpy as np
+
 from aps_math import conventions
 from common.leolabs_asset_map import AssetRegistry
 from common.leolabs_client import (
@@ -107,6 +109,10 @@ class ScreeningThresholds:
     max_mahalanobis: float
     combined_hbr_m: float
     hbr_source: str = "screening_convention"
+    # SCRUM-442: how wide the request asks LeoLabs to look. Separate from
+    # max_miss_distance_km, which is the action floor the verdict is decided
+    # against locally. Screen wide, decide narrow.
+    screening_volume_km: float = 50.0
 
 
 def thresholds_from_policy(policy: Any, primary_radius_m: float) -> ScreeningThresholds:
@@ -122,6 +128,7 @@ def thresholds_from_policy(policy: Any, primary_radius_m: float) -> ScreeningThr
         max_mahalanobis=float(policy.mahalanobis_screen_threshold),
         combined_hbr_m=float(hbr_m),
         hbr_source=str(hbr_source),
+        screening_volume_km=float(policy.screening_volume_km),
     )
 
 
@@ -177,12 +184,25 @@ def build_screening_request(
     ---------------------------
       file                    the SCRUM-440 ephemeris, JSON bytes, uploaded.
       primaryCatalogNumber    the LeoLabs catalog number, e.g. L3969.
-      missDistance            KILOMETRES, max 100. policy.min_miss_distance_km
-                              goes here directly: no conversion, because this one
-                              field is km while the rest of the API is metres.
-      probabilityOfCollision  minimum PoC to return, as a STRING.
-      mahalanobisDistance     our screen threshold. See the open decision below.
+      missDistance            KILOMETRES, max 100. The WIDE screening volume
+                              (policy.screening_volume_km, default 50), not the
+                              action floor. No conversion: this one field is km
+                              while the rest of the API is metres.
       primaryHardBodyRadius   METRES. See the open decision below.
+
+    Screen wide, decide narrow (SCRUM-442)
+    --------------------------------------
+    probabilityOfCollision and mahalanobisDistance are deliberately NOT sent.
+    They would act as server-side filters, and our clear contract is an OR of Pc,
+    miss distance and Mahalanobis -- so a server-side Pc floor would silently drop
+    events that breach on miss or Mahalanobis alone, and the guard would never see
+    them. Full recall inside the volume, verdict computed locally by
+    evaluate_clear_contract. This also retires the mahalanobisDistance request
+    field, whose meaning SCRUM-441 could never confirm: we no longer send it.
+
+    missDistance is the one filter kept server-side, because it is the volume
+    itself rather than a decision threshold -- something has to bound the search.
+    It is set wide so the bounding does not pre-empt the verdict.
 
     What is omitted, and why omission is the instruction
     ----------------------------------------------------
@@ -241,11 +261,9 @@ def build_screening_request(
 
     data: Dict[str, Any] = {
         "primaryCatalogNumber": str(primary_object),
-        # Kilometres, straight from the policy. The one km field in a metres API.
-        "missDistance": thresholds.max_miss_distance_km,
-        # A string by the reference's own typing, not a float.
-        "probabilityOfCollision": str(thresholds.min_probability_of_collision),
-        "mahalanobisDistance": thresholds.max_mahalanobis,
+        # SCRUM-442: the WIDE screening volume, in kilometres -- not the action
+        # floor. See the note above on screening wide and deciding narrow.
+        "missDistance": thresholds.screening_volume_km,
         # Metres. The 15 m combined value, per the interim decision above.
         "primaryHardBodyRadius": thresholds.combined_hbr_m,
     }
@@ -282,6 +300,134 @@ class ScreeningResult:
     def is_clear(self) -> bool:
         """No conjunctions came back. Only meaningful because failures raise."""
         return not self.conjunctions
+
+
+@dataclass(frozen=True)
+class ContractVerdict:
+    """The SCRUM-381 clear contract applied to a screening result.
+
+    `clear` is the boolean guard_secondary_clear ultimately reads. `breaches`
+    records why each breaching event breached, so a NOT CLEAR verdict can be
+    audited against the exact events and limbs it was made on rather than just
+    asserted.
+    """
+
+    clear: bool
+    evaluated: int
+    breaches: List[Dict[str, Any]] = field(default_factory=list)
+    closest_miss_km: Optional[float] = None
+    closest_object_id: Optional[str] = None
+    max_pc: Optional[float] = None
+    flagged_objects: List[str] = field(default_factory=list)
+
+
+def _mahalanobis_distance(parsed: ParsedLeoLabsCDM) -> Optional[float]:
+    """Mahalanobis distance of the relative position, or None if not computable.
+
+    Uses the same mahalanobis_sq the scorer uses, on the parsed CDM's own
+    relative position and combined covariance, rather than a second formula.
+    """
+    try:
+        from avoid.decision_model import mahalanobis_sq
+
+        m2 = mahalanobis_sq(parsed.r_rel_km(), parsed.p_rel_eci_km2())
+        if not np.isfinite(m2) or m2 < 0:
+            return None
+        return float(np.sqrt(m2))
+    except Exception:
+        return None
+
+
+def evaluate_clear_contract(
+    conjunctions: Sequence[ParsedLeoLabsCDM], policy: Any
+) -> ContractVerdict:
+    """Judge screened conjunctions against the SCRUM-381 clear contract.
+
+    Decide narrow: the screen was submitted wide, and the verdict is made here
+    against the operator policy's own thresholds. The two predicates are the
+    policy's existing ones, not reimplementations --
+
+        policy.is_maneuver_required(pc, miss_km)
+            Pc >= pc_maneuver_threshold OR miss < min_miss_distance_km
+        policy.passes_pre_screen(mahalanobis)
+            mahalanobis <= mahalanobis_screen_threshold, i.e. inside the
+            risk-relevant radius
+
+    -- so the on-demand screen and the internal one cannot drift apart about what
+    "clear" means. An event breaches if either holds. Note the plan describes the
+    miss limb as "at or below" while is_maneuver_required uses a strict `<`; the
+    existing implementation is used as-is rather than being adjusted to the prose,
+    because one of them has been in the decision path and the other has not.
+
+    An absent value never breaches on its own limb -- a CDM with no Pc cannot
+    breach the Pc limb -- but it does not excuse the event either: the other limbs
+    still apply, and the Mahalanobis limb is precisely the fallback for an event
+    with no Pc.
+
+    An empty sequence is CLEAR. That is the honest reading of a screen that ran
+    and found nothing, and it is only safe because every way of *failing* to run
+    raises instead of returning empty.
+    """
+    breaches: List[Dict[str, Any]] = []
+    flagged: List[str] = []
+    closest_miss_km: Optional[float] = None
+    closest_object_id: Optional[str] = None
+    max_pc: Optional[float] = None
+
+    for parsed in conjunctions:
+        obj_id = (parsed.secondary.object_name
+                  or parsed.secondary.designator
+                  or str(parsed.secondary.norad_id))
+        pc = parsed.cdm_collision_probability
+        miss_km = (parsed.miss_distance_m / 1000.0
+                   if parsed.miss_distance_m is not None else None)
+        mahalanobis = _mahalanobis_distance(parsed)
+
+        if miss_km is not None and (closest_miss_km is None
+                                    or miss_km < closest_miss_km):
+            closest_miss_km = miss_km
+            closest_object_id = obj_id
+        if pc is not None and (max_pc is None or pc > max_pc):
+            max_pc = float(pc)
+
+        limbs: List[str] = []
+        # Pc and miss share one predicate, so they are asked together and the
+        # limb is attributed afterwards for the audit trail.
+        if pc is not None or miss_km is not None:
+            if policy.is_maneuver_required(
+                float(pc) if pc is not None else 0.0,
+                float(miss_km) if miss_km is not None else float("inf"),
+            ):
+                if pc is not None and pc >= policy.pc_maneuver_threshold:
+                    limbs.append("pc")
+                if miss_km is not None and miss_km < policy.min_miss_distance_km:
+                    limbs.append("miss_distance")
+        if mahalanobis is not None and policy.passes_pre_screen(mahalanobis):
+            limbs.append("mahalanobis")
+
+        if limbs:
+            flagged.append(obj_id)
+            breaches.append({
+                "object_id": obj_id,
+                "secondary_norad": parsed.secondary.norad_id,
+                "cdm_id": parsed.provenance.get("cdm_id"),
+                "event_id": parsed.provenance.get("event_id"),
+                "tca_utc": parsed.t_ca_utc,
+                "pc": pc,
+                "miss_distance_km": miss_km,
+                "mahalanobis": mahalanobis,
+                "limbs": limbs,
+            })
+
+    return ContractVerdict(
+        clear=not breaches,
+        evaluated=len(conjunctions),
+        breaches=breaches,
+        closest_miss_km=closest_miss_km,
+        closest_object_id=closest_object_id,
+        max_pc=max_pc,
+        flagged_objects=flagged,
+    )
 
 
 def _screening_id(created: Any) -> str:
