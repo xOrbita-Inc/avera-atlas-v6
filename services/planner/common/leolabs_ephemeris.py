@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
-from common.orbit_propagation import kepler_propagate
+from common.orbit_propagation import propagate_j2_series
 
 log = logging.getLogger("planner")
 
@@ -201,17 +201,29 @@ def build_screening_ephemeris(
 ) -> Dict[str, Any]:
     """The post-burn trajectory as a LeoLabs screening ephemeris.
 
-    Propagates the post-burn state with kepler_propagate -- the planner's own
-    universal-variable two-body propagator, the one secondary_horizon already
-    screens against, so the ephemeris describes the same trajectory the internal
-    screen does rather than a second opinion about it -- from epoch_utc across
-    horizon_hours at step_s, and emits:
+    Propagates the post-burn state under two-body plus J2 (SCRUM-451) from
+    epoch_utc across horizon_hours at step_s, and emits:
 
         {"frame": "EME2000", "covarianceFrame": "EME2000",
          "states": [{"timestamp": ..., "position": [m x3],
                      "velocity": [m/s x3], "covariance": [6x6]}, ...]}
 
     The first state is the post-burn state itself at epoch_utc, unpropagated.
+
+    Why J2 and not kepler_propagate (SCRUM-451)
+    -------------------------------------------
+    SCRUM-440 propagated this file two-body, and the SCRUM-441 screen built on it
+    came back falsely clear: 0 conjunctions at a 25 km miss-distance box where the
+    catalog holds 64 events over the same window. A miss-distance box is a
+    geometric filter, so covariance could not explain a miss at that size -- the
+    submitted trajectory was simply in the wrong place. Two-body versus J2 for a
+    Swarm-C-like orbit diverges by ~26 km within the first hour and ~1400 km by
+    72 h, so the submitted path left even a 25 km box almost immediately.
+
+    This is the fidelity of the file we hand LeoLabs, not the planner's internal
+    dynamics: kepler_propagate is untouched and secondary_horizon, maneuver_scorer,
+    the globe and the propagator service all keep using it. Drag, SRP and higher
+    zonals remain unmodelled and are later refinement.
 
     Every state carries the same covariance, which is the limitation documented on
     covariance_6x6_from_position_3x3: position uncertainty genuinely grows over a
@@ -246,9 +258,15 @@ def build_screening_ephemeris(
     n_steps = int(np.floor(horizon_s / step + 1e-9))
     offsets = [i * step for i in range(n_steps + 1)]
 
+    # One integration sampled at the output cadence, rather than one propagation
+    # per state: for an 865-state file that is one pass instead of 865.
+    positions, velocities = propagate_j2_series(r0, v0, np.asarray(offsets, dtype=float))
+
     states: List[Dict[str, Any]] = []
-    for dt_s in offsets:
-        r, v = (r0, v0) if dt_s == 0.0 else kepler_propagate(r0, v0, dt_s)
+    for index, dt_s in enumerate(offsets):
+        # t = 0 is the post-burn state itself, returned unpropagated.
+        r = r0 if dt_s == 0.0 else positions[index]
+        v = v0 if dt_s == 0.0 else velocities[index]
         states.append({
             "timestamp": _iso_z(epoch + timedelta(seconds=dt_s)),
             "position": [float(c) * _KM_TO_M for c in r],
@@ -259,6 +277,7 @@ def build_screening_ephemeris(
     log.info(
         "built LeoLabs screening ephemeris",
         extra={"event": "leolabs_ephemeris_built", "states": len(states),
+               "dynamics": "two_body_plus_j2",
                "horizon_hours": float(horizon_hours), "step_s": step,
                "epoch_utc": _iso_z(epoch)},
     )

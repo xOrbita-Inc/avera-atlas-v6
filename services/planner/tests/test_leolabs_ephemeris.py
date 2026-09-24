@@ -34,7 +34,11 @@ from common.leolabs_ephemeris import (
     build_screening_ephemeris,
     covariance_6x6_from_position_3x3,
 )
-from common.orbit_propagation import kepler_propagate
+from common.orbit_propagation import (
+    MU_EARTH,
+    kepler_propagate,
+    propagate_j2_series,
+)
 
 # A circular-ish LEO post-burn state, km and km/s.
 _EPOCH = "2026-09-24T12:00:00Z"
@@ -42,6 +46,16 @@ _R_KM = [6792.0, 0.0, 0.0]
 _V_KM_S = [0.0, 5.0, 5.8]
 # A realistic post-burn position covariance: metres-scale, expressed in km^2.
 # 0.04 km^2 = 4e4 m^2 -> 200 m one-sigma.
+# A Swarm-C-like orbit, for the divergence guard: the asset the SCRUM-441 screen
+# was actually run against.
+_SWARM_C_A_KM = 6838.0
+_SWARM_C_INC = math.radians(87.35)
+_SWARM_C_SPEED = math.sqrt(MU_EARTH / _SWARM_C_A_KM)
+_SWARM_C_R_KM = [_SWARM_C_A_KM, 0.0, 0.0]
+_SWARM_C_V_KM_S = [0.0,
+                   _SWARM_C_SPEED * math.cos(_SWARM_C_INC),
+                   _SWARM_C_SPEED * math.sin(_SWARM_C_INC)]
+
 _P_KM2 = np.array([
     [0.04, 0.01, 0.00],
     [0.01, 0.09, 0.02],
@@ -169,19 +183,56 @@ class TestTrajectory:
         assert all(b > a for a, b in zip(parsed, parsed[1:]))
         assert all(p.tzinfo == timezone.utc for p in parsed)
 
-    def test_the_states_match_kepler_propagate_exactly(self):
-        """The ephemeris must describe the same trajectory the internal screen does."""
+    def test_the_states_match_the_j2_propagator_exactly(self):
+        """SCRUM-451: the ephemeris is the J2 trajectory, not the two-body one.
+
+        This replaced an assertion against kepler_propagate. The screening file
+        deliberately no longer describes the same trajectory the planner's
+        internal two-body screen does -- it describes where the asset will
+        actually be, which is the whole point of 451.
+        """
         eph = _build(horizon_hours=1.0, step_s=900.0)
+        offsets = np.array([i * 900.0 for i in range(len(eph["states"]))])
+        positions, velocities = propagate_j2_series(
+            np.asarray(_R_KM, dtype=float), np.asarray(_V_KM_S, dtype=float), offsets)
+
         for i, state in enumerate(eph["states"]):
-            dt_s = i * 900.0
-            if dt_s == 0.0:
-                r, v = np.asarray(_R_KM, dtype=float), np.asarray(_V_KM_S, dtype=float)
-            else:
-                r, v = kepler_propagate(
-                    np.asarray(_R_KM, dtype=float),
-                    np.asarray(_V_KM_S, dtype=float), dt_s)
+            r = np.asarray(_R_KM) if i == 0 else positions[i]
+            v = np.asarray(_V_KM_S) if i == 0 else velocities[i]
             assert state["position"] == pytest.approx([c * 1000.0 for c in r])
             assert state["velocity"] == pytest.approx([c * 1000.0 for c in v])
+
+    def test_a_late_state_differs_from_two_body_by_the_expected_order(self):
+        """The regression guard at the builder level.
+
+        If a future edit reverts this path to kepler_propagate, the difference
+        collapses to zero and this fails. The magnitudes are the measured
+        two-body-vs-J2 divergences that justified SCRUM-451.
+        """
+        eph = build_screening_ephemeris(_EPOCH, _SWARM_C_R_KM, _SWARM_C_V_KM_S, _P_KM2)
+        offsets = [i * DEFAULT_STEP_S for i in range(len(eph["states"]))]
+
+        for hours, low_km, high_km in ((24, 330.0, 620.0), (72, 1000.0, 1900.0)):
+            target = hours * 3600.0
+            index = offsets.index(target)
+            j2_km = np.array(eph["states"][index]["position"]) / 1000.0
+            two_body_km, _ = kepler_propagate(
+                np.asarray(_SWARM_C_R_KM, dtype=float),
+                np.asarray(_SWARM_C_V_KM_S, dtype=float), target)
+            divergence = float(np.linalg.norm(j2_km - two_body_km))
+            assert low_km < divergence < high_km, (
+                f"{hours} h divergence {divergence:.1f} km outside "
+                f"[{low_km}, {high_km}] -- has J2 been dropped?")
+
+    def test_the_first_state_is_still_the_unpropagated_epoch_state(self):
+        """Unchanged by 451: the file still starts exactly where the asset is."""
+        first = build_screening_ephemeris(
+            _EPOCH, _SWARM_C_R_KM, _SWARM_C_V_KM_S, _P_KM2)["states"][0]
+        assert first["timestamp"] == "2026-09-24T12:00:00Z"
+        assert first["position"] == pytest.approx(
+            [c * 1000.0 for c in _SWARM_C_R_KM])
+        assert first["velocity"] == pytest.approx(
+            [c * 1000.0 for c in _SWARM_C_V_KM_S])
 
     def test_the_trajectory_actually_moves(self):
         """Guards against a propagation that silently returns the initial state."""
