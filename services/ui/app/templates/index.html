@@ -938,8 +938,7 @@ function clearScoredResultForSourceSwitch(){
   const card=document.getElementById('decisionCard');
   if(card)card.className='decision-card';
   ['dTarget','dTCA','dDir','dDv','pcPre','pcPost','m2Pre','m2Post','utilBar'].forEach(id=>set(id,'--'));
-  const alert=document.getElementById('encounterAlert');
-  if(alert)alert.className='encounter-alert';
+  setEncounterAlert(null);
   set('encounterTitleText','Encounter Geometry');
   if(typeof encounterCtx!=='undefined'&&encounterCtx)drawEncounterEmpty();
   if(typeof clearAtlasArtifact==='function')clearAtlasArtifact();
@@ -1677,7 +1676,28 @@ function autoEvaluateSelectedOrFirstPlannable(){
   if(idx>=0)evaluateConjunction(rows[idx],idx);
 }
 
+// SCRUM-449: an evaluate is a long round-trip -- a live one re-fetches the whole
+// LeoLabs window, measured at ~13 s -- and several can be in flight at once,
+// because autoEvaluateSelectedOrFirstPlannable fires one for the worst row after
+// every fetch and on every setView. Without ordering, whichever response lands
+// last repaints the panel, so a stale worst-row evaluate would overwrite the row
+// the operator actually clicked. These two make the latest selection win instead
+// of the latest response.
+let evalSeq = 0;          // monotonic; only the newest evaluate may paint
+let evalAbort = null;     // in-flight controller, cancelled when superseded
+
 async function evaluateConjunction(conj,idx){
+  // Claim this evaluate as the current one before anything else. Every await
+  // below re-checks it, so an older call that is still in flight can no longer
+  // touch the UI once this line has run.
+  const seq = ++evalSeq;
+  // Cancel the previous request. The seq guard alone already prevents a stale
+  // response from painting; aborting additionally frees the browser's connection
+  // so the new evaluate is not queued behind a reply nobody wants any more.
+  if(evalAbort) evalAbort.abort();
+  evalAbort = new AbortController();
+  const signal = evalAbort.signal;
+
   panX=0;panY=0;zoomLevel=2.5;
   document.getElementById('plannerDetails').innerHTML='<div class="empty-state"><span class="spinner"></span>Evaluating conjunction...</div>';
   document.getElementById('candidatesBody').innerHTML='<tr><td colspan="4" class="empty-state"><span class="spinner"></span>Planning...</td></tr>';
@@ -1735,9 +1755,19 @@ async function evaluateConjunction(conj,idx){
   updatePayloadModalIfOpen();
   let resp, result;
   try{
-    resp=await fetch('/api/planner/evaluate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)});
+    resp=await fetch('/api/planner/evaluate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request),signal:signal});
+    // A newer selection was made while this was in flight: it owns the panel now.
+    if(seq!==evalSeq) return;
     try{result=await resp.json();}catch(_){result={};}
-  }catch(e){showEvaluateError('planner unreachable: '+e.message);return;}
+    if(seq!==evalSeq) return;
+  }catch(e){
+    // A request cancelled because the operator moved on is not a failure, and
+    // must never surface as EVALUATE FAILED.
+    if(e&&e.name==='AbortError') return;
+    // Nor may a stale failure repaint over a newer selection.
+    if(seq!==evalSeq) return;
+    showEvaluateError('planner unreachable: '+e.message);return;
+  }
   if(resp.status===404&&live){
     // SCRUM-422 returns 404 when the selector matches nothing, rather than
     // silently scoring a different conjunction. The row is stale, so say so and
@@ -2208,12 +2238,36 @@ function updateRiskBar(result,conj){
   document.getElementById('m2Pre').textContent=fmtM2(m.m2_pre||0);
   document.getElementById('m2Post').textContent=fmtM2(m.m2_post||0);
   document.getElementById('utilBar').textContent=(result.recommendation?.utility||0).toFixed(3);
-  const al=document.getElementById('encounterAlert');al.className='encounter-alert';
-  if(dctx.risk==='RED'){al.className='encounter-alert red';al.textContent='RED ALERT \u2014 '+dctx.label}
-  else if(dctx.risk==='AMBER'){al.className='encounter-alert amber';al.textContent='AMBER \u2014 '+dctx.label}
+  setEncounterAlert(dctx.risk, dctx.label);
   document.getElementById('encounterTitleText').textContent='Encounter: '+dctx.label+' \u2014 Miss '+dctx.missM.toFixed(0)+'m';
 }
 
+
+// SCRUM-449: the alert chip's class and its text have to move together.
+// .encounter-alert is display:none unless it also carries .red or .amber, and
+// three places reset the class to hide the chip without touching textContent --
+// so the previous object's text stayed in the DOM. Not visible today, because
+// hidden is hidden, but it means the chip is only correct by virtue of being
+// invisible: show it in any other state, or read the DOM, and it names an object
+// the panel is no longer about. One setter, so the two cannot drift apart.
+function setEncounterAlert(risk, label){
+  const el=document.getElementById('encounterAlert');
+  if(!el)return;
+  if(risk==='RED'){
+    el.className='encounter-alert red';
+    el.textContent='RED ALERT \u2014 '+label;
+    return;
+  }
+  if(risk==='AMBER'){
+    el.className='encounter-alert amber';
+    el.textContent='AMBER \u2014 '+label;
+    return;
+  }
+  // Below the watch line, or cleared: hide it AND empty it. An empty hidden chip
+  // is honest; a hidden chip still naming the last RED object is not.
+  el.className='encounter-alert';
+  el.textContent='';
+}
 
 function clearAll(){
   userCleared=true;
@@ -2239,7 +2293,7 @@ function clearAll(){
   ['mTotal','mClosest','mMaxPc'].forEach(id=>document.getElementById(id).textContent='--');
   ['mRed','mAmber','mGreen'].forEach(id=>document.getElementById(id).textContent='0');
   ['pcPre','pcPost','m2Pre','m2Post','utilBar'].forEach(id=>document.getElementById(id).textContent='--');
-  document.getElementById('encounterAlert').className='encounter-alert';
+  setEncounterAlert(null);
   document.getElementById('encounterTitleText').textContent='Encounter Geometry';
   document.getElementById('scenarioMsg').textContent='Select scenario and run';
   document.getElementById('sliderLv').value=0.01;document.getElementById('sliderLl').value=0.005;document.getElementById('sliderDv').value=1.0;
