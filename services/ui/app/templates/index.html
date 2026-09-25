@@ -1686,6 +1686,118 @@ function autoEvaluateSelectedOrFirstPlannable(){
 let evalSeq = 0;          // monotonic; only the newest evaluate may paint
 let evalAbort = null;     // in-flight controller, cancelled when superseded
 
+// SCRUM-457: the on-demand secondary screen runs in the background (SCRUM-456).
+// Evaluate returns with the Secondary conflict row pending and a job id, and this
+// polls /api/planner/secondary-screen/{id} until the screen resolves.
+//
+// The interval is a few seconds because the endpoint is a store read measured in
+// single-digit milliseconds. The cap is the load-bearing number: the planner gives
+// the screen a 300 s poll budget, so 360 s is a little beyond it, and hitting the
+// cap renders NOT CLEAR with a could-not-complete note. A spinner that cannot end
+// would be worse than a wrong answer -- it is an unanswered safety question that
+// looks like work in progress.
+const SECONDARY_POLL_INTERVAL_MS = 5000;
+const SECONDARY_POLL_CAP_MS = 360000;
+
+// The screen state for the decision currently on screen, or null when this
+// decision has no background screen. `seq` ties it to the SCRUM-449 evaluate
+// token, so a result for a superseded selection can never paint this row.
+//   phase 'screening' -> polling, row shows screening in progress
+//   phase 'resolved'  -> `payload` is the poll body; only a real clear paints CLEAR
+//   phase 'failed'    -> could not complete (cap hit, or an unreadable answer)
+let secondaryScreen = null;
+let secondaryScreenAbort = null;
+let secondaryScreenTimer = null;
+
+// Only a genuine clear may paint CLEAR. Mirrors the planner's is_clear_status
+// allow-list (SCRUM-456) rather than testing for not-clear: a status this does not
+// recognise, a missing flag, a pending screen, an error or a null body all fall
+// through to NOT CLEAR. Pending is never a provisional pass.
+function secondaryScreenIsClear(payload){
+  return !!(payload && payload.status === 'clear' && payload.clear === true);
+}
+
+// Cancel any in-flight screen poll and forget its state. Called when a new
+// evaluate starts, which is what makes the latest selection win: the row must
+// track the decision now on screen, never a screen started for a previous one.
+function cancelSecondaryScreenPoll(){
+  if(secondaryScreenTimer){ clearTimeout(secondaryScreenTimer); secondaryScreenTimer=null; }
+  if(secondaryScreenAbort){ try{ secondaryScreenAbort.abort(); }catch(_){} secondaryScreenAbort=null; }
+  secondaryScreen = null;
+}
+
+// Arm the poll from an evaluate response. Called before the artifact is rendered
+// so the row paints "screening in progress" on its first draw rather than
+// flickering through another state, and the first request is scheduled rather
+// than awaited so rendering is not delayed by it.
+function armSecondaryScreenPoll(artifact, seq){
+  const sc = artifact && artifact.post_maneuver && artifact.post_maneuver.secondary_conflict;
+  if(!sc || !sc.screen_pending || !sc.screen_job_id) return;
+  secondaryScreen = {
+    seq: seq, jobId: sc.screen_job_id, phase: 'screening',
+    payload: null, note: null, startedAt: Date.now(), polls: 0,
+  };
+  secondaryScreenTimer = setTimeout(pollSecondaryScreen, 0);
+}
+
+// Re-draw the post-maneuver panel from the result already on screen, so the row
+// can be refreshed without re-evaluating anything.
+function refreshPostManeuverPanel(){
+  const pm = currentPlannerResult && currentPlannerResult.atlas_artifact
+    && currentPlannerResult.atlas_artifact.post_maneuver;
+  if(pm) renderPostManeuverProjection(pm);
+}
+
+async function pollSecondaryScreen(){
+  const st = secondaryScreen;
+  // Superseded between the timer firing and now.
+  if(!st || st.seq !== evalSeq) return;
+
+  if(Date.now() - st.startedAt > SECONDARY_POLL_CAP_MS){
+    st.phase = 'failed';
+    st.note = 'The secondary screen did not resolve within '
+      + Math.round(SECONDARY_POLL_CAP_MS/1000) + ' s, beyond the planner\'s own '
+      + 'screening budget. Safety could not be established, so this reads NOT CLEAR.';
+    refreshPostManeuverPanel();
+    return;
+  }
+
+  st.polls += 1;
+  secondaryScreenAbort = new AbortController();
+  let payload = null;
+  try{
+    const resp = await fetch('/api/planner/secondary-screen/' + encodeURIComponent(st.jobId),
+                             {signal: secondaryScreenAbort.signal});
+    try{ payload = await resp.json(); }catch(_){ payload = null; }
+  }catch(e){
+    // Cancelled because the operator moved on: not a failure, and the new
+    // selection owns the row now.
+    if(e && e.name === 'AbortError') return;
+    payload = null;
+  }
+  // Re-check after the await, the SCRUM-449 rule: a stale screen result must
+  // never overwrite the row for the decision now on screen.
+  if(secondaryScreen !== st || st.seq !== evalSeq) return;
+
+  if(payload && payload.status === 'pending'){
+    secondaryScreenTimer = setTimeout(pollSecondaryScreen, SECONDARY_POLL_INTERVAL_MS);
+    return;
+  }
+
+  if(!payload){
+    // The proxy fails closed with a readable body on any planner problem, so an
+    // unreadable answer here means the dashboard could not reach even that. Not
+    // a reason to keep spinning, and certainly not a clear screen.
+    st.phase = 'failed';
+    st.note = 'The secondary screen result could not be read, so safety could '
+      + 'not be established. This reads NOT CLEAR. Re-evaluate to try again.';
+  }else{
+    st.phase = 'resolved';
+    st.payload = payload;
+  }
+  refreshPostManeuverPanel();
+}
+
 async function evaluateConjunction(conj,idx){
   // Claim this evaluate as the current one before anything else. Every await
   // below re-checks it, so an older call that is still in flight can no longer
@@ -1697,6 +1809,10 @@ async function evaluateConjunction(conj,idx){
   if(evalAbort) evalAbort.abort();
   evalAbort = new AbortController();
   const signal = evalAbort.signal;
+  // SCRUM-457: drop any screen poll still running for the previous decision. The
+  // seq guard would already stop it painting, but cancelling also stops the
+  // requests and clears the row state so this decision starts from a clean one.
+  cancelSecondaryScreenPoll();
 
   panX=0;panY=0;zoomLevel=2.5;
   document.getElementById('plannerDetails').innerHTML='<div class="empty-state"><span class="spinner"></span>Evaluating conjunction...</div>';
@@ -1799,6 +1915,9 @@ async function evaluateConjunction(conj,idx){
     updatePlannerDetails(result);
     updateRiskBar(result,conj);
     drawEncounter(conj,result);
+    // SCRUM-457: arm the screen poll before rendering, so the Secondary conflict
+    // row draws "screening in progress" on its first paint.
+    if(result.atlas_artifact)armSecondaryScreenPoll(result.atlas_artifact,seq);
     if(result.atlas_artifact)renderAtlasArtifact(result.atlas_artifact);
     // SCRUM-421: the Space-Track published-Pc lookup follows the source too --
     // the live asset and the scored secondary in live mode, the CDM-ops pair
@@ -4416,27 +4535,102 @@ function renderPostManeuverProjection(pm) {
   // Secondary conflict
   const sc = pm.secondary_conflict;
   if (sc) {
-    // SCRUM-431: deferred is its own state. "NOT CHECKED" is the
-    // screen-should-have-run-and-could-not case, which is a failure; deferred
-    // means the screen is out of scope for this build pending the LeoLabs
-    // rebuild, and reads neutral.
-    const scLabel = sc.screen_deferred ? 'DEFERRED'
-      : !sc.secondary_check_performed ? 'NOT CHECKED'
-      : sc.secondary_conjunction_clear ? 'CLEAR' : 'CONFLICT DETECTED';
-    const scCls = (sc.screen_deferred || !sc.secondary_check_performed) ? ''
-      : sc.secondary_conjunction_clear ? 'green' : 'red';
-    html += _ar('Secondary conflict', scLabel, scCls);
-    // SCRUM-349: the performed path carries the closest catalog object, the
-    // closest approach distance, and the screening epoch (the burn epoch, not
-    // TCA). A null field reads as "not available" rather than 0 or blank.
-    if (sc.secondary_check_performed) {
-      const closestId = (sc.closest_object_id != null && sc.closest_object_id !== '') ? sc.closest_object_id : 'not available';
-      html += _ar('Closest object', closestId);
-      html += _ar('Closest approach', sc.closest_approach_km != null ? sc.closest_approach_km.toFixed(3) + ' km' : 'not available');
-      html += _ar('Screening epoch (burn)', sc.screening_epoch_utc ? sc.screening_epoch_utc.replace('T', ' ').substring(0, 19) + ' UTC' : 'not available');
+    // SCRUM-457: since SCRUM-456 the screen runs in the background, so this row is
+    // driven by the poll state when there is one, and by the artifact otherwise.
+    // The poll state is only honoured while it belongs to the decision on screen
+    // (seq === evalSeq), which is the SCRUM-449 rule applied to this row.
+    //
+    // The honesty rule, and the reason the clear case is written as an allow-list:
+    // only a screen that came back clear paints CLEAR. Screening, an error, a cap
+    // timeout, an unreadable answer and a pending artifact with no live poll all
+    // read NOT CLEAR or SCREENING -- never a provisional pass.
+    const st = (secondaryScreen && secondaryScreen.seq === evalSeq) ? secondaryScreen : null;
+    let scLabel, scCls, scNote = null, scDetail = null;
+    if (st && st.phase === 'screening') {
+      scLabel = '<span class="spinner"></span>SCREENING IN PROGRESS';
+      scCls = 'amber';
+      scNote = 'The on-demand secondary screen of the post-burn trajectory is '
+        + 'running against the live LeoLabs catalog. The burn decision above is '
+        + 'final; this row is not, and the maneuver is NOT authorized as '
+        + 'secondary-clear until it resolves.';
+    } else if (st && st.phase === 'failed') {
+      scLabel = 'NOT CLEAR';
+      scCls = 'red';
+      scNote = st.note;
+    } else if (st && st.phase === 'resolved') {
+      const p = st.payload;
+      if (secondaryScreenIsClear(p)) {
+        scLabel = 'CLEAR';
+        scCls = 'green';
+        scNote = p.operator_note || null;
+      } else {
+        scLabel = 'NOT CLEAR';
+        scCls = 'red';
+        scNote = p.operator_note || p.error || null;
+        // Name the events that breached, which is what an operator acts on. The
+        // verdict's breach list is authoritative and is never truncated by the
+        // poll response's conjunction cap.
+        const breaches = (p.verdict && p.verdict.breaches) || [];
+        const flagged = (p.flagged_objects && p.flagged_objects.length)
+          ? p.flagged_objects
+          : breaches.map(b => b.object_id).filter(x => x != null);
+        if (flagged.length) {
+          scDetail = _ar('Breaching objects', flagged.join(', '), 'red');
+        }
+        if (breaches.length) {
+          const limbs = Array.from(new Set(
+            breaches.reduce((acc, b) => acc.concat(b.limbs || []), [])));
+          scDetail = (scDetail || '')
+            + _ar('Breached on', limbs.length ? limbs.join(', ') : 'not reported', 'red');
+        }
+        if (p.verdict && p.verdict.evaluated != null) {
+          scDetail = (scDetail || '')
+            + _ar('Conjunctions screened', String(p.verdict.evaluated));
+        }
+      }
+      if (p && p.screening_id) {
+        scDetail = (scDetail || '') + _ar('Screening id', String(p.screening_id));
+      }
+      if (p && p.closest_object_id) {
+        scDetail = (scDetail || '') + _ar('Closest object', String(p.closest_object_id));
+      }
+      if (p && p.closest_approach_km != null) {
+        scDetail = (scDetail || '')
+          + _ar('Closest approach', p.closest_approach_km.toFixed(3) + ' km');
+      }
+    } else if (sc.screen_pending) {
+      // Pending on the artifact with no poll tracking it. Reachable only if the
+      // poll was cancelled without this panel being redrawn from a newer result;
+      // it must not show a spinner nothing will end, and it is certainly not clear.
+      scLabel = 'NOT CLEAR';
+      scCls = 'red';
+      scNote = 'A secondary screen was started but its result is not being '
+        + 'tracked, so safety could not be established. Re-evaluate to run it again.';
+    } else {
+      // SCRUM-431: deferred is its own state. "NOT CHECKED" is the
+      // screen-should-have-run-and-could-not case, which is a failure; deferred
+      // means the screen is out of scope for this build pending the LeoLabs
+      // rebuild, and reads neutral.
+      scLabel = sc.screen_deferred ? 'DEFERRED'
+        : !sc.secondary_check_performed ? 'NOT CHECKED'
+        : sc.secondary_conjunction_clear ? 'CLEAR' : 'CONFLICT DETECTED';
+      scCls = (sc.screen_deferred || !sc.secondary_check_performed) ? ''
+        : sc.secondary_conjunction_clear ? 'green' : 'red';
+      // SCRUM-349: the performed path carries the closest catalog object, the
+      // closest approach distance, and the screening epoch (the burn epoch, not
+      // TCA). A null field reads as "not available" rather than 0 or blank.
+      if (sc.secondary_check_performed) {
+        const closestId = (sc.closest_object_id != null && sc.closest_object_id !== '') ? sc.closest_object_id : 'not available';
+        scDetail = _ar('Closest object', closestId)
+          + _ar('Closest approach', sc.closest_approach_km != null ? sc.closest_approach_km.toFixed(3) + ' km' : 'not available')
+          + _ar('Screening epoch (burn)', sc.screening_epoch_utc ? sc.screening_epoch_utc.replace('T', ' ').substring(0, 19) + ' UTC' : 'not available');
+      }
+      scNote = sc.operator_note || null;
     }
-    if (sc.operator_note) {
-      html += '<div style="margin-top:6px;padding:5px 6px;background:var(--bg-panel);border-radius:3px;font-size:9px;color:var(--text-dim);line-height:1.4">' + sc.operator_note + '</div>';
+    html += _ar('Secondary conflict', scLabel, scCls);
+    if (scDetail) html += scDetail;
+    if (scNote) {
+      html += '<div style="margin-top:6px;padding:5px 6px;background:var(--bg-panel);border-radius:3px;font-size:9px;color:var(--text-dim);line-height:1.4">' + scNote + '</div>';
     }
   }
   el.innerHTML = html;
