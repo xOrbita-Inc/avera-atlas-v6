@@ -161,6 +161,81 @@ async def planner_leolabs_conjunctions(request: Request):
         })
 
 
+@app.get("/api/planner/secondary-screen/{job_id}")
+async def planner_secondary_screen(job_id: str):
+    """SCRUM-457: proxy one poll of the SCRUM-456 asynchronous secondary screen.
+
+    Short timeout, unlike the evaluate and conjunction proxies: the planner side is
+    a process-local store read that measures in single-digit milliseconds, so
+    anything slow here is a planner problem, not work in progress. The screen
+    itself is not on this path -- that is the whole point of SCRUM-456.
+
+    Fails closed, and that is the only interesting thing about this route. The
+    front end decides whether to paint the Secondary conflict row CLEAR from what
+    it gets back here, so no failure may produce a body that could be mistaken for
+    a clear screen. Every path below therefore returns a payload carrying
+    status and clear, synthesising the not-clear shape when the upstream answer is
+    not a recognisable poll payload -- a connection error, invalid JSON, or the
+    404 the planner returns for an unknown or evicted job id. A planner hiccup
+    reads NOT CLEAR in the dashboard exactly as it fails the guard in the planner.
+
+    The upstream status code is relayed so the dashboard can still tell a 404 from
+    a 503, but the body no longer depends on it: the front end reads status and
+    clear and needs neither to be inferred from an HTTP code.
+    """
+    def _not_clear(note: str, status_code: int = 502):
+        return JSONResponse(status_code=status_code, content={
+            "job_id": job_id,
+            "status": "error",
+            "clear": False,
+            "pending": False,
+            "error": note,
+            "operator_note": (
+                f"Secondary screen result could not be retrieved, so safety "
+                f"could not be established. Treating as NOT CLEAR. {note}"
+            ),
+            "conjunctions": [],
+            "verdict": None,
+        })
+
+    try:
+        resp = requests.get(
+            f"{PLANNER_SERVICE_URL}/v1/secondary-screen/{job_id}",
+            timeout=10,
+        )
+    except requests.exceptions.ConnectionError:
+        return _not_clear("Planner service unavailable.", status_code=503)
+    except requests.exceptions.Timeout:
+        return _not_clear("Planner did not answer the screen poll in time.",
+                          status_code=504)
+    except Exception as exc:
+        return _not_clear(f"Screen poll failed: {exc}", status_code=500)
+
+    try:
+        body = resp.json()
+    except ValueError:
+        return _not_clear(
+            f"Planner returned invalid JSON for the screen poll "
+            f"(HTTP {resp.status_code}).",
+        )
+
+    # A recognisable poll payload is relayed untouched, including a genuine clear.
+    # Anything else -- the 404 for an unknown or evicted job, an error envelope, a
+    # dict without the two fields the front end judges on -- becomes the not-clear
+    # shape rather than being handed on for the front end to interpret.
+    if isinstance(body, dict) and "status" in body and "clear" in body:
+        return JSONResponse(status_code=resp.status_code, content=body)
+
+    detail = ""
+    if isinstance(body, dict):
+        detail = str(body.get("error") or body.get("detail") or "")
+    return _not_clear(
+        (f"Planner returned no screen status for job {job_id} "
+         f"(HTTP {resp.status_code}). {detail}").strip(),
+        status_code=resp.status_code if resp.status_code >= 400 else 502,
+    )
+
+
 @app.get("/api/orbits/live")
 async def get_orbits_live(request: Request):
     """SCRUM-447: proxy the planner's live globe tracks.
