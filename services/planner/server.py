@@ -536,12 +536,27 @@ def _post_planner_output(
 # evaluate. Deferred, not deleted: the screen logic is intact and flipping this
 # flag restores today's fail-closed behaviour exactly, which is what the
 # LeoLabs covariance-backed rebuild will do.
-# SCRUM-442: default ON. The screen is now the real LeoLabs on-demand path
-# (SCRUM-440/441/451) rather than the SCRUM-431 deferral, and it fails closed on
-# its own. The flag stays so it can be turned off, which returns the deliberate
-# deferral rather than failing every evaluate.
+# SCRUM-442: the screen is the real LeoLabs on-demand path (SCRUM-440/441/451)
+# rather than the SCRUM-431 deferral, and it fails closed on its own. The flag
+# stays so it can be turned off, which returns the deliberate deferral rather than
+# failing every evaluate.
+#
+# SCRUM-455: default OFF, and .env is the authoritative control. Both composes now
+# forward SECONDARY_SCREEN_ENABLED to this service; until they did, the .env line
+# did nothing and the screen ran on this default, which is how a load-bearing
+# screen came to be armed by a default rather than by a decision.
+#
+# Off is the safe direction, not a convenient one. With the flag off no screen
+# runs, the secondary check reports the SCRUM-431 deferral, and a deferral is
+# never a clear screen -- guard_secondary_clear is omitted from the staging AND
+# rather than passed, so nothing is certified secondary-clear on the strength of a
+# screen that did not run. A missing .env line therefore costs a capability, which
+# is visible, instead of silently arming or silently passing one.
+#
+# Consequence for deployment: the demo needs the screen, so both the local .env and
+# the KVM .env must carry SECONDARY_SCREEN_ENABLED=true. See the deploy checklist.
 SECONDARY_SCREEN_ENABLED = (
-    os.environ.get("SECONDARY_SCREEN_ENABLED", "true").lower() == "true"
+    os.environ.get("SECONDARY_SCREEN_ENABLED", "false").lower() == "true"
 )
 
 _MODE_STORE = build_mode_store()
@@ -2233,9 +2248,15 @@ async def post_evaluate(request: Request):
             policy  = _policy_from_dict(body.get("policy", {}))
 
             # SCRUM-431: the Space-Track TLE catalog fetch is gone with the
-            # credential. The secondary screen is deferred behind
+            # credential, so nothing fetches a catalog here.
+            #
+            # SCRUM-455: this comment used to say the screen was "deferred behind
             # SECONDARY_SCREEN_ENABLED (default off) pending the LeoLabs
-            # covariance-backed rebuild, so nothing fetches a catalog here.
+            # covariance-backed rebuild". That rebuild has landed -- the screen is
+            # the live LeoLabs on-demand path (SCRUM-440/441/451), it runs in the
+            # background (SCRUM-456) and the dashboard resolves it (SCRUM-457). The
+            # default is off, but as a fail-safe backstop rather than a deferral:
+            # .env is the control, forwarded by both composes.
             # r_post_km is still approximated as r_sat_km -- position barely
             # changes during a short avoidance burn, only velocity does -- and
             # the A4 post-maneuver projection still uses it.

@@ -59,6 +59,11 @@ services:
       - LEOLABS_ACCESS_KEY=${LEOLABS_ACCESS_KEY}
       - LEOLABS_SECRET_KEY=${LEOLABS_SECRET_KEY}
       - LEOLABS_ASSET_NORADS=${LEOLABS_ASSET_NORADS}
+      # SCRUM-455: .env is the single control for the on-demand secondary screen.
+      # Neither compose forwarded this, so the screen ran on the code default and
+      # the .env line did nothing. The code default is now off, so a missing line
+      # here means no screen rather than a screen nobody asked for.
+      - SECONDARY_SCREEN_ENABLED=${SECONDARY_SCREEN_ENABLED}
     depends_on: [propagator]
     restart: unless-stopped
 

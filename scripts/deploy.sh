@@ -28,6 +28,44 @@
 #   - docker-compose.prod.yaml must exist
 #   - traefik-proxy Docker network must exist
 #
+# -------------------------------------------------------------
+# MANUAL CHECKLIST BEFORE A PROMOTION  (SCRUM-455)
+# -------------------------------------------------------------
+# The .env on this box is the single control for feature flags.
+# It is never in git, so a promotion can carry new code that
+# reads a var the box's .env does not have.
+#
+#   1. .env must carry SECONDARY_SCREEN_ENABLED.
+#
+#      The on-demand secondary screen (the LeoLabs post-burn
+#      conjunction screen) is OFF unless .env says:
+#
+#          SECONDARY_SCREEN_ENABLED=true
+#
+#      The code default is now false, deliberately: until
+#      SCRUM-455 neither compose forwarded this var, so the
+#      .env line did nothing and the screen ran on the code
+#      default. Both composes forward it now, and the default
+#      is only the backstop for a missing line.
+#
+#      The demo needs the screen ON. A promotion with the line
+#      missing yields a silent no-screen, not a screen by
+#      default. Off is safe -- no screen runs, the secondary
+#      check reports deferred, and a deferral is never a clear
+#      screen -- but it is a lost capability, so check it.
+#
+#   2. Step 5 below prints the resolved value and warns if it is
+#      missing or empty. Read that line. To check by hand:
+#
+#          docker compose -f docker-compose.prod.yaml config \
+#            | sed -n '/^  planner:/,/^  [a-z-]*:$/p' \
+#            | grep SECONDARY_SCREEN_ENABLED
+#
+#   3. After the deploy, a maneuver-recommended evaluate should
+#      come back with screen_pending true and a screen_job_id
+#      (SCRUM-456/457). If it comes back screen_deferred, the
+#      flag did not reach the container.
+#
 # DO NOT run this locally. VPS only.
 # =============================================================
 
@@ -170,6 +208,27 @@ VAL_ERR="$(docker compose -f "$COMPOSE_FILE" config 2>&1 >/dev/null \
 [[ -z "$VAL_ERR" ]] || fail "Compose config validation failed:
 $VAL_ERR"
 ok "Compose config valid"
+
+# SCRUM-455: report the resolved secondary-screen flag rather than leaving it to
+# be discovered after the deploy. This warns and does not fail: turning the screen
+# off is a legitimate choice, and a deploy should not be blocked by it. What is not
+# legitimate is not knowing, which is exactly what happened on the 2026-09-24
+# promotion -- the var was set in .env, neither compose forwarded it, and nothing
+# said so.
+SCREEN_LINE="$(docker compose -f "$COMPOSE_FILE" config 2>/dev/null \
+               | sed -n '/^  planner:/,/^  [a-z-]*:$/p' \
+               | grep 'SECONDARY_SCREEN_ENABLED' \
+               | sed 's/^ *//' || true)"
+if [[ -z "$SCREEN_LINE" ]]; then
+  warn "SECONDARY_SCREEN_ENABLED is not in the planner's resolved environment.
+  The on-demand secondary screen will be OFF. If that is not intended, add
+  SECONDARY_SCREEN_ENABLED=true to .env on this box and redeploy the planner."
+elif [[ "$SCREEN_LINE" == *'"true"'* || "$SCREEN_LINE" == *"'true'"* || "$SCREEN_LINE" == *": true"* ]]; then
+  ok "Secondary screen ON  ($SCREEN_LINE)"
+else
+  warn "Secondary screen OFF ($SCREEN_LINE).
+  The demo needs it ON. Set SECONDARY_SCREEN_ENABLED=true in .env if that is wrong."
+fi
 
 # =============================================================
 # STEP 6 — Build and deploy against the production compose file

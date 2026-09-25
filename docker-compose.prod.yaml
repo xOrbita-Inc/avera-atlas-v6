@@ -77,6 +77,11 @@ services:
       - LEOLABS_ACCESS_KEY=${LEOLABS_ACCESS_KEY}
       - LEOLABS_SECRET_KEY=${LEOLABS_SECRET_KEY}
       - LEOLABS_ASSET_NORADS=${LEOLABS_ASSET_NORADS}
+      # SCRUM-455: .env is the single control for the on-demand secondary screen,
+      # on prod exactly as on local. The KVM .env must carry
+      # SECONDARY_SCREEN_ENABLED=true for the demo; the code default is off, so a
+      # promotion with the line missing yields no screen, not a screen by default.
+      - SECONDARY_SCREEN_ENABLED=${SECONDARY_SCREEN_ENABLED}
     depends_on: [propagator]
     restart: unless-stopped
 
@@ -89,7 +94,7 @@ services:
     restart: unless-stopped
 
   ui:
-    build: {context: ./services/ui}
+    build: {context: ., dockerfile: services/ui/Dockerfile}   # SCRUM-455: root context for libs/aps_math, matching dev and SCRUM-447
     image: avera/ui:v6
     ports: ["8080:8000"]
     environment:
