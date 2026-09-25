@@ -83,6 +83,7 @@ from common.leolabs_runtime import (
     catalog_for_norad,
     object_covariance_block,
     fetch_leolabs_conjunction,
+    fetch_leolabs_conjunction_by_cdm_id,
     fetch_leolabs_conjunction_page,
     fetch_leolabs_conjunctions,
     latest_state_km,
@@ -2101,9 +2102,44 @@ async def post_evaluate(request: Request):
                 body.get("conjunction") or {}
             )
             try:
-                if ll_selector:
+                # SCRUM-460: a clicked row carries its own cdm_id, and that names
+                # one message, so it can be fetched directly -- two requests -- with
+                # no whole-window pull. For SWARM B the window is 75,257 CDMs over
+                # 77 pages and 773 s, so this is the difference between an evaluate
+                # that works and one that takes the planner down.
+                #
+                # Everything else still needs the window: an event_id or a
+                # secondary_norad selector, and the no-selector "evaluate the worst"
+                # path, have nothing narrower to search on. Those keep the
+                # whole-window search, and the point of running every branch through
+                # _run_list_fetch is that even the slow one can no longer stop
+                # /health or the other assets.
+                if ll_selector.get("cdm_id") not in (None, ""):
+                    parsed_ll = await _run_list_fetch(
+                        fetch_leolabs_conjunction_by_cdm_id,
+                        ll_selector["cdm_id"],
+                        int(ll_primary),
+                    )
+                    if parsed_ll is None:
+                        log.info(
+                            "LeoLabs selector matched no conjunction",
+                            extra={"event": "leolabs_selector_no_match",
+                                   "primary_norad": ll_primary,
+                                   "selector": ll_selector},
+                        )
+                        return JSONResponse(
+                            status_code=404,
+                            content=error_response(
+                                f"no LeoLabs conjunction matches "
+                                f"{ll_selector}; re-read /v1/leolabs/conjunctions"
+                            ),
+                        )
+                elif ll_selector:
                     parsed_ll = select_conjunction(
-                        fetch_leolabs_conjunctions(int(ll_primary)), ll_selector
+                        await _run_list_fetch(
+                            fetch_leolabs_conjunctions, int(ll_primary)
+                        ),
+                        ll_selector,
                     )
                     if parsed_ll is None:
                         # The row is gone from the window, or never existed.
@@ -2125,7 +2161,28 @@ async def post_evaluate(request: Request):
                             ),
                         )
                 else:
-                    parsed_ll = fetch_leolabs_conjunction(int(ll_primary))
+                    parsed_ll = await _run_list_fetch(
+                        fetch_leolabs_conjunction, int(ll_primary)
+                    )
+            except ListFetchBusy as exc:
+                # The same cap and the same typed shed as the list (SCRUM-459). A
+                # request that queues behind two window pulls has already spent its
+                # own budget, and a busy planner must not look like a planner with
+                # nothing to report.
+                log.info(
+                    "shedding a LeoLabs evaluate fetch; the in-flight cap is taken",
+                    extra={"event": "leolabs_evaluate_shed",
+                           "primary_norad": ll_primary,
+                           "in_flight": _list_inflight},
+                )
+                return JSONResponse(
+                    status_code=503,
+                    content=error_response(
+                        f"The planner is already pulling {_LIST_MAX_INFLIGHT} "
+                        f"conjunction windows. Busy, not an empty sky: retry in a "
+                        f"few seconds. ({exc})"
+                    ),
+                )
             except Exception as exc:
                 log.warning(
                     "LeoLabs fetch failed",

@@ -1092,6 +1092,155 @@ def catalog_for_norad(
     return catalog
 
 
+# SCRUM-460: how wide a TCA bracket to search around a clicked row's own TCA.
+#
+# The reissued CDMs for one conjunction event all describe the same close approach,
+# so their TCAs agree to well inside a minute; two minutes each side is generous
+# and still leaves the search to one page. Measured on SWARM C: 83 CDMs in a single
+# page, 4.1 s, against 1,311 conjunctions over 19.5 s for the whole window -- and
+# against 773 s for SWARM B, which is the case this exists for.
+_CDM_ID_TCA_BRACKET_MINUTES = 2
+
+
+def fetch_leolabs_conjunction_by_cdm_id(
+    cdm_id: Any,
+    primary_norad: int,
+    *,
+    client: Optional[LeoLabsClient] = None,
+    registry: Optional[AssetRegistry] = None,
+) -> Optional[ParsedLeoLabsCDM]:
+    """Resolve one clicked conjunction by its CDM id, without a window pull.
+
+    SCRUM-460. Evaluate used to find the operator's row by pulling the entire
+    in-volume window and filtering it, which for SWARM B is 75,257 CDMs over 77
+    pages and 773 s -- on the event loop, so it took the whole planner with it.
+
+    Two requests instead:
+
+    1. The by-id endpoint, for the event's coordinates. It returns a summary, not a
+       CDM -- no states, no covariance -- so it cannot be scored, but it does give
+       the TCA and the two object designators.
+    2. A narrow search on that object pair inside a TCA bracket, which returns the
+       real CCSDS CDMs for that one event in a single page, and the one whose
+       COMMENT_ID is the clicked id is the row.
+
+    The result is bit-identical to what the window search produced for the same
+    click -- verified against the live API on the relative position, velocity and
+    combined covariance, and on to_conjunction_state(), which is the whole of what
+    the scorer reads. So this changes how the conjunction is found and nothing about
+    how it is judged.
+
+    Returns None when the id cannot be resolved to a scorable CDM for this asset,
+    which the caller turns into the same 404 an unmatched selector always produced.
+    Deliberately not a fallback to the worst conjunction: handing back another
+    object's numbers under the label of the one the operator clicked is the failure
+    this whole path is written to avoid.
+    """
+    client = client or get_client()
+    registry = registry or get_registry(client)
+
+    our_catalog = registry.leolabs_for_norad(int(primary_norad))
+    if our_catalog is None:
+        raise LeoLabsRuntimeError(
+            f"NORAD {primary_norad} is not in the LeoLabs subscribed-objects "
+            f"registry; it cannot be screened on this account."
+        )
+
+    wanted = str(cdm_id)
+    summaries = client.get_cdm_summaries(wanted)
+    if not summaries:
+        log.info(
+            "no LeoLabs conjunction summary for the clicked CDM id",
+            extra={"event": "leolabs_cdm_id_no_summary", "cdm_id": wanted,
+                   "primary_norad": int(primary_norad)},
+        )
+        return None
+
+    summary = summaries[0]
+    sat1 = str(summary.get("sat1") or "")
+    sat2 = str(summary.get("sat2") or "")
+    tca_raw = summary.get("tca")
+    if not tca_raw or our_catalog not in (sat1, sat2):
+        # The id is real but does not belong to the asset being evaluated. Scoring
+        # it would attribute another spacecraft's encounter to this one.
+        log.info(
+            "the clicked CDM id does not belong to this asset",
+            extra={"event": "leolabs_cdm_id_wrong_asset", "cdm_id": wanted,
+                   "primary_norad": int(primary_norad), "our_catalog": our_catalog,
+                   "sat1": sat1, "sat2": sat2},
+        )
+        return None
+
+    try:
+        tca = datetime.fromisoformat(str(tca_raw).replace("Z", "+00:00"))
+    except ValueError:
+        log.info(
+            "unparseable TCA on the clicked CDM summary",
+            extra={"event": "leolabs_cdm_id_bad_tca", "cdm_id": wanted,
+                   "tca": str(tca_raw)},
+        )
+        return None
+    if tca.tzinfo is None:
+        tca = tca.replace(tzinfo=timezone.utc)
+
+    bracket = timedelta(minutes=_CDM_ID_TCA_BRACKET_MINUTES)
+    min_tca = (tca - bracket).isoformat().replace("+00:00", "Z")
+    max_tca = (tca + bracket).isoformat().replace("+00:00", "Z")
+
+    # object1 must be OUR asset, and the summary's sat1 is not reliably ours -- the
+    # same trap leolabs_cdm_parser._resolve_roles exists to avoid. On a SWARM B row
+    # the summary came back sat1=L150849 (a Starlink), sat2=L5429 (the asset), and
+    # passing the Starlink as object1 makes LeoLabs reject the whole request with a
+    # 403: object1 has to be an object the subscription covers. Found live; it looks
+    # like a credentials failure and is nothing of the kind.
+    secondary_catalog = sat2 if sat1 == our_catalog else sat1
+
+    # Unbounded on purpose, and safe to be: this is one event's reissues in a
+    # four-minute window, not a multi-day catalog sweep. Bounding it could drop the
+    # very CDM the operator clicked.
+    candidates = client.search_conjunction_cdms(
+        object1=our_catalog, object2=secondary_catalog,
+        min_tca=min_tca, max_tca=max_tca, cdm_source="LeoLabs",
+    )
+    match = next(
+        (c for c in (candidates or []) if str(c.get("COMMENT_ID")) == wanted), None
+    )
+    if match is None:
+        log.info(
+            "the clicked CDM id was not in its own TCA bracket",
+            extra={"event": "leolabs_cdm_id_not_in_bracket", "cdm_id": wanted,
+                   "candidates": len(candidates or []),
+                   "object1": our_catalog, "object2": secondary_catalog,
+                   "min_tca": min_tca, "max_tca": max_tca},
+        )
+        return None
+
+    try:
+        parsed = parse_leolabs_cdm(match, registry.resolve_our_catalog_id(match))
+    except (LeoLabsParseError, LookupError) as exc:
+        # A CDM that fails a guard is not scorable, exactly as on the window path.
+        log.info(
+            "the clicked CDM failed parse/guards",
+            extra={"event": "leolabs_cdm_id_unparseable", "cdm_id": wanted,
+                   "reason": str(exc)},
+        )
+        return None
+
+    global _last_fetch_utc
+    _last_fetch_utc = (
+        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    )
+    log.info(
+        "resolved a clicked conjunction by CDM id, with no window pull",
+        extra={"event": "leolabs_cdm_id_resolved", "cdm_id": wanted,
+               "primary_norad": int(primary_norad),
+               "candidates_in_bracket": len(candidates or []),
+               "secondary": parsed.secondary.designator,
+               "tca_utc": parsed.t_ca_utc},
+    )
+    return parsed
+
+
 def fetch_leolabs_conjunction(
     primary_norad: int,
     *,

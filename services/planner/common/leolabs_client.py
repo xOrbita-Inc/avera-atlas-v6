@@ -706,11 +706,35 @@ class LeoLabsClient:
             "/catalog/conjunctions/cdms/search", params, "cdms", on_total=on_total
         )
 
-    def get_cdms(self, cdm_ids: str) -> List[Dict[str, Any]]:
-        """Retrieve CDMs by id (comma-separated ids allowed)."""
+    def get_cdm_summaries(self, cdm_ids: str) -> List[Dict[str, Any]]:
+        """Look up conjunction SUMMARIES by CDM id (comma-separated ids allowed).
+
+        Read the name carefully: despite the path, this endpoint does **not** return
+        CCSDS CDMs. It returns a compact conjunction record --
+
+            {"id": 79867238980, "conjunction": 3590491017,
+             "tca": "2026-09-26T18:05:15.953564Z", "sat1": "L3969",
+             "sat2": "L186018", "missDistance": 11226.646,
+             "relativeSpeed": 14828.261, "collisionProbability": 7.035e-05,
+             "source": "leolabs"}
+
+        -- with no state vectors and no covariance, so parse_leolabs_cdm cannot read
+        it and nothing can be scored from it. Confirmed against the live API
+        (SCRUM-460); `?format=ccsds` is ignored and returns the same shape.
+
+        What it is good for is coordinates: the tca and the two object designators
+        are exactly what a narrow, one-page search needs to pull the real CDMs for
+        one event, which is how leolabs_runtime resolves a clicked row without
+        pulling the whole window.
+
+        It was previously named get_cdms and read ``data["cdms"]``. The response key
+        is ``conjunctions``, so it returned an empty list for every id ever passed to
+        it. Nothing called it, which is why that went unnoticed; the rename is so the
+        next caller is not misled into expecting a CDM.
+        """
         data = self._request("GET", f"/catalog/conjunctions/cdms/{cdm_ids}")
         if isinstance(data, dict):
-            return data.get("cdms", []) or []
+            return data.get("conjunctions") or data.get("cdms") or []
         return data or []
 
     # -- on-demand screenings ---------------------------------------------

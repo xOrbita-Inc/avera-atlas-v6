@@ -912,6 +912,22 @@ class TestEvaluateBySelector:
             lambda n, **kw: _parsed_from(three_cdms, registry),
         )
 
+        # SCRUM-460: a cdm_id selector no longer resolves through the whole-window
+        # search -- it fetches that one CDM directly, because the window pull is
+        # what took the planner down on a dense asset. Stubbed from the same fixture
+        # set so the property under test is unchanged: the selector scores the row it
+        # names. Which mechanism found it is asserted in
+        # test_evaluate_cdm_id_resolve.py.
+        def _by_cdm_id(cdm_id, primary_norad, **kw):
+            wanted = str(cdm_id)
+            for parsed in _parsed_from(three_cdms, registry):
+                if str(parsed.provenance.get("cdm_id")) == wanted:
+                    return parsed
+            return None
+
+        monkeypatch.setattr(
+            server, "fetch_leolabs_conjunction_by_cdm_id", _by_cdm_id)
+
     def test_no_selector_still_scores_the_highest_risk_conjunction(
         self, monkeypatch, three_cdms, registry
     ):
