@@ -44,6 +44,7 @@ from common.leolabs_cdm_parser import (
     parse_leolabs_cdm,
 )
 from common.leolabs_client import (
+    CdmPullReport,
     LeoLabsAuthError,
     LeoLabsClient,
     LeoLabsError,
@@ -98,6 +99,44 @@ _CDM_CACHE_TTL_SECONDS = 45.0
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 500
 
+# SCRUM-459: a hard bound on the cold window pull for the listing.
+#
+# Paging (SCRUM-445) bounded the parse and the response; it did not bound the
+# upstream pull, because the whole in-volume window has to be ordered globally
+# before it can be sliced. Measured on this stack against the live API, in-volume,
+# a 1-day-back / 7-day-ahead window:
+#
+#     SWARM B  L5429   75,257 CDMs   77 pages   773 s    (10.0 s/page)
+#     SWARM A  L3972    1,766 CDMs    3 pages    20.3 s  ( 6.8 s/page)
+#     SWARM C  L3969    1,519 CDMs    3 pages    17.6 s  ( 5.9 s/page)
+#
+# SWARM B flies in formation with SWARM A and C, so it sees 43x their conjunctions
+# and takes 773 s -- nearly 13x the ui-to-planner 60 s read timeout. It was never
+# going to complete. So the listing pulls under a wall-clock deadline and an item
+# cap and returns what it has, flagged incomplete, instead of running on until the
+# request fails.
+#
+# Why 25 s. The deadline is checked before each page request, so the overshoot is
+# the one page already under way: worst case 25 + the client's 30 s request timeout
+# = 55 s, inside the 60 s budget; typical case 25 + 10 = 35 s, leaving room for the
+# parse and the response. Raising it is not free -- 35 s would put the worst case
+# past 60 s -- so a larger budget needs a shorter per-request timeout for this pull
+# first. Noted rather than done.
+#
+# What this costs the assets that already worked: SWARM A completes in 20.3 s and
+# SWARM C in 17.6 s, so both still come back complete, with 5 to 7 s of headroom.
+# That is thinner than it looks comfortable -- a slower day for LeoLabs would have
+# SWARM A report partial where it used to report whole. It would say so, which is
+# the point, but it is the number to revisit first if partial views start appearing
+# on the sparse assets.
+#
+# The cap is the second belt. The deadline binds first on a slow window; the cap
+# binds on one that streams quickly but is enormous, and it bounds the memory and
+# the global sort that follows. At 10 s/page the deadline always binds first for
+# SWARM B, so the cap is there for a future asset or a faster API, not for today.
+_LIST_FETCH_DEADLINE_S = 25.0
+_LIST_FETCH_MAX_CDMS = 10000
+
 # The three LeoLabs RIC volume filters, as the API spells them.
 VOLUME_FILTER_PARAMS = (
     "maxRelativePositionR",
@@ -149,7 +188,7 @@ _last_probe_result: Optional[Dict[str, Any]] = None
 # both consumers order, dedupe and parse it differently, so caching anything
 # further along would either serve one of them the other's view or duplicate the
 # work it was meant to save.
-_cdm_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
+_cdm_cache: Dict[str, Tuple[float, "WindowPull"]] = {}
 
 
 def reset_caches() -> None:
@@ -228,11 +267,36 @@ def last_fetch_utc() -> Optional[str]:
 # Fetch + select + parse
 # ---------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class WindowPull:
+    """What a window fetch produced, and whether it is the whole window.
+
+    SCRUM-459. `complete` False means the pull stopped on its deadline or its cap
+    and `cdms` is a prefix of the window in LeoLabs order -- which is NOT Pc order,
+    so it may be missing the worst conjunction. Everything downstream has to carry
+    that fact rather than presenting a short list as a quiet sky.
+
+    `window_total` is the size LeoLabs reported for the window, when it said. It is
+    the honest denominator for "pulled 3,000 of 18,000"; it is not a substitute for
+    the event total, which is only knowable from a complete pull.
+    """
+
+    cdms: List[Dict[str, Any]]
+    complete: bool = True
+    window_total: Optional[int] = None
+    reason: Optional[str] = None          # "deadline" | "cap", when incomplete
+
+    @property
+    def pulled(self) -> int:
+        return len(self.cdms)
+
+
 def _cdm_cache_key(
     catalog: str,
     lookback_days: int,
     lookahead_days: int,
     volume_filters: Dict[str, float],
+    bounded: bool = False,
 ) -> str:
     """The identity of a fetched window.
 
@@ -254,11 +318,40 @@ def _cdm_cache_key(
             "lb": int(lookback_days),
             "la": int(lookahead_days),
             "v": {k: volume_filters[k] for k in sorted(volume_filters or {})},
+            # SCRUM-459: a bounded pull and an unbounded pull of the same window
+            # are different result sets -- one may be a truncated prefix -- so they
+            # never share an entry. Without this, a listing's truncated window
+            # could be served to the evaluate path, which needs the whole window to
+            # resolve a row selector and would 404 the operator's own selection.
+            "b": bool(bounded),
         },
         separators=(",", ":"),
         sort_keys=True,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _store_window(key: str, result: WindowPull) -> None:
+    """Store a pulled window, without letting a truncated one bury a whole one.
+
+    SCRUM-459. A complete result supersedes an incomplete one; an incomplete result
+    never displaces a complete one that is still fresh.
+
+    Only reachable when two callers race the same cold key, which _search_cdms_cached
+    allows by design -- it fetches outside the lock, so a slow pull does not serialise
+    every other asset behind it. The cost of that choice is this race, and the
+    outcome of it should not depend on which caller happens to finish last.
+    """
+    with _lock:
+        existing = _cdm_cache.get(key)
+        if (
+            existing is not None
+            and existing[1].complete
+            and not result.complete
+            and time.monotonic() - existing[0] < _CDM_CACHE_TTL_SECONDS
+        ):
+            return
+        _cdm_cache[key] = (time.monotonic(), result)
 
 
 def _search_cdms_cached(
@@ -270,7 +363,9 @@ def _search_cdms_cached(
     *,
     lookback_days: int,
     lookahead_days: int,
-) -> List[Dict[str, Any]]:
+    deadline_s: Optional[float] = None,
+    max_cdms: Optional[int] = None,
+) -> WindowPull:
     """search_conjunction_cdms, served from a short-TTL process cache.
 
     SCRUM-450. The fetch itself is unchanged -- same endpoint, same parameters,
@@ -288,9 +383,18 @@ def _search_cdms_cached(
     read-only -- both sort into a new list -- and copying ~1,850 dicts per call
     would give back part of what the cache is for. A caller that ever needs to
     mutate must copy first.
+
+    SCRUM-459: pass deadline_s and max_cdms to bound the pull. The listing does;
+    the evaluate path deliberately does not, because it has to resolve a row
+    selector against the whole window and a truncated one would 404 the operator's
+    own selection. A bounded and an unbounded pull are separate cache entries, so
+    one can never be served to the other. The return is a WindowPull rather than a
+    list, so completeness travels with the data instead of being inferred from its
+    length -- a short window and a truncated window look identical otherwise.
     """
     filters = dict(volume_filters or {})
-    key = _cdm_cache_key(catalog, lookback_days, lookahead_days, filters)
+    bounded = deadline_s is not None or max_cdms is not None
+    key = _cdm_cache_key(catalog, lookback_days, lookahead_days, filters, bounded)
 
     with _lock:
         entry = _cdm_cache.get(key)
@@ -301,9 +405,15 @@ def _search_cdms_cached(
                 log.info(
                     "LeoLabs CDM window served from cache",
                     extra={"event": "leolabs_cdm_cache_hit", "catalog": catalog,
-                           "age_s": round(age, 2), "cdms": len(cached),
+                           "age_s": round(age, 2), "cdms": cached.pulled,
+                           "complete": cached.complete,
                            "in_volume": bool(filters)},
                 )
+                # An incomplete entry is served rather than re-pulled. It is
+                # labelled incomplete all the way to the response, and re-pulling
+                # inside the TTL would spend another deadline to arrive at another
+                # truncated prefix. When the TTL lapses, a pull that completes
+                # replaces it.
                 return cached
 
     # Fetched outside the lock: this is the 13-to-20 s call, and holding the lock
@@ -311,22 +421,34 @@ def _search_cdms_cached(
     # wanting a different asset entirely. The cost is that two callers racing the
     # same cold key may both fetch; they then store the same thing, so the result
     # is correct and the waste is bounded by how many miss at once.
+    # SCRUM-459: the bounds go to the client, which owns the pagination and so owns
+    # stopping it. A report comes back saying whether the window came whole; a
+    # truncated list and a genuinely short one are otherwise indistinguishable.
+    report = CdmPullReport()
     cdms = client.search_conjunction_cdms(
         object1=catalog,
         min_tca=min_tca,
         max_tca=max_tca,
         cdm_source="LeoLabs",
+        deadline_s=deadline_s,
+        max_cdms=max_cdms,
+        report=report,
         **filters,
     )
-    result = list(cdms or [])
+    result = WindowPull(
+        cdms=list(cdms or []),
+        complete=bool(report.complete),
+        window_total=report.window_total,
+        reason=report.reason,
+    )
 
-    with _lock:
-        _cdm_cache[key] = (time.monotonic(), result)
+    _store_window(key, result)
     log.info(
         "LeoLabs CDM window fetched and cached",
         extra={"event": "leolabs_cdm_cache_miss", "catalog": catalog,
-               "cdms": len(result), "ttl_s": _CDM_CACHE_TTL_SECONDS,
-               "in_volume": bool(filters)},
+               "cdms": result.pulled, "complete": result.complete,
+               "window_total": result.window_total,
+               "ttl_s": _CDM_CACHE_TTL_SECONDS, "in_volume": bool(filters)},
     )
     return result
 
@@ -394,10 +516,15 @@ def _scorable_in_risk_order(
     # SCRUM-450: same fetch, but served from the short-TTL window cache when one
     # was pulled recently for this asset and window. No volume filter here, so
     # this is a different cache entry from the listing path's.
+    # SCRUM-459: deliberately UNbounded. A row selector has to resolve against the
+    # whole window -- the operator clicked a specific conjunction -- and a truncated
+    # window would 404 their own selection or, worse, score a different event. The
+    # listing is what gets bounded; this path keeps the complete pull it has always
+    # had, in its own cache entry.
     cdms = _search_cdms_cached(
         client, catalog, min_tca, max_tca, None,
         lookback_days=lookback_days, lookahead_days=lookahead_days,
-    )
+    ).cdms
     if not cdms:
         log.info(
             "LeoLabs returned no CDMs in the window",
@@ -486,6 +613,19 @@ class ConjunctionPage:
     offset: int
     page_size: int
     volume_filters: Dict[str, float] = dc_field(default_factory=dict)
+    # SCRUM-459: whether the window behind this page was pulled whole.
+    #
+    # False means the pull stopped on its deadline or its cap, so `total` counts the
+    # events in a PREFIX of the window in LeoLabs order -- not Pc order -- and the
+    # worst conjunction may not be in it. A caller must present that as a partial
+    # view. A short list that looks complete is the dangerous direction: it reads as
+    # a quiet sky.
+    complete: bool = True
+    # Raw CDMs actually pulled, and the window size LeoLabs reported when it did, so
+    # a partial view can say "3,000 of 18,000" instead of just "partial".
+    pulled_cdms: Optional[int] = None
+    window_cdm_total: Optional[int] = None
+    truncation_reason: Optional[str] = None
 
     @property
     def in_volume(self) -> bool:
@@ -604,7 +744,10 @@ def _raw_cdms_in_risk_order(
     lookback_days: int,
     lookahead_days: int,
     volume_filters: Dict[str, float],
-) -> tuple[str, List[Dict[str, Any]], int]:
+    *,
+    deadline_s: Optional[float] = _LIST_FETCH_DEADLINE_S,
+    max_cdms: Optional[int] = _LIST_FETCH_MAX_CDMS,
+) -> tuple[str, List[Dict[str, Any]], int, WindowPull]:
     """Fetch the in-volume CDMs for an asset, risk-ordered, one event each.
 
     Sorting and deduping happen on the RAW CDMs, before any parsing, which is the
@@ -613,9 +756,10 @@ def _raw_cdms_in_risk_order(
     and the event dedupe both cost a dict lookup per CDM rather than a parse. Only
     the page that is actually returned gets parsed.
 
-    Returns (catalog, cdms, raw_count), where raw_count is how many CDMs the
+    Returns (catalog, cdms, raw_count, pull), where raw_count is how many CDMs the
     window held before reissues were collapsed, so a response can show that
-    reissues were collapsed rather than dropped. Raises LeoLabsRuntimeError for an
+    reissues were collapsed rather than dropped, and pull carries whether the
+    window was pulled whole (SCRUM-459). Raises LeoLabsRuntimeError for an
     unsubscribed asset, the same as the unpaged path.
     """
     client = client or get_client()
@@ -632,13 +776,16 @@ def _raw_cdms_in_risk_order(
     # SCRUM-450: same fetch through the short-TTL window cache. The volume filters
     # are part of the key, so this never shares an entry with the unfiltered
     # evaluate path.
-    cdms = _search_cdms_cached(
+    # SCRUM-459: bounded. This is the pull that overran the ui's 60 s timeout on a
+    # dense asset and wedged the planner while it ran.
+    pull = _search_cdms_cached(
         client, catalog, min_tca, max_tca, volume_filters,
         lookback_days=lookback_days, lookahead_days=lookahead_days,
+        deadline_s=deadline_s, max_cdms=max_cdms,
     )
-    raw = list(cdms or [])
+    raw = list(pull.cdms or [])
     ordered = dedupe_raw_by_event(sorted(raw, key=_risk_key))
-    return catalog, ordered, len(raw)
+    return catalog, ordered, len(raw), pull
 
 
 def fetch_leolabs_conjunction_page(
@@ -652,6 +799,11 @@ def fetch_leolabs_conjunction_page(
     page_size: int = DEFAULT_PAGE_SIZE,
     cursor: Optional[str] = None,
     volume_filters: Optional[Dict[str, float]] = None,
+    # SCRUM-459: the bounds on the cold window pull. Defaulted from the module
+    # constants so the route needs no knowledge of them, and overridable so a
+    # caller or a test can tune them without patching module state.
+    deadline_s: Optional[float] = None,
+    max_cdms: Optional[int] = None,
 ) -> ConjunctionPage:
     """One page of an asset's conjunctions, newest solution per event, worst first.
 
@@ -694,9 +846,11 @@ def fetch_leolabs_conjunction_page(
     )
     offset = decode_cursor(cursor, fingerprint) if cursor else 0
 
-    catalog, ordered, cdm_total = _raw_cdms_in_risk_order(
+    catalog, ordered, cdm_total, pull = _raw_cdms_in_risk_order(
         primary_norad, client, registry, now, lookback_days,
         lookahead_days, filters,
+        deadline_s=(_LIST_FETCH_DEADLINE_S if deadline_s is None else deadline_s),
+        max_cdms=(_LIST_FETCH_MAX_CDMS if max_cdms is None else max_cdms),
     )
     total = len(ordered)
 
@@ -730,7 +884,14 @@ def fetch_leolabs_conjunction_page(
         extra={"event": "leolabs_page_fetched", "catalog": catalog,
                "primary_norad": int(primary_norad), "offset": offset,
                "page_size": page_size, "returned": len(rows), "total": total,
-               "in_volume": bool(filters)},
+               "in_volume": bool(filters),
+               # SCRUM-459: complete=false says the window behind this page is a
+               # truncated prefix. Logged so a short list in the record can be told
+               # apart from a quiet sky after the fact.
+               "complete": pull.complete,
+               "pulled_cdms": pull.pulled,
+               "window_cdm_total": pull.window_total,
+               "truncation_reason": pull.reason},
     )
     return ConjunctionPage(
         rows=rows,
@@ -740,6 +901,10 @@ def fetch_leolabs_conjunction_page(
         offset=offset,
         page_size=page_size,
         volume_filters=filters,
+        complete=pull.complete,
+        pulled_cdms=pull.pulled,
+        window_cdm_total=pull.window_total,
+        truncation_reason=pull.reason,
     )
 
 

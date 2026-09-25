@@ -24,10 +24,13 @@ Service port: 8060 (per k8s/06-planner.yaml and service map)
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import json
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1420,6 +1423,76 @@ def _post_gnc_report_record(assessment, report: Dict[str, Any]) -> Optional[str]
 # scenario one. The object cap is a rendering bound, not a data one: past a few
 # hundred rings the globe is unreadable and the browser, not the API, is the
 # limit.
+# ---------------------------------------------------------------------------
+# SCRUM-459: keeping a dense asset's window fetch off the event loop
+# ---------------------------------------------------------------------------
+#
+# The list and globe routes are `async def` and called fetch_leolabs_conjunction_page
+# -- which does synchronous `requests` work -- directly on the event loop. The
+# planner runs one uvicorn worker, so one event loop: a single such call blocks
+# *everything*, including /health and every other asset, for as long as it runs.
+#
+# That is worse than the ticket's premise, and the evidence that looked reassuring
+# was measuring the wrong thing. The request log showed `/health` at 0.2 ms during a
+# SWARM B fetch, which reads like health being fine. It is not: the logging
+# middleware times the handler, starting after the event loop picks the request up.
+# Measured from the client instead, `/health` during a single SWARM B list fetch did
+# not answer at all -- a 120 s curl timed out, against 1.6 ms idle. The handler
+# really did take 0.2 ms; it just did not get to run for two minutes.
+#
+# So the fetch is handed to a dedicated executor and awaited. The loop stays free,
+# /health keeps answering, and other assets keep listing.
+#
+# A dedicated pool, not the default one Starlette offloads sync endpoints to: these
+# fetches are minutes long and would otherwise occupy threads that every `def`
+# endpoint in the service depends on. Two workers, because concurrent heavy pulls
+# also contend for the client's 4 req/s org-wide budget, so more parallelism would
+# not make any of them faster.
+_LIST_EXECUTOR = ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="leolabs-list",
+)
+
+# In-flight cap, matched to the pool size so the cap is what refuses work rather
+# than an invisible queue behind the pool. Past it the endpoint sheds a typed 503
+# instead of queueing: a request that waits behind two 25 s pulls has already lost
+# its own budget, and shedding tells the operator to retry rather than timing out.
+_LIST_MAX_INFLIGHT = 2
+
+# A plain int is safe here. Every read and write happens on the event loop, and
+# there is no await between the check and the increment, so no other coroutine can
+# interleave. A lock would add nothing but a way to get it wrong.
+_list_inflight = 0
+
+
+def _list_fetch_busy() -> bool:
+    return _list_inflight >= _LIST_MAX_INFLIGHT
+
+
+async def _run_list_fetch(fn, *args, **kwargs):
+    """Run a blocking LeoLabs window fetch off the event loop, under the cap.
+
+    Raises ListFetchBusy when the cap is already taken, so the caller can shed.
+    """
+    global _list_inflight
+    if _list_fetch_busy():
+        raise ListFetchBusy(
+            f"{_list_inflight} LeoLabs window fetches already in flight "
+            f"(limit {_LIST_MAX_INFLIGHT})"
+        )
+    _list_inflight += 1
+    try:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            _LIST_EXECUTOR, functools.partial(fn, *args, **kwargs)
+        )
+    finally:
+        _list_inflight -= 1
+
+
+class ListFetchBusy(RuntimeError):
+    """The concurrent-window-fetch cap is taken. Shed, do not queue."""
+
+
 GLOBE_TRACK_STEPS = 90
 MIN_GLOBE_TRACK_STEPS = 8
 MAX_GLOBE_TRACK_STEPS = 360
@@ -1519,7 +1592,11 @@ async def leolabs_conjunctions(
 
     now = datetime.now(timezone.utc)
     try:
-        page = fetch_leolabs_conjunction_page(
+        # SCRUM-459: off the event loop, so this fetch cannot stop /health or the
+        # other assets, and under the in-flight cap so a burst sheds instead of
+        # queueing past everyone's timeout.
+        page = await _run_list_fetch(
+            fetch_leolabs_conjunction_page,
             int(primary_norad),
             now=now,
             lookback_days=lookback_days,
@@ -1527,6 +1604,20 @@ async def leolabs_conjunctions(
             page_size=page_size,
             cursor=cursor,
             volume_filters=volume_filters,
+        )
+    except ListFetchBusy as exc:
+        log.info(
+            "shedding a LeoLabs list fetch; the in-flight cap is taken",
+            extra={"event": "leolabs_list_shed", "primary_norad": primary_norad,
+                   "in_flight": _list_inflight},
+        )
+        return JSONResponse(
+            status_code=503,
+            content=error_response(
+                f"The planner is already pulling {_LIST_MAX_INFLIGHT} conjunction "
+                f"windows. This is a busy signal, not an empty sky: retry in a few "
+                f"seconds. ({exc})"
+            ),
         )
     except LeoLabsCursorError as exc:
         # A cursor from a different asset, window, page size or volume filter.
@@ -1582,6 +1673,23 @@ async def leolabs_conjunctions(
             # many CDMs those events were distilled from, so a caller can see
             # that reissues were collapsed rather than dropped.
             "cdm_count": page.cdm_total,
+            # SCRUM-459. complete=false means the window behind this list was
+            # truncated by the fetch deadline or cap, so `total` counts events in a
+            # PREFIX of the window in LeoLabs order -- which is not Pc order, so the
+            # worst conjunction may not be in it. A caller must show this as a
+            # partial view. A short list presented as complete reads as a quiet sky,
+            # and that is the direction that gets someone hurt.
+            "complete": page.complete,
+            "partial": not page.complete,
+            # Named "truncation" and not "window": this dict already has a "window"
+            # key for the TCA bounds, and a second one would have silently replaced
+            # it -- a duplicate literal key is not an error in Python, the last one
+            # simply wins.
+            "truncation": {
+                "cdms_pulled": page.pulled_cdms,
+                "cdms_in_window": page.window_cdm_total,
+                "truncated_by": page.truncation_reason,
+            } if not page.complete else None,
             # What bounded the fetch. An operator reading a short list needs to
             # know whether it is short because the sky is quiet or because the
             # reporting volume cropped it.
@@ -1729,13 +1837,32 @@ async def leolabs_orbits(
 
     # -- the in-volume conjunctions, via the same fetch the 2D table uses -----
     try:
-        page = fetch_leolabs_conjunction_page(
+        # SCRUM-459: the same fetch, so the same wedge. Selecting a dense asset on
+        # the globe blocked the event loop exactly as the 2D list did, and the fix
+        # has to cover both or the planner still goes down one route over. The
+        # deadline and cap come for free with the shared fetch; this is the
+        # off-the-loop half.
+        page = await _run_list_fetch(
+            fetch_leolabs_conjunction_page,
             int(primary_norad),
             now=now,
             lookback_days=lookback_days,
             lookahead_days=lookahead_days,
             page_size=max_objects if max_objects else 1,
             volume_filters=volume_filters,
+        )
+    except ListFetchBusy as exc:
+        log.info(
+            "shedding a LeoLabs globe fetch; the in-flight cap is taken",
+            extra={"event": "leolabs_globe_shed", "primary_norad": primary_norad,
+                   "in_flight": _list_inflight},
+        )
+        return JSONResponse(
+            status_code=503,
+            content=error_response(
+                f"The planner is already pulling {_LIST_MAX_INFLIGHT} conjunction "
+                f"windows. Busy, not an empty sky: retry in a few seconds. ({exc})"
+            ),
         )
     except LeoLabsRuntimeError as exc:
         return JSONResponse(status_code=404, content=error_response(str(exc)))
@@ -1873,6 +2000,18 @@ async def leolabs_orbits(
                 "skipped": len(skipped),
                 "events_in_window": page.total,
             },
+            # SCRUM-459: same honesty as the 2D list. events_in_window counts a
+            # PREFIX of the window when the pull was truncated, so a globe drawn from
+            # it is a partial sky. Saying so matters more here than in the table: an
+            # operator reads an uncluttered globe as a quiet sky, and this is the one
+            # asset dense enough to be truncated.
+            "complete": page.complete,
+            "partial": not page.complete,
+            "truncation": {
+                "cdms_pulled": page.pulled_cdms,
+                "cdms_in_window": page.window_cdm_total,
+                "truncated_by": page.truncation_reason,
+            } if not page.complete else None,
             "skipped": skipped,
             "volume_filter": {
                 "in_volume": page.in_volume,
