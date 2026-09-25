@@ -251,9 +251,29 @@ def test_badly_non_psd_covariance_is_left_exactly_as_read(cdm):
 
 
 def test_untrusted_covariance_logs_a_warning_naming_the_object(cdm, caplog):
-    """Named object and eigenvalue, so the log points at the right satellite."""
-    with caplog.at_level(logging.WARNING):
-        parse_leolabs_cdm(_badly_non_psd(cdm), _OUR_ID, strict_psd=False)
+    """Named object and eigenvalue, so the log points at the right satellite.
+
+    The handler is attached to the "planner" logger directly rather than relying
+    on propagation to root. The service configures that logger with
+    propagate=False (logging_setup.build_logger), so once anything has imported
+    server -- which the async-screen suite does -- a plain caplog sees nothing.
+    Asserting through the real logger name is what makes this test mean "the
+    warning reaches the service log", which is the property that actually matters
+    and the one that was silently false while this module used __name__.
+    """
+    logger = logging.getLogger("planner")
+    propagate = logger.propagate
+    logger.addHandler(caplog.handler)
+    # Pinned off so the record is captured once whether or not server has already
+    # configured this logger; with propagation on, caplog's root handler would see
+    # it a second time and the count below would depend on test ordering.
+    logger.propagate = False
+    try:
+        with caplog.at_level(logging.WARNING, logger="planner"):
+            parse_leolabs_cdm(_badly_non_psd(cdm), _OUR_ID, strict_psd=False)
+    finally:
+        logger.removeHandler(caplog.handler)
+        logger.propagate = propagate
     warnings = [r for r in caplog.records
                 if getattr(r, "event", None) == "leolabs_covariance_untrusted"]
     assert len(warnings) == 1

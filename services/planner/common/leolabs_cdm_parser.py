@@ -47,7 +47,13 @@ import numpy as np
 from aps_math import frames
 from aps_math.pc_utils import compute_pc
 
-log = logging.getLogger(__name__)
+# "planner", matching every other module in the service: the structured JSON
+# logging is configured on that logger, so records from a module-named logger are
+# dropped. This was wrong when the SCRUM-458 PSD warnings were added, which meant
+# leolabs_covariance_untrusted never reached the log -- invisible in that ticket's
+# live run only because no covariance was untrusted, and invisible to its tests
+# because caplog captures at the root regardless of handlers.
+log = logging.getLogger("planner")
 
 # ---------------------------------------------------------------------------
 # Tolerances and constants

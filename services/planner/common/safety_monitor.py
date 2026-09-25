@@ -226,8 +226,22 @@ def guard_secondary_clear(inputs: GuardInputs) -> GuardResult:
     values = {
         "secondary_check_performed": inputs.secondary_check_performed,
         "secondary_conjunction_clear": inputs.secondary_conjunction_clear,
+        "secondary_screen_pending": inputs.secondary_screen_pending,
     }
     if not inputs.secondary_check_performed:
+        # SCRUM-456: a pending screen fails this guard exactly as a screen that
+        # could not run does -- it is not clear, so it cannot stage a maneuver --
+        # but the record says which, because "still running" and "broken" are
+        # different facts and an auditor reading a blocked decision needs to know
+        # which one it was. Neither reads as clear, and neither escalates here.
+        if inputs.secondary_screen_pending:
+            return GuardResult(
+                name, False,
+                "secondary conflict screen is still running; the maneuver is "
+                "provisional and NOT authorized as secondary-clear until it "
+                "resolves",
+                values,
+            )
         return GuardResult(
             name, False,
             "secondary conflict check was not performed; section 4.2 treats "
@@ -795,6 +809,12 @@ def _m1_escalation_guards(inputs: GuardInputs) -> Tuple[GuardResult, ...]:
     # "performed", so this clause cannot fire on it. Stated explicitly because
     # the inertness is load-bearing: if this escalated on a deferred screen, the
     # default build would safehold every watch event.
+    #
+    # SCRUM-456: a pending screen is inert here for the same reason, and that is
+    # the intended reading -- a screen that is still running is not evidence of a
+    # conflict, so it holds the decision provisional (by failing the staging AND
+    # above) rather than safeholding it. When the screen resolves NOT CLEAR it
+    # arrives here as performed-and-not-clear and escalates then.
     if inputs.secondary_check_performed and not inputs.secondary_conjunction_clear:
         results.append(guard_secondary_clear(inputs))
 
