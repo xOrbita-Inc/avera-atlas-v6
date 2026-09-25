@@ -287,23 +287,37 @@ class TestEnabledScreenStillFailsClosed:
 
         assert decision.mode is FlightMode.M2_STAGED
 
-    def test_the_flag_defaults_to_on(self):
-        """SCRUM-442 flipped this default.
+    def test_the_flag_defaults_to_off(self, monkeypatch):
+        """SCRUM-455 moved this default back to off, and for a different reason.
 
-        Under SCRUM-431 the default was off, because the screen could only fail
-        closed: its Space-Track catalog carried no covariance and then did not
-        exist. The screen is now the real LeoLabs on-demand path, so it defaults
-        on -- and it still fails closed, which is the point.
+        The history matters, because "the default is off" has meant two different
+        things:
 
-        The consequence is deliberate and worth stating: with the screen on, an
-        environment that cannot reach LeoLabs cannot stage a maneuver at all,
-        because a screen that could not run is NOT CLEAR.
+          SCRUM-431 off  -- the screen could only fail closed. Its Space-Track
+                            catalog carried no covariance and then did not exist,
+                            so running it broke every evaluate. Off was a deferral.
+          SCRUM-442 on   -- the screen became the real LeoLabs on-demand path and
+                            fails closed on its own merits, so it was armed by
+                            default.
+          SCRUM-455 off  -- neither compose forwarded SECONDARY_SCREEN_ENABLED, so
+                            the .env line did nothing and the screen was running on
+                            the default above. Both composes now forward it and
+                            .env is the control; this default is only the backstop
+                            for a missing line, and it fails safe.
+
+        Off is the safe direction: no screen runs, the secondary check reports the
+        deferral, and a deferral never reads as a clear screen. So a missing .env
+        line costs a visible capability rather than silently arming a load-bearing
+        screen, or silently passing one.
         """
         import importlib
         import server
 
+        # Explicitly unset, so the assertion is about the code default and not
+        # about whatever the developer's shell happens to export.
+        monkeypatch.delenv("SECONDARY_SCREEN_ENABLED", raising=False)
         importlib.reload(server)
-        assert server.SECONDARY_SCREEN_ENABLED is True
+        assert server.SECONDARY_SCREEN_ENABLED is False
 
     def test_the_flag_still_turns_the_screen_off(self, monkeypatch):
         """Turning it off returns the deliberate deferral, not a failure."""
