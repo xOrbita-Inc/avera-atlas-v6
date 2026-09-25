@@ -274,6 +274,40 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 .globe-msg{position:absolute;left:10px;bottom:10px;z-index:5;font-size:9px;letter-spacing:0.5px;
   color:var(--text-dim);background:rgba(0,0,0,0.55);border:1px solid var(--border);
   border-radius:3px;padding:4px 8px;pointer-events:none;max-width:60%}
+/* SCRUM-462: the partial-view warning, as one app-level toast plus one persistent
+   chip. It replaces the two in-panel banners SCRUM-461 shipped (one over the table,
+   one over the globe), so there is one signal rather than three.
+
+   Which of the two is load-bearing matters. The toast is the attention-getter and
+   is allowed to disappear. The CHIP is the safety element: a truncated view stays
+   partial for as long as it is on screen, so something has to outlive the toast or
+   the condition is silently forgotten the moment it fades -- which is the whole
+   reason SCRUM-461 exists. The toast is only safe to auto-dismiss because the chip
+   does not. */
+.partial-toast{position:fixed;top:0;left:50%;z-index:9999;
+  transform:translateX(-50%) translateY(-130%);
+  width:min(760px, calc(100% - 40px));display:flex;gap:10px;align-items:flex-start;
+  padding:10px 14px;background:rgba(42,27,0,0.97);border:1px solid var(--amber);
+  border-top:none;border-radius:0 0 4px 4px;color:var(--amber);
+  font-size:10px;line-height:1.5;letter-spacing:0.3px;
+  box-shadow:0 8px 28px rgba(0,0,0,0.55);
+  transition:transform 260ms ease-out;pointer-events:none}
+.partial-toast.show{transform:translateX(-50%) translateY(0);pointer-events:auto}
+.partial-toast .pt-icon{flex:0 0 auto;font-size:14px;line-height:1.2}
+.partial-toast .pt-body{flex:1 1 auto}
+.partial-toast .pt-head{display:block;font-weight:700;letter-spacing:1.4px;
+  margin-bottom:3px}
+.partial-toast .pt-num{color:#fff;font-weight:700}
+.partial-toast .pt-close{flex:0 0 auto;background:none;border:none;color:var(--amber);
+  font-size:14px;line-height:1;cursor:pointer;padding:0 2px;opacity:0.75}
+.partial-toast .pt-close:hover{opacity:1}
+/* The chip rides with the pager, which is on screen in both the 2D and the globe
+   view, so the condition follows the operator between them. */
+.partial-chip{display:none;align-items:center;gap:4px;padding:2px 7px;margin-left:6px;
+  border-radius:3px;background:rgba(255,176,32,0.18);border:1px solid var(--amber);
+  color:var(--amber);font-size:8px;font-weight:700;letter-spacing:1.2px;cursor:pointer}
+.partial-chip.show{display:inline-flex}
+.partial-chip:hover{background:rgba(255,176,32,0.3)}
 /* SCRUM-447 follow-up: the floating control cluster over the globe, bottom-right,
    opposite the bottom-left status line. Hidden with the rest of the globe in 2D. */
 .globe-cov-note{position:absolute;right:10px;bottom:46px;z-index:6;font-size:9px;
@@ -378,6 +412,11 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 </head>
 <body>
+<!-- SCRUM-462: one partial-view toast for the whole app, not one per panel. Fixed
+     to the top of the viewport so it reads the same in the 2D table and the globe,
+     and so the table and the globe can never show two different warnings about the
+     same fetch. Auto-dismisses; #partialChip is what persists. -->
+<div class="partial-toast" id="partialToast" role="alert" aria-live="polite"></div>
 
 <div class="header">
   <div class="logo"><h1>ARBITER</h1><span class="tag">APS v{{ aps_version }} Conjunction Assessment</span></div>
@@ -707,6 +746,13 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
           </div>
           <div class="conj-toolbar-grp">
             <span class="conj-range" id="conjRange">&mdash;</span>
+            <!-- SCRUM-462: the durable half of the partial-view warning. It sits
+                 with the pager, which is on screen in both the 2D and the globe
+                 view, and it stays for as long as the current view is truncated.
+                 The toast may fade; this may not. Clicking it brings the toast
+                 back, for when it has. -->
+            <button type="button" class="partial-chip" id="partialChip"
+              onclick="showPartialToast(true)" title="">&#9888; PARTIAL VIEW</button>
             <button type="button" class="conj-chip" id="conjPrevBtn"
               onclick="conjPrevPage()" disabled>&lsaquo; PREV</button>
             <button type="button" class="conj-chip" id="conjNextBtn"
@@ -904,6 +950,9 @@ function clearConjunctionsForSourceSwitch(){
   // SCRUM-445: a cursor is only valid for the query that minted it, so a source
   // or asset switch discards the walk rather than carrying an offset across.
   selectedRowGeom=null;resetConjPaging();renderConjPager();setConjGeomNote('Select a row');
+  // SCRUM-462: and the warning describes the old asset's window, so the chip and
+  // the toast go with it.
+  clearPartialView();
   const tbody=document.getElementById('conjBody');
   if(tbody){
     tbody.innerHTML='<tr><td colspan="5" class="empty-state">'
@@ -1252,6 +1301,162 @@ const conjPaging={
   loading:false
 };
 
+// ---------------------------------------------------------------------------
+// SCRUM-462: the partial-view warning -- one toast, one persistent chip
+// ---------------------------------------------------------------------------
+//
+// SCRUM-459 bounded the planner's window pull on a dense asset and made the
+// response say so: complete, partial, and when partial a truncation block
+// {cdms_pulled, cdms_in_window, truncated_by}. SCRUM-461 surfaced that as two
+// in-panel banners; this replaces them with one app-level toast and one small
+// persistent chip, and drops the source name from the copy.
+//
+// Why the condition has to be shown at all: the truncated set is a prefix of the
+// window in the order the messages arrived, which is not risk order, so the worst
+// conjunction can be past the cut. An operator reading a worst-first table
+// top-down would have no way to know.
+//
+// The structure is deliberate. `partialViewState` is the truth, the chip renders
+// it, and the toast is a transient view of the same state. That ordering is what
+// makes an auto-dismissing toast safe: a truncated view stays partial for as long
+// as it is on screen, and the chip is what keeps that from being forgotten the
+// moment the toast fades.
+
+// Long enough to read a three-line warning, short enough not to sit over the
+// dashboard. The chip is what carries the condition afterwards, so this number is
+// a comfort setting and not a safety one.
+const PARTIAL_TOAST_MS = 8000;
+
+// The truncation block for the view currently on screen, or null when it is
+// complete. The single source of truth for both the chip and the toast.
+let partialViewState = null;
+let partialToastTimer = null;
+// Set when the operator dismisses the toast with the x, so a second fetch for the
+// same partial view does not push it back at them. Reset whenever the view
+// changes, and it never affects the chip.
+let partialToastDismissed = false;
+
+// One number formatter, so 52684 never appears unpunctuated next to 3,000.
+function pbNum(n){
+  return (typeof n === 'number' && isFinite(n)) ? n.toLocaleString() : null;
+}
+
+// The sentence, built once and rendered either as HTML (the toast) or as plain
+// text (the chip's tooltip), so the two can never say different things.
+//
+// Deliberately source-neutral: it says "messages are not in risk order" and names
+// no feed. The copy used to say "LeoLabs order", which bakes today's provider into
+// a safety warning that will outlive it.
+//
+// The denominator is the backend's or it is absent -- never invented. When the
+// window size was not reported the sentence says so, rather than reusing the
+// pulled count, which would quietly imply the window had been read whole.
+function partialViewSentence(truncation, asHtml){
+  const t = truncation || {};
+  const pulled = pbNum(t.cdms_pulled);
+  const inWindow = pbNum(t.cdms_in_window);
+  const by = t.truncated_by === 'deadline' ? 'time limit'
+           : t.truncated_by === 'cap' ? 'size limit'
+           : null;
+  const num = v => asHtml ? ('<span class="pt-num">' + v + '</span>') : v;
+  let detail;
+  if(pulled && inWindow){
+    detail = 'Only ' + num(pulled) + ' of ' + num(inWindow)
+      + ' conjunction messages in the window were read';
+  }else if(pulled){
+    detail = 'Only ' + num(pulled)
+      + ' conjunction messages were read, out of an unreported total';
+  }else{
+    detail = 'The window could not be read in full';
+  }
+  if(by) detail += ' before the fetch ' + by + ' was reached';
+  return detail + '. Messages are not in risk order, so this is a prefix of the '
+    + 'window and not its top. Narrow the window or the reporting volume for a '
+    + 'complete view.';
+}
+
+const PARTIAL_HEAD = 'PARTIAL VIEW \u2014 THE WORST CONJUNCTION MAY NOT BE SHOWN';
+
+function partialViewCopy(truncation){
+  return '<span class="pt-icon">&#9888;</span><span class="pt-body">'
+    + '<span class="pt-head">' + PARTIAL_HEAD + '</span>'
+    + partialViewSentence(truncation, true) + '</span>'
+    + '<button type="button" class="pt-close" onclick="dismissPartialToast()" '
+    + 'title="Dismiss">&times;</button>';
+}
+
+// The chip: the durable half. Rendered straight from partialViewState, with the
+// same counts in its tooltip.
+function renderPartialChip(){
+  const chip = document.getElementById('partialChip');
+  if(!chip) return;
+  if(!partialViewState){
+    chip.classList.remove('show');
+    chip.title = '';
+    return;
+  }
+  chip.title = PARTIAL_HEAD + '. '
+    + partialViewSentence(partialViewState, false)
+    + ' (click to show the full warning)';
+  chip.classList.add('show');
+}
+
+function showPartialToast(force){
+  const el = document.getElementById('partialToast');
+  if(!el || !partialViewState) return;
+  if(partialToastDismissed && !force) return;
+  el.innerHTML = partialViewCopy(partialViewState);
+  el.classList.add('show');
+  if(partialToastTimer) clearTimeout(partialToastTimer);
+  partialToastTimer = setTimeout(() => {
+    const t = document.getElementById('partialToast');
+    if(t) t.classList.remove('show');
+    partialToastTimer = null;
+  }, PARTIAL_TOAST_MS);
+}
+
+// The x. Hides the toast and remembers that, but leaves the chip alone: dismissing
+// the notification is not the same as the view ceasing to be partial, and only one
+// of those is the operator's to decide.
+function dismissPartialToast(){
+  const el = document.getElementById('partialToast');
+  if(el) el.classList.remove('show');
+  if(partialToastTimer){ clearTimeout(partialToastTimer); partialToastTimer = null; }
+  partialToastDismissed = true;
+}
+
+// Drive the whole warning from a fetch response. `partial` is read as an explicit
+// true, not as "anything falsy is fine": a response missing the fields entirely is
+// treated as complete, which is correct for the pre-SCRUM-459 shape, while anything
+// the planner actually flags is announced.
+function setPartialView(data){
+  const isPartial = !!(data && (data.partial === true || data.complete === false));
+  const next = isPartial ? (data.truncation || {}) : null;
+  // A different truncation is a different warning, so an earlier dismissal of the
+  // toast does not carry over to it.
+  if(JSON.stringify(next) !== JSON.stringify(partialViewState)){
+    partialToastDismissed = false;
+  }
+  partialViewState = next;
+  renderPartialChip();
+  if(isPartial){
+    showPartialToast(false);
+  }else{
+    const el = document.getElementById('partialToast');
+    if(el){ el.classList.remove('show'); el.innerHTML = ''; }
+    if(partialToastTimer){ clearTimeout(partialToastTimer); partialToastTimer = null; }
+  }
+}
+
+// Cleared before every fetch and on every switch, so neither the chip nor the
+// toast can describe a view it no longer applies to -- including on the error
+// paths, which return early without rendering rows. A stale "partial" over a fresh
+// complete view is its own failure.
+function clearPartialView(){
+  partialToastDismissed = false;
+  setPartialView(null);
+}
+
 function resetConjPaging(){
   conjPaging.cursorStack=[null];
   conjPaging.pageIndex=0;
@@ -1329,6 +1534,10 @@ async function fetchLiveConjunctions(opts){
   const btn=document.getElementById('runBtn'),msg=document.getElementById('scenarioMsg');
   if(!liveAssetNorad){msg.textContent='Select a subscribed asset first';return}
   userCleared=false;selectedCandidateDir=null;
+  // SCRUM-462: drop any warning from the previous asset before this fetch can
+  // return. Several paths below return early on an error, and a stale "partial"
+  // sitting over a different asset's table would be its own kind of lie.
+  clearPartialView();
   // A fresh fetch with no cursor is page one, so forget any walk in progress.
   if(!cursor) resetConjPaging();
   conjPaging.loading=true;renderConjPager();
@@ -1393,6 +1602,10 @@ async function fetchLiveConjunctions(opts){
   updateMetrics(conjunctionData.summary);
   updateConjunctionTable(rows);
   updateConjSourceNote();
+  // SCRUM-462: after the rows, not instead of them. Every page of a truncated
+  // window is drawn from the same prefix, so the planner flags each page response
+  // and the chip rides along with the pager.
+  setPartialView(data);
   renderConjPager();
   setConjGeomNote('Select a row');
   if(rows.length===0){
@@ -2392,6 +2605,8 @@ function clearAll(){
   userCleared=true;
   conjunctionData=null;selectedConjunction=null;currentPlannerResult=null;currentConj=null;zoomLevel=2.5;panX=0;panY=0;selectedCandidateDir=null;currentCandidates=null;
   selectedRowGeom=null;resetConjPaging();renderConjPager();setConjGeomNote('Select a row');
+  // SCRUM-462: a cleared dashboard has no view to describe, partial or otherwise.
+  clearPartialView();
   document.getElementById('conjBody').innerHTML='<tr><td colspan="5" class="empty-state">'
     +(isLiveMode()?'Select an asset and fetch live conjunctions':'No data - run a scenario')+'</td></tr>';
   document.getElementById('fuelRiskChart').innerHTML='';
@@ -3690,6 +3905,7 @@ function setGlobeMessage(text){
 
 async function fetchLiveGlobeOrbits(){
   setGlobeMessage('Loading live orbits for '+(liveAssetName||liveAssetNorad)+'...');
+  clearPartialView();   // SCRUM-462, same reason as the table
   let resp,data;
   try{
     resp=await fetch('/api/orbits/live?primary_norad='+encodeURIComponent(liveAssetNorad));
@@ -3724,6 +3940,11 @@ async function fetchLiveGlobeOrbits(){
     worst_object:data.worst_object,
     live:true
   });
+  // SCRUM-462: the same warning and the same words as the table -- one toast and
+  // one chip for the app, so the two views can never disagree about the same
+  // fetch. A globe with few rings is the most convincing "quiet sky" the dashboard
+  // can draw, and on a truncated window it is not one.
+  setPartialView(data);
   if(drawn===0){
     setGlobeMessage('No conjunctions in the reporting volume');
   }else{
