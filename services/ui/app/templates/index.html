@@ -274,6 +274,26 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 .globe-msg{position:absolute;left:10px;bottom:10px;z-index:5;font-size:9px;letter-spacing:0.5px;
   color:var(--text-dim);background:rgba(0,0,0,0.55);border:1px solid var(--border);
   border-radius:3px;padding:4px 8px;pointer-events:none;max-width:60%}
+/* SCRUM-461: the partial-view banner, one style shared by the 2D table and the
+   globe so they cannot drift into saying different things about the same fetch.
+   Deliberately loud -- amber on amber, a heavy left bar, and not a subtle tint:
+   the fact it carries is that the worst conjunction may be outside the view, and
+   an operator triaging worst-first has no other way to know. A short list or an
+   uncluttered globe that looks complete reads as a quiet sky. */
+.partial-banner{display:none;gap:8px;align-items:flex-start;margin:6px 0;padding:8px 10px;
+  background:rgba(255,176,32,0.16);border:1px solid var(--amber);
+  border-left:4px solid var(--amber);border-radius:3px;color:var(--amber);
+  font-size:10px;line-height:1.5;letter-spacing:0.3px}
+.partial-banner.show{display:flex}
+.partial-banner .pb-icon{flex:0 0 auto;font-size:13px;line-height:1.2}
+.partial-banner .pb-head{display:block;font-weight:700;letter-spacing:1.4px;
+  color:var(--amber);margin-bottom:2px}
+.partial-banner .pb-num{color:#fff;font-weight:700}
+/* Over the canvas the globe variant has to stay readable against whatever is
+   drawn behind it, so it is opaque rather than tinted, and it sits top-centre
+   where #globeMsg (bottom-left) and the control cluster (bottom-right) are not. */
+.partial-banner.on-globe{position:absolute;top:10px;left:10px;right:10px;z-index:6;
+  margin:0;background:rgba(40,26,0,0.94);pointer-events:none}
 /* SCRUM-447 follow-up: the floating control cluster over the globe, bottom-right,
    opposite the bottom-left status line. Hidden with the rest of the globe in 2D. */
 .globe-cov-note{position:absolute;right:10px;bottom:46px;z-index:6;font-size:9px;
@@ -541,6 +561,9 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
       <!-- SCRUM-447: says what the globe is showing, or why it is showing nothing.
            A feed-off globe must read as "we cannot see", never as an empty sky. -->
       <div id="globeMsg" class="globe-msg" style="display:none"></div>
+      <!-- SCRUM-461: the same banner, same copy, over the globe. An uncluttered
+           globe reads as a quiet sky even more readily than a short table. -->
+      <div class="partial-banner on-globe" id="globePartialBanner" role="alert"></div>
       <!-- SCRUM-447 follow-up: the globe's own controls, floating bottom-right
            over the canvas and mirroring how #globeMsg sits bottom-left. They are
            globe-only, so the cluster shares the .visible show/hide that setView
@@ -713,6 +736,11 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
               onclick="conjNextPage()" disabled>NEXT &rsaquo;</button>
           </div>
         </div>
+        <!-- SCRUM-461: shown when the planner reports the window was truncated
+             (SCRUM-459 sends complete/partial/truncation). Above the table and
+             never in place of it: the rows that did come back are real and
+             useful, they just are not the whole window. -->
+        <div class="partial-banner" id="conjPartialBanner" role="alert"></div>
         <div class="conj-split">
           <div class="conj-table-pane">
             <div class="conj-scroll">
@@ -904,6 +932,9 @@ function clearConjunctionsForSourceSwitch(){
   // SCRUM-445: a cursor is only valid for the query that minted it, so a source
   // or asset switch discards the walk rather than carrying an offset across.
   selectedRowGeom=null;resetConjPaging();renderConjPager();setConjGeomNote('Select a row');
+  // SCRUM-461: and the banner describes the old asset's window, so it goes too.
+  hidePartialBanner('conjPartialBanner');
+  hidePartialBanner('globePartialBanner');
   const tbody=document.getElementById('conjBody');
   if(tbody){
     tbody.innerHTML='<tr><td colspan="5" class="empty-state">'
@@ -1252,6 +1283,81 @@ const conjPaging={
   loading:false
 };
 
+// ---------------------------------------------------------------------------
+// SCRUM-461: the partial-view banner
+// ---------------------------------------------------------------------------
+//
+// SCRUM-459 bounded the planner's window pull on a dense asset and made the
+// response say so: complete, partial, and when partial a truncation block
+// {cdms_pulled, cdms_in_window, truncated_by}. Until this the dashboard ignored
+// all three, so a truncated SWARM B listing rendered as an ordinary list.
+//
+// Why that is dangerous rather than merely incomplete: the truncated set is a
+// prefix in LeoLabs order, which is not Pc order, so the worst conjunction in the
+// window can be past the cut. An operator reading a worst-first table top-down
+// would have no way to know. The banner says exactly that, in one sentence, and
+// the same sentence is used on the globe.
+
+// One number formatter, so 53034 never appears unpunctuated next to 3,000.
+function pbNum(n){
+  return (typeof n === 'number' && isFinite(n)) ? n.toLocaleString() : null;
+}
+
+// The shared copy. Returns null when the backend did not actually report a
+// truncation, so a caller cannot accidentally render an empty warning.
+//
+// The denominator is the backend's or it is absent -- never invented. When LeoLabs
+// did not report the window size, the sentence says the size is unknown rather
+// than implying the pulled count is the whole of it.
+function partialViewCopy(truncation){
+  const t = truncation || {};
+  const pulled = pbNum(t.cdms_pulled);
+  const inWindow = pbNum(t.cdms_in_window);
+  const by = t.truncated_by === 'deadline' ? 'time limit'
+           : t.truncated_by === 'cap' ? 'size limit'
+           : null;
+  let detail;
+  if(pulled && inWindow){
+    detail = 'Only <span class="pb-num">' + pulled + '</span> of <span class="pb-num">'
+      + inWindow + '</span> conjunction messages in the window were read';
+  }else if(pulled){
+    detail = 'Only <span class="pb-num">' + pulled + '</span> conjunction messages '
+      + 'were read, out of an unreported total';
+  }else{
+    detail = 'The window could not be read in full';
+  }
+  if(by) detail += ' before the fetch ' + by + ' was reached';
+  return '<span class="pb-icon">&#9888;</span><span><span class="pb-head">'
+    + 'PARTIAL VIEW &mdash; THE WORST CONJUNCTION MAY NOT BE SHOWN</span>'
+    + detail + '. Messages arrive in LeoLabs order, not risk order, so this is a '
+    + 'prefix of the window and not its top. Narrow the window or the reporting '
+    + 'volume for a complete view.</span>';
+}
+
+// Drives either banner from a response. `partial` is read as an explicit true,
+// not as "anything falsy is fine": a response missing the field entirely is
+// treated as not-partial, which is correct for the pre-SCRUM-459 shape, while
+// anything the planner actually flags shows the banner.
+function renderPartialBanner(elementId, data){
+  const el = document.getElementById(elementId);
+  if(!el) return;
+  const isPartial = !!(data && (data.partial === true || data.complete === false));
+  if(!isPartial){
+    el.classList.remove('show');
+    el.innerHTML = '';
+    return;
+  }
+  el.innerHTML = partialViewCopy(data.truncation);
+  el.classList.add('show');
+}
+
+// Hidden before every fetch, so a banner from the previous asset cannot survive
+// into a view it does not describe -- including on the error paths, which return
+// early without rendering rows.
+function hidePartialBanner(elementId){
+  renderPartialBanner(elementId, null);
+}
+
 function resetConjPaging(){
   conjPaging.cursorStack=[null];
   conjPaging.pageIndex=0;
@@ -1329,6 +1435,10 @@ async function fetchLiveConjunctions(opts){
   const btn=document.getElementById('runBtn'),msg=document.getElementById('scenarioMsg');
   if(!liveAssetNorad){msg.textContent='Select a subscribed asset first';return}
   userCleared=false;selectedCandidateDir=null;
+  // SCRUM-461: drop any banner from the previous asset before this fetch can
+  // return. Several paths below return early on an error, and a stale "partial"
+  // sitting over a different asset's table would be its own kind of lie.
+  hidePartialBanner('conjPartialBanner');
   // A fresh fetch with no cursor is page one, so forget any walk in progress.
   if(!cursor) resetConjPaging();
   conjPaging.loading=true;renderConjPager();
@@ -1393,6 +1503,10 @@ async function fetchLiveConjunctions(opts){
   updateMetrics(conjunctionData.summary);
   updateConjunctionTable(rows);
   updateConjSourceNote();
+  // SCRUM-461: after the rows, not instead of them. Every page of a truncated
+  // window is drawn from the same prefix, so the planner flags each page response
+  // and the banner rides along with the pager.
+  renderPartialBanner('conjPartialBanner', data);
   renderConjPager();
   setConjGeomNote('Select a row');
   if(rows.length===0){
@@ -2392,6 +2506,9 @@ function clearAll(){
   userCleared=true;
   conjunctionData=null;selectedConjunction=null;currentPlannerResult=null;currentConj=null;zoomLevel=2.5;panX=0;panY=0;selectedCandidateDir=null;currentCandidates=null;
   selectedRowGeom=null;resetConjPaging();renderConjPager();setConjGeomNote('Select a row');
+  // SCRUM-461: a cleared dashboard has no view to describe, partial or otherwise.
+  hidePartialBanner('conjPartialBanner');
+  hidePartialBanner('globePartialBanner');
   document.getElementById('conjBody').innerHTML='<tr><td colspan="5" class="empty-state">'
     +(isLiveMode()?'Select an asset and fetch live conjunctions':'No data - run a scenario')+'</td></tr>';
   document.getElementById('fuelRiskChart').innerHTML='';
@@ -3690,6 +3807,7 @@ function setGlobeMessage(text){
 
 async function fetchLiveGlobeOrbits(){
   setGlobeMessage('Loading live orbits for '+(liveAssetName||liveAssetNorad)+'...');
+  hidePartialBanner('globePartialBanner');   // SCRUM-461, same reason as the table
   let resp,data;
   try{
     resp=await fetch('/api/orbits/live?primary_norad='+encodeURIComponent(liveAssetNorad));
@@ -3724,6 +3842,10 @@ async function fetchLiveGlobeOrbits(){
     worst_object:data.worst_object,
     live:true
   });
+  // SCRUM-461: the same banner and the same words as the table. A globe with few
+  // rings is the most convincing "quiet sky" the dashboard can draw, and on a
+  // truncated window it is not one.
+  renderPartialBanner('globePartialBanner', data);
   if(drawn===0){
     setGlobeMessage('No conjunctions in the reporting volume');
   }else{
