@@ -147,10 +147,23 @@ class TestCdmWindowCache:
         )
         assert client.search_conjunction_cdms.call_count == 3
 
-    def test_the_two_paths_share_an_entry_when_their_filters_match(
+    def test_a_bounded_listing_pull_is_never_served_to_the_evaluate_path(
         self, cdm, registry
     ):
-        """Same asset, window and filters is one window, fetched once."""
+        """SCRUM-459 narrowed the SCRUM-450 sharing, deliberately.
+
+        Same asset, same window, same filters used to be one cache entry fetched
+        once. It is now two, because the listing pull is bounded by a deadline and a
+        cap and the evaluate pull is not: a bounded pull may be a truncated prefix of
+        the window, and the evaluate path has to resolve a row selector against the
+        whole window. Serving it a prefix would 404 the operator's own selection, or
+        resolve it to a different event.
+
+        In practice this costs nothing: the listing always applies the reporting
+        volume and the evaluate path never does, so the filters already made them
+        separate entries. This test forces matching filters to pin the boundedness
+        half of the key on its own.
+        """
         client = self._client([cdm])
         leolabs_runtime.fetch_leolabs_conjunctions(
             36508, client=client, registry=registry, now=_NOW)
@@ -158,7 +171,13 @@ class TestCdmWindowCache:
             36508, client=client, registry=registry, now=_NOW,
             volume_filters={},                      # also unfiltered
         )
-        assert client.search_conjunction_cdms.call_count == 1
+        assert client.search_conjunction_cdms.call_count == 2
+
+        # And the evaluate path's own repeat is still a hit, so SCRUM-450 still
+        # works within each path.
+        leolabs_runtime.fetch_leolabs_conjunctions(
+            36508, client=client, registry=registry, now=_NOW)
+        assert client.search_conjunction_cdms.call_count == 2
 
     def test_the_entry_expires_after_the_ttl(self, cdm, registry, monkeypatch):
         """Driven by moving the clock, not by sleeping through the TTL."""

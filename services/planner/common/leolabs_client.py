@@ -44,6 +44,7 @@ import os
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
 import requests
@@ -81,6 +82,59 @@ _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 # GET sends it explicitly, as the lowercase string the API expects (requests
 # would serialize a Python bool as "True").
 _PAGINATE_TRUE = "true"
+
+
+def _as_int(value: Any) -> Optional[int]:
+    """Parse a count that may arrive as a number or as a numeric string.
+
+    SCRUM-459, and a bug this ticket only found by needing the number: LeoLabs
+    returns the ``total`` on a paginated search as a STRING -- "22008", not 22008.
+    The check here used to be isinstance(value, (int, float)), which a string never
+    satisfies, so ``total`` stayed None on every live response.
+
+    The consequence was that SCRUM-438's retrieved-versus-total cross-check -- added
+    precisely because a silent truncation was the failure mode it feared -- has never
+    once run against the live API. It could not fire, so its silence was not
+    evidence of anything, and SCRUM-439 recorded that silence as the counts agreeing.
+
+    bool is excluded deliberately: it is an int subclass, and True would otherwise
+    read as a total of 1.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Pull reporting (SCRUM-459)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CdmPullReport:
+    """How a bounded CDM search went. Pass one in to find out.
+
+    SCRUM-459. search_conjunction_cdms returns a list either way, so truncation
+    cannot be inferred from the return value -- a short window and a truncated
+    window are the same list. A caller that bounds the pull passes a report and
+    reads `complete` off it.
+
+    Defaults say "whole window", which is what an unbounded caller gets and what a
+    test double that simply returns its fixture gets. A bounded pull that stopped
+    early is the only thing that sets complete False, and it must be the caller
+    that asked for the bound.
+    """
+
+    complete: bool = True
+    pulled: int = 0
+    window_total: Optional[int] = None
+    reason: Optional[str] = None          # "deadline" | "cap", when incomplete
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +425,8 @@ class LeoLabsClient:
         path: str,
         params: Dict[str, Any],
         items_key: str,
+        on_total: Optional[Callable[[int], None]] = None,
+        should_continue: Optional[Callable[[], bool]] = None,
     ) -> Iterator[Dict[str, Any]]:
         """Yield every item across pages, following nextToken.
 
@@ -396,15 +452,29 @@ class LeoLabsClient:
         yielded = 0
         total: Optional[int] = None
         while True:
+            # SCRUM-459: asked before each request, not after. A page can take up to
+            # this client's request timeout, so a caller that only checked its
+            # deadline between yielded items could overshoot by a whole request it
+            # had no budget for. Stopping here means the overshoot is at most the one
+            # page already under way when the budget ran out.
+            if should_continue is not None and not should_continue():
+                break
             data = self._request("GET", path, params=page_params)
             if not isinstance(data, dict):
                 break
             if total is None:
-                raw_total = data.get("total")
-                if isinstance(raw_total, (int, float)) and not isinstance(
-                    raw_total, bool
-                ):
-                    total = int(raw_total)
+                total = _as_int(data.get("total"))
+                if total is not None:
+                    # SCRUM-459: hand the window's size to the caller as soon as
+                    # the first page reports it. A consumer that stops early needs
+                    # it to say how much of the window it actually pulled, and by
+                    # then it can no longer reach the end of this generator to
+                    # find out.
+                    if on_total is not None:
+                        try:
+                            on_total(total)
+                        except Exception:
+                            pass
             for item in data.get(items_key, []) or []:
                 yielded += 1
                 yield item
@@ -483,6 +553,9 @@ class LeoLabsClient:
         min_tca: Optional[str] = None,
         max_tca: Optional[str] = None,
         cdm_source: str = "LeoLabs",
+        deadline_s: Optional[float] = None,
+        max_cdms: Optional[int] = None,
+        report: Optional[CdmPullReport] = None,
         **extra: Any,
     ) -> List[Dict[str, Any]]:
         """Search CDMs, filtered to a single source, following pagination.
@@ -502,6 +575,27 @@ class LeoLabsClient:
 
         Every page carries ``paginate=true`` via _paginate, so the result is the
         complete set rather than the first 1,000 CDMs (SCRUM-438).
+
+        Bounding the pull (SCRUM-459)
+        -----------------------------
+        ``deadline_s`` and ``max_cdms`` stop the pagination early, and ``report``
+        is how the caller finds out that it did. All three default to off, so every
+        existing caller gets exactly the unbounded pull it always got.
+
+        Bounding lives here because the pagination does. The densest subscribed
+        asset (SWARM B, flying in formation with SWARM A and C) has a window that
+        does not come back inside the ui-to-planner 60 s read timeout at all, so the
+        listing asks for a bounded pull and presents the result as partial. What it
+        must not do is present a truncated prefix as a whole window: CDMs arrive in
+        LeoLabs order, not Pc order, so the prefix can be missing the worst
+        conjunction.
+
+        The deadline is checked before each page request rather than only between
+        items, so the overshoot is at most the single page already under way when the
+        budget ran out. Measured against the live API at about 10 s per page and a
+        30 s per-request timeout, that puts the worst case at roughly
+        ``deadline_s`` + 30 s and the typical case at ``deadline_s`` + 10 s. Pick
+        ``deadline_s`` with room for that under whatever timeout is downstream.
         """
         params: Dict[str, Any] = {"cdmSource": cdm_source}
         if object1 is not None:
@@ -513,8 +607,103 @@ class LeoLabsClient:
         if max_tca is not None:
             params["maxTca"] = max_tca
         params.update(extra)
-        return list(
-            self._paginate("/catalog/conjunctions/cdms/search", params, "cdms")
+
+        if deadline_s is None and max_cdms is None:
+            # Unbounded: byte-for-byte the pre-SCRUM-459 path.
+            items = list(
+                self._paginate("/catalog/conjunctions/cdms/search", params, "cdms")
+            )
+            if report is not None:
+                report.complete = True
+                report.pulled = len(items)
+            return items
+
+        started = time.monotonic()
+        seen_total: List[Optional[int]] = [None]
+        out_of_time = [False]
+
+        def _note_total(total: int) -> None:
+            seen_total[0] = int(total)
+
+        def _more() -> bool:
+            if deadline_s is None:
+                return True
+            if time.monotonic() - started >= deadline_s:
+                out_of_time[0] = True
+                return False
+            return True
+
+        out: List[Dict[str, Any]] = []
+        reason: Optional[str] = None
+        for item in self._paginate(
+            "/catalog/conjunctions/cdms/search", params, "cdms",
+            on_total=_note_total, should_continue=_more,
+        ):
+            out.append(item)
+            if max_cdms is not None and len(out) >= max_cdms:
+                reason = "cap"
+                break
+        if reason is None and out_of_time[0]:
+            reason = "deadline"
+
+        if report is not None:
+            report.complete = reason is None
+            report.pulled = len(out)
+            report.window_total = seen_total[0]
+            report.reason = reason
+        if reason is not None:
+            log.warning(
+                "LeoLabs CDM pull stopped early; the result is a partial window",
+                extra={"event": "leolabs_cdm_pull_truncated", "reason": reason,
+                       "pulled": len(out), "window_total": seen_total[0],
+                       "elapsed_s": round(time.monotonic() - started, 2),
+                       "deadline_s": deadline_s, "max_cdms": max_cdms},
+            )
+        return out
+
+    def iter_conjunction_cdms(
+        self,
+        object1: Optional[str] = None,
+        object2: Optional[str] = None,
+        min_tca: Optional[str] = None,
+        max_tca: Optional[str] = None,
+        cdm_source: str = "LeoLabs",
+        on_total: Optional[Callable[[int], None]] = None,
+        **extra: Any,
+    ) -> Iterator[Dict[str, Any]]:
+        """search_conjunction_cdms, streamed rather than materialised. SCRUM-459.
+
+        Same endpoint, same parameters, same order -- search_conjunction_cdms is
+        now literally list() of this, so the two cannot diverge. The difference is
+        that a caller can stop consuming.
+
+        That is what lets the listing bound a cold fetch: the densest subscribed
+        asset flies in formation with two others and its window does not come back
+        inside the ui-to-planner 60 s timeout, so the listing pulls under a
+        wall-clock deadline and an item cap and reports the result as incomplete
+        rather than running on until the request fails.
+
+        `on_total` receives the window size LeoLabs reports on the first page, so a
+        caller that stops early can still say how much of the window it holds.
+
+        Stopping early abandons the generator mid-pagination. The HTTP request in
+        flight at that moment still has to come back -- each one is bounded by the
+        client's own request timeout -- so a deadline here bounds the pull to
+        roughly the deadline plus one request timeout, not to the deadline exactly.
+        Choose the deadline with that headroom in mind.
+        """
+        params: Dict[str, Any] = {"cdmSource": cdm_source}
+        if object1 is not None:
+            params["object1"] = object1
+        if object2 is not None:
+            params["object2"] = object2
+        if min_tca is not None:
+            params["minTca"] = min_tca
+        if max_tca is not None:
+            params["maxTca"] = max_tca
+        params.update(extra)
+        return self._paginate(
+            "/catalog/conjunctions/cdms/search", params, "cdms", on_total=on_total
         )
 
     def get_cdms(self, cdm_ids: str) -> List[Dict[str, Any]]:
