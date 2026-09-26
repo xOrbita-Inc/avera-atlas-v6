@@ -3985,23 +3985,66 @@ let globeLabelParts=[];
 // SIGMA_MULTIPLIER 3 is the conventional 3-sigma (~99.7%) volume an operator
 // expects when a covariance is drawn.
 //
-// EXAGGERATION is 1.0 -- these are drawn at TRUE scale, and that is a
-// measurement, not a preference. Real LeoLabs conjunction covariances for SWARM C
-// run from 5.8 km to 1,569 km of along-track one-sigma, so a median 3-sigma major
-// axis is already ~0.07 scene units (about four times a marker) and the worst is
-// ~0.74 Earth radii. There is nothing to exaggerate; scaling these up would bury
-// the globe. The constant stays named and the caption reads the scale off it, so
-// if a future dataset really does need magnification the number changes in one
-// place and the note stops claiming true scale on its own.
-const GLOBE_COV_SIGMA_MULTIPLIER=3;
-const GLOBE_COV_EXAGGERATION=1.0;
+// SCRUM-464: covariance is ONE wireframe dome around the asset, not a filled
+// ellipsoid on every object.
+//
+// SCRUM-448 drew each object's real 3-sigma CDM covariance at true scale. True
+// scale is honest and invisible: a well-tracked object's ellipsoid is smaller than
+// its own marker dot, so the toggle looked broken. SCRUM-463 tried to fix that with
+// an exaggeration slider and made it worse -- these covariances are strongly
+// along-track dominated, so multiplying them turns the worst one into a streak
+// across the globe rather than a readable volume. Both are abandoned.
+//
+// What replaces them keeps the part that is a measurement and normalizes the part
+// that is only a rendering choice:
+//   - SHAPE and ORIENTATION are real. The dome's elongation and tilt are the
+//     covariance's own principal axes and sigma ratios.
+//   - SIZE is a fixed readable normalization. Every asset's dome has the same major
+//     axis on screen, so it is legible at globe zoom whatever the numbers are.
+// That is not true scale, and the caption says so rather than implying otherwise.
+const GLOBE_COV_SIGMA_MULTIPLIER=3;   // what the dome represents; the caption says it
+// The dome's major axis in scene units (Earth radii). The asset marker is a sphere
+// of radius 0.018, so this is about seven marker radii -- large enough to read as a
+// volume around the asset, small enough not to swallow the conjunctions near it.
+// Matches the concept mockup, which used a fixed 0.11 to 0.16.
+const GLOBE_COV_READABLE_MAJOR=0.13;
+// Aspect compression, and the reason this is not simply "the real shape".
+//
+// A real CDM position covariance for a well-tracked LEO asset is overwhelmingly
+// along-track. Measured on this stack across every subscribed asset:
+//
+//     SWARM B  27,829 / 6.8 / 1.8 m   ->  15,764 : 1
+//     SWARM A  31,196 / 15.9 / 4.2 m  ->   7,489 : 1
+//     SWARM C   1,801 / 8.7 / 6.0 m   ->     299 : 1
+//     CRYOSAT2  1,454 / 17.1 / 2.0 m  ->     743 : 1
+//
+// Draw those ratios faithfully with the major axis pinned at a readable size and
+// the minor axes land between 8e-6 and 1.5e-3 scene units -- sub-pixel, against an
+// asset marker of radius 0.018. The result is an invisible needle, which is the
+// COVARIANCE button looking broken all over again. The concept mockup's 1.5/1.0/1.2
+// was symbolic precisely because real covariance is not shaped like a dome.
+//
+// So the minor axes are compressed by a power law rather than drawn raw. It is
+// monotonic, so the ORDER of the axes and the relative elongation between assets
+// both survive -- a rounder covariance still draws rounder -- but the magnitude of
+// the ratio does not. That is a rendering choice, not a measurement, and the caption
+// says the shape is not to scale for exactly this reason.
+//
+// Set GAMMA to 1 and MIN_RATIO to 0 to get the raw ratios back.
+const GLOBE_COV_ASPECT_GAMMA=0.3;
+const GLOBE_COV_MIN_AXIS_RATIO=0.12;
 // Purely numerical: a principal axis can be metres against a neighbour of
-// megametres, and a literally zero scale gives a non-invertible transform. This
-// floor is ~6 m in scene units, far below anything visible, so it changes the
-// picture nowhere while keeping the matrix well-formed.
+// megametres, and a literally zero scale gives a non-invertible transform. Kept
+// from SCRUM-448 for the same reason, and it is now also what a fully degenerate
+// covariance falls back to.
 const GLOBE_COV_MIN_SCALE=1e-6;
+// Gentle breathing, as in the concept. It multiplies the WHOLE scale, never a
+// single axis, so it cannot distort the shape the covariance defines.
+const GLOBE_COV_BREATHE_AMPLITUDE=0.12;
+const GLOBE_COV_BREATHE_RATE=0.002;   // radians per ms
 let globeShowCovariance=false;
-let globeCovParts=[];
+// One dome, or null. Not a list: there is exactly one covariance mesh on the globe.
+let globeCovDome=null;
 // The worst conjunction, kept from the payload so FOCUS WORST does not have to
 // re-derive which object that was.
 let globeWorstNorad=null;
@@ -4021,61 +4064,96 @@ function toggleGlobeAutoRotate(){
 function toggleGlobeCovariance(){
   globeShowCovariance=!globeShowCovariance;
   document.getElementById('globeCovBtn')?.classList.toggle('on',globeShowCovariance);
-  globeCovParts.forEach(m=>{ if(m) m.visible=globeShowCovariance; });
+  if(globeCovDome) globeCovDome.visible=globeShowCovariance;
   renderGlobeCovNote();
 }
 
 // The caption reads the scale off the constants rather than asserting one, so it
 // cannot drift out of step with what is actually drawn.
+// The caption states exactly which half of the drawing is a measurement. The shape
+// and the tilt are the covariance's own; the size is normalized so the dome is
+// legible, and claiming true scale would be a lie about the one thing an operator
+// might otherwise read off it.
 function renderGlobeCovNote(){
   const el=document.getElementById('globeCovNote');
   if(!el)return;
-  if(!globeShowCovariance||globeCovParts.length===0){
+  if(!globeShowCovariance||!globeCovDome){
     el.style.display='none';
     return;
   }
-  const scale=(GLOBE_COV_EXAGGERATION===1)
-    ? 'true scale'
-    : ('not to scale \u2014 \u00d7'+GLOBE_COV_EXAGGERATION);
-  el.textContent=GLOBE_COV_SIGMA_MULTIPLIER+'\u03c3 CDM position uncertainty \u2014 '+scale;
+  el.textContent=GLOBE_COV_SIGMA_MULTIPLIER
+    +'\u03c3 CDM position uncertainty \u2014 orientation true; '
+    +'shape and size not to scale';
   el.style.display='block';
 }
 
-// One ellipsoid from a cov block: a unit sphere scaled along the covariance's
-// principal axes and oriented by them. Parented to the object's marker, so it
-// follows the marker every frame for free and inherits the marker's visibility --
-// which is exactly the rule wanted for the NOMINAL haze: a nominal object's
-// ellipsoid disappears with its object, while COVARIANCE governs its own .visible.
-function buildCovEllipsoid(cov,colorHex,marker){
+// The size normalization, kept apart from the rendering so it can be reasoned
+// about and tested on its own.
+//
+// Ratios in, ratios out: the returned scales are proportional to the sigmas, so the
+// dome's elongation is the covariance's real elongation. What is NOT preserved is
+// the magnitude -- the major axis is pinned to GLOBE_COV_READABLE_MAJOR whatever the
+// numbers were, which is the whole point. A 5 km uncertainty and a 1,500 km one draw
+// the same size and different shapes.
+//
+// Returns null for a covariance it cannot read, so the caller draws nothing rather
+// than a dome asserting something the data did not say.
+function covDomeAxisScales(sigmas_m){
+  if(!Array.isArray(sigmas_m)||sigmas_m.length!==3)return null;
+  if(!sigmas_m.every(v=>typeof v==='number'&&isFinite(v)&&v>=0))return null;
+  const major=Math.max(sigmas_m[0],sigmas_m[1],sigmas_m[2]);
+  if(!(major>0)){
+    // Every axis zero. There is no shape and no orientation to show, so fall back
+    // to the floor: a well-formed transform that draws nothing visible, rather than
+    // a divide by zero or a sphere implying an uncertainty that was not reported.
+    return [GLOBE_COV_MIN_SCALE,GLOBE_COV_MIN_SCALE,GLOBE_COV_MIN_SCALE];
+  }
+  return sigmas_m.map(s=>{
+    // Compress the ratio, never the ordering: x^gamma is monotonic on [0,1], so a
+    // longer axis stays longer and a rounder covariance still draws rounder.
+    const ratio=s/major;
+    const shown=Math.max(Math.pow(ratio,GLOBE_COV_ASPECT_GAMMA),
+                         ratio>0?GLOBE_COV_MIN_AXIS_RATIO:0);
+    return Math.max(GLOBE_COV_READABLE_MAJOR*shown,GLOBE_COV_MIN_SCALE);
+  });
+}
+
+// The asset's uncertainty dome: one cyan wireframe ellipsoid, shaped and tilted by
+// the real covariance, sized to read at globe zoom.
+//
+// Parented to the asset marker, so it follows the asset around its track every frame
+// for free and inherits the marker's transform -- the concept mockup copied the
+// asset's position into the mesh each frame; parenting is the same result without
+// per-frame position code.
+function buildAssetCovDome(cov,marker){
   if(!cov||!Array.isArray(cov.axes)||!Array.isArray(cov.sigmas_m))return null;
-  if(cov.axes.length!==3||cov.sigmas_m.length!==3)return null;
-  if(!cov.sigmas_m.every(v=>typeof v==='number'&&isFinite(v)&&v>=0))return null;
+  if(cov.axes.length!==3)return null;
+  const scales=covDomeAxisScales(cov.sigmas_m);
+  if(!scales)return null;
 
   // Covariance axes are ECI. eciToScene is a rotation plus a uniform scale, so
   // running a direction through it and normalising gives the same axis in scene
-  // space -- the axes must not be used raw, or the ellipsoid is oriented in the
-  // wrong frame while looking perfectly plausible.
+  // space -- the axes must not be used raw, or the dome is tilted in the wrong
+  // frame while looking perfectly plausible. Unchanged from SCRUM-448, because the
+  // orientation is the part that was always right.
   const axes=cov.axes.map(a=>eciToScene(a[0],a[1],a[2]).normalize());
   const basis=new THREE.Matrix4().makeBasis(axes[0],axes[1],axes[2]);
 
   const mesh=new THREE.Mesh(
-    new THREE.SphereGeometry(1,16,12),
+    new THREE.SphereGeometry(1,20,20),
     new THREE.MeshBasicMaterial({
-      color:colorHex,transparent:true,opacity:0.18,
-      depthWrite:false,side:THREE.DoubleSide
+      color:0x4ff8e8,transparent:true,opacity:0.14,
+      wireframe:true,depthWrite:false
     })
   );
   mesh.quaternion.setFromRotationMatrix(basis);
-  // sigmas are metres; scene units are Earth radii.
-  const k=GLOBE_COV_SIGMA_MULTIPLIER*GLOBE_COV_EXAGGERATION/(EARTH_RADIUS_KM*1000);
-  mesh.scale.set(
-    Math.max(cov.sigmas_m[0]*k,GLOBE_COV_MIN_SCALE),
-    Math.max(cov.sigmas_m[1]*k,GLOBE_COV_MIN_SCALE),
-    Math.max(cov.sigmas_m[2]*k,GLOBE_COV_MIN_SCALE)
-  );
+  mesh.scale.set(scales[0],scales[1],scales[2]);
+  // Kept so the breathing pulse can multiply the whole scale without drifting: it
+  // rescales from these, never from whatever scale the mesh is currently wearing.
+  mesh.userData.baseScale=scales.slice();
   mesh.visible=globeShowCovariance;
   mesh.renderOrder=1;
-  marker.add(mesh);      // rides the marker: position, and visibility, inherited
+  marker.add(mesh);
   return mesh;
 }
 
@@ -4158,11 +4236,12 @@ function clearGlobeTracks(){
   globeLabelParts=[];
   // Object ellipsoids ride markers that are themselves removed here, but the
   // ASSET marker is persistent -- it is built once in initGlobe and never
-  // removed -- so its ellipsoid would survive a refetch and a second one would
-  // be added beside it, invisible to the toggle. Detach explicitly rather than
-  // relying on the parent going away.
-  globeCovParts.forEach(m=>{ if(m&&m.parent) m.parent.remove(m); });
-  globeCovParts=[];
+  // removed -- so its dome would survive a refetch and a second one would be added
+  // beside it, invisible to the toggle. Detach explicitly rather than relying on
+  // the parent going away. (SCRUM-448 learned this with the ellipsoids; the dome
+  // hangs off the same marker and needs the same care.)
+  if(globeCovDome&&globeCovDome.parent) globeCovDome.parent.remove(globeCovDome);
+  globeCovDome=null;
   globeWorstIndex=-1;globeWorstNorad=null;globeWorstMeta=null;globeWorstTrackEci=null;
   assetTrackLine=null;
 }
@@ -4188,10 +4267,12 @@ function updateGlobeOrbits(orbits){
     markerAnimT=0;
     // The asset is always labelled: it is the one object on the globe the
     // operator is responsible for, so it should never be the unlabelled dot.
-    // SCRUM-448: the asset's own uncertainty, from the worst row's SAT1 block.
+    // SCRUM-464: the asset's own uncertainty, from the worst row's SAT1 block, as
+    // the single covariance dome. Rebuilt here on every fetch and asset switch, the
+    // same point the SCRUM-448 ellipsoids were rebuilt, so the dome always describes
+    // the covariance currently on screen.
     if(orbits.asset&&orbits.asset.cov&&assetMarker){
-      const ell=buildCovEllipsoid(orbits.asset.cov,0x4ff8e8,assetMarker);
-      if(ell) globeCovParts.push(ell);
+      globeCovDome=buildAssetCovDome(orbits.asset.cov,assetMarker);
     }
     if(orbits.live&&assetTrackPoints.length>0){
       assetLabelSprite=makeTextSprite(liveAssetName||('NORAD '+liveAssetNorad),'#4ff8e8');
@@ -4244,14 +4325,6 @@ function updateGlobeOrbits(orbits){
         globeNominalParts.push(line,m);
         line.visible=globeShowNominal;
         m.visible=globeShowNominal;
-      }
-      // SCRUM-448: the object's real CDM position uncertainty. Absent cov means
-      // no ellipsoid -- the object is still drawn, it just makes no claim about
-      // its uncertainty, which is the honest rendering of "we were not told".
-      const objCov=(orbits.objects&&orbits.objects[objId]&&orbits.objects[objId].cov)||null;
-      if(objCov){
-        const ell=buildCovEllipsoid(objCov,col,m);
-        if(ell) globeCovParts.push(ell);
       }
       // Labels on the asset and on RED/AMBER only. A label per object on a dense
       // asset is an unreadable wall of text, and the objects below the watch line
@@ -4309,6 +4382,15 @@ function startGlobeLoop(){
   if(globeAnimId)return;
   function loop(){
     globeAnimId=requestAnimationFrame(loop);
+    // SCRUM-464: the covariance dome breathes, as in the concept. The pulse is a
+    // single multiplier on all three axes, applied to the base scale rather than
+    // compounded onto the current one, so it can shift the dome's apparent size but
+    // never its shape -- the shape is the measurement.
+    if(globeCovDome&&globeCovDome.visible&&globeCovDome.userData.baseScale){
+      const b=globeCovDome.userData.baseScale;
+      const cs=1+GLOBE_COV_BREATHE_AMPLITUDE*Math.sin(performance.now()*GLOBE_COV_BREATHE_RATE);
+      globeCovDome.scale.set(b[0]*cs,b[1]*cs,b[2]*cs);
+    }
     // Animate asset marker along track
     if(assetTrackPoints.length>1){
       const now=performance.now();
