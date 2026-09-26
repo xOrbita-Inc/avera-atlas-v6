@@ -310,16 +310,65 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 .partial-chip:hover{background:rgba(255,176,32,0.3)}
 /* SCRUM-447 follow-up: the floating control cluster over the globe, bottom-right,
    opposite the bottom-left status line. Hidden with the rest of the globe in 2D. */
-.globe-cov-note{position:absolute;right:10px;bottom:46px;z-index:6;font-size:9px;
-  letter-spacing:0.5px;color:var(--text-dim);background:rgba(0,0,0,0.55);
-  border:1px solid var(--border);border-radius:3px;padding:4px 8px;pointer-events:none;
-  max-width:60%;text-align:right}
-.globe-controls{display:none;position:absolute;right:10px;bottom:10px;z-index:6;
-  gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end;max-width:70%;
-  background:rgba(0,0,0,0.55);border:1px solid var(--border);border-radius:4px;padding:6px 8px}
-.globe-controls.visible{display:flex}
-/* Buttons inside the cluster follow the cluster, not their own .visible flag:
-   the cluster is what setView shows and hides. */
+/* SCRUM-465: a row of the dock's control panel rather than a floating overlay at a
+   fixed offset, which would now sit on top of a multi-panel dock. */
+.globe-cov-note{font-size:9px;letter-spacing:0.5px;color:var(--text-dim);
+  pointer-events:none;text-align:right;padding:0 0 4px;
+  border-bottom:1px solid var(--border);margin-bottom:5px}
+/* SCRUM-465: the bottom-right dock, matching the Live Conjunction Globe concept --
+   an asset switch, the worst-conjunction card, then the control row, stacked. The
+   shipped globe had only the bare control row.
+   The dock is what setView shows and hides now; the control row is a panel inside
+   it rather than a free-floating cluster. */
+.globe-dock{display:none;position:absolute;right:10px;bottom:10px;z-index:6;
+  flex-direction:column;gap:6px;width:300px;max-width:calc(100% - 20px);
+  max-height:calc(100% - 20px)}
+.globe-dock.visible{display:flex}
+.dock-panel{background:rgba(6,6,17,0.72);border:1px solid var(--border);
+  border-radius:4px;padding:6px 8px;backdrop-filter:blur(6px);
+  -webkit-backdrop-filter:blur(6px)}
+/* The asset switch. The concept hard-codes two tabs; there are about ten
+   subscribed assets here, so it is a single-row strip that scrolls horizontally
+   rather than wrapping into a wall of chips. */
+.dock-assets{display:flex;gap:5px;overflow-x:auto;overflow-y:hidden;
+  scrollbar-width:thin;padding-bottom:2px}
+.dock-assets::-webkit-scrollbar{height:4px}
+.dock-assets::-webkit-scrollbar-thumb{background:var(--border-accent);border-radius:2px}
+.dock-chip{flex:0 0 auto;background:none;border:1px solid var(--border);
+  color:var(--text-dim);font-family:inherit;font-size:9px;letter-spacing:0.8px;
+  padding:3px 8px;border-radius:2px;cursor:pointer;white-space:nowrap;
+  transition:color .2s,border-color .2s,background .2s}
+.dock-chip:hover{color:var(--accent);border-color:var(--accent-dim)}
+.dock-chip[aria-pressed="true"]{color:var(--accent);border-color:var(--accent-dim);
+  background:var(--accent-glow)}
+.dock-chip .chip-count{color:var(--text-dim);font-variant-numeric:tabular-nums}
+.dock-chip[aria-pressed="true"] .chip-count{color:var(--accent-dim)}
+/* The worst-conjunction card. */
+.dock-worst-head{display:flex;align-items:center;justify-content:space-between;
+  gap:8px;margin-bottom:3px}
+.dock-worst-name{font-size:11px;font-weight:700;letter-spacing:0.6px;color:var(--text);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dock-worst-sub{font-size:8px;letter-spacing:0.5px;color:var(--text-dim);
+  margin-bottom:5px}
+.dock-dl{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;margin:0;
+  font-size:9px;letter-spacing:0.4px}
+.dock-dl dt{color:var(--text-dim);margin:0}
+.dock-dl dd{margin:0;color:var(--text);text-align:right;
+  font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap}
+.dock-risk{flex:0 0 auto;font-size:8px;font-weight:700;letter-spacing:1px;
+  padding:2px 6px;border-radius:2px}
+.dock-risk.RED{background:rgba(255,59,92,0.15);border:1px solid var(--red);color:var(--red)}
+.dock-risk.AMBER{background:rgba(255,176,32,0.15);border:1px solid var(--amber);color:var(--amber)}
+.dock-risk.GREEN{background:rgba(61,220,132,0.15);border:1px solid var(--green);color:var(--green)}
+.dock-risk.NOMINAL{background:rgba(107,109,138,0.15);border:1px solid var(--border-accent);color:var(--text-dim)}
+.dock-empty{font-size:9px;color:var(--text-dim);letter-spacing:0.5px}
+/* The control row keeps its id and its handlers; it is now a panel in the dock
+   rather than the floating cluster, so it no longer positions itself. */
+.globe-controls{display:none;gap:6px;align-items:center;flex-wrap:wrap;
+  justify-content:flex-end}
+.globe-dock.visible .globe-controls{display:flex}
+/* Buttons inside the cluster follow the dock, not their own .visible flag. */
 .globe-controls .globe-toggle{display:inline-flex;align-items:center}
 /* SCRUM-447: globe-only control, revealed with the speed control on the 3D view. */
 .globe-toggle{display:none;background:none;border:1px solid var(--border);color:var(--text-dim);
@@ -589,7 +638,25 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
            covariance ellipsoid needs the endpoint to emit per-object ECI
            covariance and the renderer to draw it. That is its own ticket, and a
            button that does nothing is worse than no button. -->
-      <div id="globeControls" class="globe-controls">
+      <!-- SCRUM-465: the concept's bottom-right dock -- asset switch, worst
+           conjunction, controls, stacked. setView shows and hides the dock now;
+           #globeControls keeps its id and every handler it already had. -->
+      <div id="globeDock" class="globe-dock">
+        <!-- The asset switch. It is NOT a second selection state: a chip writes the
+             LIVE ASSET dropdown and calls the dropdown's own onLiveAssetChange, so
+             there is one code path and the two can never disagree. -->
+        <div class="dock-panel dock-assets" id="globeAssetStrip" role="tablist"
+          aria-label="Subscribed asset"></div>
+        <!-- The worst conjunction, bound to the same object FOCUS WORST frames. -->
+        <div class="dock-panel" id="globeWorstCard"></div>
+        <div class="dock-panel">
+          <!-- SCRUM-448 caption, moved into the dock by SCRUM-465. It used to float
+               at a fixed bottom:46px, which cleared a single-row control cluster;
+               the dock is several panels tall, so a fixed offset would now land on
+               top of it. As a row of the control panel it sits above the buttons at
+               any height. -->
+          <div id="globeCovNote" class="globe-cov-note" style="display:none"></div>
+          <div id="globeControls" class="globe-controls">
         <button type="button" class="globe-toggle" id="globeRotateBtn"
           onclick="toggleGlobeAutoRotate()"
           title="Slowly drift the camera around the globe">AUTO-ROTATE</button>
@@ -605,11 +672,9 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
         <button type="button" class="globe-toggle" id="globeFocusWorstBtn"
           onclick="focusWorstConjunction()"
           title="Frame the highest-Pc conjunction">FOCUS WORST</button>
+          </div>
+        </div>
       </div>
-      <!-- SCRUM-448: while ellipsoids are drawn, the globe states what they are
-           and at what scale. An uncertainty volume with no stated scale is not
-           an honest thing to put on an operator's screen. -->
-      <div id="globeCovNote" class="globe-cov-note" style="display:none"></div>
     </div>
     <div class="risk-bar">
       <div class="label">Pc</div>
@@ -926,6 +991,18 @@ function onLiveAssetChange(){
     : 'Select a subscribed asset';
   clearConjunctionsForSourceSwitch();
   updateConjSourceNote();
+  // SCRUM-465: the worst conjunction belongs to the asset that was selected, so it
+  // goes with it. Without this the card kept the previous asset's object and
+  // relabelled it with the new asset's name -- the previous asset's encounter
+  // presented as this one's, which is the same failure the 2D table clears itself
+  // to avoid. Cleared here, on the one selection path, so the dropdown and the dock
+  // both get it.
+  globeWorstNorad=null;globeWorstMeta=null;globeWorstTrackEci=null;globeWorstIndex=-1;
+  // Switching via the dropdown updates the dock's highlight. The dock calls this
+  // same function, so this is the only place the highlight is derived and it cannot
+  // disagree with liveAssetNorad.
+  renderGlobeAssetStrip();
+  renderGlobeWorstCard(null);
 }
 
 function updateConjSourceNote(){
@@ -3724,7 +3801,11 @@ function setView(v){
     wrap2d.style.display='none';wrap3d.style.display='block';
     btn2d.classList.remove('active');btn3d.classList.add('active');
     document.getElementById('speedControl').classList.add('visible');
-    document.getElementById('globeControls')?.classList.add('visible');
+    document.getElementById('globeDock')?.classList.add('visible');
+    // SCRUM-465: paint the dock from whatever is already known, so opening the
+    // globe never shows three empty panels while the fetch is in flight.
+    renderGlobeAssetStrip();
+    renderGlobeWorstCard(null);
     if(!globeInitialized)initGlobe();
     else resizeGlobe();
     fetchAndUpdateGlobeOrbits();
@@ -3735,7 +3816,7 @@ function setView(v){
     wrap2d.style.display='';wrap3d.style.display='none';
     btn2d.classList.add('active');btn3d.classList.remove('active');
     document.getElementById('speedControl').classList.remove('visible');
-    document.getElementById('globeControls')?.classList.remove('visible');
+    document.getElementById('globeDock')?.classList.remove('visible');
     stopGlobeLoop();
     cameraFollowActive=false;
     if(currentConj&&currentPlannerResult)drawEncounter(currentConj,currentPlannerResult);
@@ -3940,6 +4021,15 @@ async function fetchLiveGlobeOrbits(){
     worst_object:data.worst_object,
     live:true
   });
+  // SCRUM-465: the dock, from this response. The count is recorded against the
+  // asset only here, where it came from a real payload, so a chip never shows a
+  // number the page was not told. updateGlobeOrbits has already set
+  // globeWorstMeta from the same data the card reads.
+  if(liveAssetNorad&&typeof data.counts?.events_in_window==='number'){
+    globeAssetCounts[String(liveAssetNorad)]=data.counts.events_in_window;
+  }
+  renderGlobeAssetStrip();
+  renderGlobeWorstCard(data.counts||null);
   // SCRUM-462: the same warning and the same words as the table -- one toast and
   // one chip for the app, so the two views can never disagree about the same
   // fetch. A globe with few rings is the most convincing "quiet sky" the dashboard
@@ -4051,6 +4141,120 @@ let globeWorstNorad=null;
 let globeWorstMeta=null;
 let globeWorstTrackEci=null;
 const GLOBE_AUTOROTATE_SPEED=0.5;   // a gentle drift, not a spin
+
+// ---------------------------------------------------------------------------
+// SCRUM-465: the globe dock -- asset switch and worst-conjunction card
+// ---------------------------------------------------------------------------
+
+// Conjunction counts seen per asset this session, keyed by NORAD. Only ever
+// written from a response we actually received, so a chip's count is a number the
+// page was told and never one it guessed. An asset not yet visited shows no count
+// rather than a placeholder: the concept could hard-code two counts because it had
+// two assets and no live data; ten assets cannot be counted without ten window
+// pulls, and inventing them would be the same class of lie as a fabricated total.
+let globeAssetCounts={};
+
+// Selecting an asset from the dock. This is deliberately NOT a second selection
+// path: it writes the LIVE ASSET dropdown and then calls the dropdown's own
+// handler, so liveAssetNorad/liveAssetName are set by exactly one function no
+// matter which control the operator used, and the two can never drift apart.
+function selectGlobeAsset(norad){
+  const sel=document.getElementById('liveAssetSelect');
+  if(!sel) return;
+  if(String(sel.value)===String(norad)) return;   // already current, nothing to do
+  sel.value=String(norad);
+  onLiveAssetChange();          // the one selection path, shared with the dropdown
+  renderGlobeAssetStrip();      // reflect it immediately, before the fetch lands
+  renderGlobeWorstCard(null);
+  // The dropdown leaves fetching to the FETCH button; the dock is on the globe,
+  // where the operator expects the switch to take effect, so it pulls. The 2D
+  // table is left cleared by onLiveAssetChange with its own prompt rather than
+  // showing the previous asset's rows under a new asset's name.
+  fetchAndUpdateGlobeOrbits();
+}
+
+function renderGlobeAssetStrip(){
+  const el=document.getElementById('globeAssetStrip');
+  if(!el) return;
+  const assets=(LEOLABS_ASSETS||[]);
+  if(!assets.length){
+    el.innerHTML='<span class="dock-empty">No subscribed assets</span>';
+    return;
+  }
+  // Current asset first, so the strip opens on what is being looked at rather
+  // than requiring a scroll to find it.
+  const ordered=assets.slice().sort((a,b)=>{
+    const ca=String(a.norad_id)===String(liveAssetNorad)?0:1;
+    const cb=String(b.norad_id)===String(liveAssetNorad)?0:1;
+    return ca-cb;
+  });
+  el.innerHTML=ordered.map(a=>{
+    const cur=String(a.norad_id)===String(liveAssetNorad);
+    const n=globeAssetCounts[String(a.norad_id)];
+    const count=(typeof n==='number')
+      ? ' <span class="chip-count">\u00b7 '+n.toLocaleString()+'</span>' : '';
+    return '<button type="button" class="dock-chip" role="tab" '
+      +'aria-pressed="'+(cur?'true':'false')+'" '
+      +'onclick="selectGlobeAsset(\''+a.norad_id+'\')" '
+      +'title="'+a.name+' \u2014 NORAD '+a.norad_id+'">'
+      +a.name+count+'</button>';
+  }).join('');
+}
+
+// The worst-conjunction card, bound to the same object FOCUS WORST frames.
+// `counts` is the globe response's own counts block, so N is the number of events
+// this view actually holds -- which on a truncated window (SCRUM-459) is the honest
+// short count, not a total the page does not have.
+function renderGlobeWorstCard(counts){
+  const el=document.getElementById('globeWorstCard');
+  if(!el) return;
+  const m=globeWorstMeta;
+  if(!m){
+    // "Nothing out there" and "we have not looked yet" are different facts, and
+    // the first is the dangerous one to say when the second is true -- the same
+    // distinction the 2D table and the globe message already make.
+    let why;
+    if(!liveAssetNorad) why='Select a subscribed asset';
+    else if(globeAssetCounts[String(liveAssetNorad)]===undefined)
+      why='No data yet \u2014 fetch live conjunctions';
+    else why='No conjunction in the reporting volume';
+    el.innerHTML='<div class="dock-empty">'+why+'</div>';
+    return;
+  }
+  const name=m.name||m.secondary_designator
+    ||(m.secondary_norad!=null?('NORAD '+m.secondary_norad):'UNKNOWN');
+  const risk=String(m.risk_level||'NOMINAL').toUpperCase();
+  const n=counts&&typeof counts.events_in_window==='number'
+    ? counts.events_in_window : null;
+  const sub=(n!=null)
+    ? ('Worst of '+n.toLocaleString()+' conjunction'+(n===1?'':'s')
+       +' in the reporting volume')
+    : 'Worst conjunction in the reporting volume';
+  const miss=(typeof m.miss_distance_m==='number')
+    ? (m.miss_distance_m/1000).toFixed(3)+' km' : '--';
+  const pc=m.pc_display||((typeof m.pc==='number')?m.pc.toExponential(2):'--');
+  const tca=m.tca_utc?String(m.tca_utc).replace('T',' ').substring(0,19)+'Z':'--';
+  // Honest about the covariance: real when the CDM carried one, "not reported"
+  // when it did not. The globe's live path is real CDMs either way, so the badge
+  // describes this object's block and nothing wider.
+  const hasCov=!!m.cov;
+  const cov='<span class="cov-badge '+(hasCov?'real':'surrogate')
+    +'" style="margin-top:0"><span class="cov-dot"></span>'
+    +(hasCov?'REAL CDM':'NOT REPORTED')+'</span>';
+  el.innerHTML=
+    '<div class="dock-worst-head">'
+      +'<span class="dock-worst-name" title="'+name+'">'+name+'</span>'
+      +'<span class="dock-risk '+risk+'">'+risk+'</span>'
+    +'</div>'
+    +'<div class="dock-worst-sub">'+sub+'</div>'
+    +'<dl class="dock-dl">'
+      +'<dt>Asset</dt><dd>'+(liveAssetName||liveAssetNorad||'--')+'</dd>'
+      +'<dt>Miss</dt><dd>'+miss+'</dd>'
+      +'<dt>Pc (LeoLabs)</dt><dd>'+pc+'</dd>'
+      +'<dt>TCA</dt><dd>'+tca+'</dd>'
+      +'<dt>Covariance</dt><dd>'+cov+'</dd>'
+    +'</dl>';
+}
 
 function toggleGlobeAutoRotate(){
   if(!globeControls)return;
