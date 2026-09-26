@@ -25,6 +25,38 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 .header-right{display:flex;align-items:center;gap:16px}
 .clock{font-size:13px;color:var(--text-dim);font-weight:300;letter-spacing:1px}
 .sys-status{font-size:9px;letter-spacing:1.5px;font-weight:500;padding:4px 10px;border-radius:3px;background:rgba(61,220,132,0.1);color:var(--green);border:1px solid rgba(61,220,132,0.3)}
+/* SCRUM-466: the LeoLabs attribution pill, mockup variant A. Same metrics as
+   .sys-status so it sits level with the status pill and the clock, but in the
+   ARBITER cyan rather than green on purpose: it is a data-source credit and must
+   not read as a second status light.
+   nowrap keeps the contractual phrase on one line -- it may move to its own row on
+   a narrow window (below), but it is never broken mid-phrase and never shortened. */
+.attrib-pill{display:inline-flex;align-items:center;gap:7px;font-size:9px;
+  letter-spacing:1.5px;font-weight:500;padding:4px 10px;border-radius:3px;
+  color:var(--accent-dim);background:var(--accent-glow);
+  border:1px solid rgba(79,248,232,0.28);white-space:nowrap}
+.attrib-dot{width:6px;height:6px;border-radius:50%;background:var(--accent);
+  box-shadow:0 0 6px rgba(79,248,232,0.7);flex:0 0 auto}
+/* Narrow windows: the header grows and the credit takes its own row beneath the
+   status and the clock. Deliberately NOT display:none and deliberately not an
+   abbreviation -- the requirement is the full phrase, visible. The header's fixed
+   48px is relaxed here so the extra row cannot be clipped. */
+@media (max-width:1000px){
+  .header{height:auto;min-height:48px;flex-wrap:wrap;padding-top:6px;padding-bottom:6px}
+  .header-right{flex-wrap:wrap;justify-content:flex-end;gap:10px}
+  /* A zero-height full-width flex item forces the wrap, so the credit keeps its
+     own size instead of stretching into a full-width bar. It is ordered after the
+     status and the clock, and the pill after it, so the pill lands on a new row. */
+  .header-right::after{content:"";flex:0 0 100%;height:0;order:0}
+  #leolabsAttrib{order:1;margin-left:auto}
+}
+/* Narrower still: the credit is ~340px and nowrap, so below roughly this width the
+   right-hand cluster can no longer be sized by the status and clock alone without
+   pushing the credit past the edge. Give it the header's full width so the phrase
+   always has room. Clipping it would be the one failure this ticket must prevent. */
+@media (max-width:700px){
+  .header-right{flex:1 1 100%;min-width:0}
+}
 .pipeline-bar{height:28px;background:var(--bg-panel);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 20px;gap:4px;flex-shrink:0}
 .pipe-node{display:flex;align-items:center;gap:6px;padding:2px 10px;font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--text-dim);transition:all 0.3s}
 .pipe-node.online{color:var(--green)}.pipe-node.offline{color:var(--red)}
@@ -470,6 +502,19 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 <div class="header">
   <div class="logo"><h1>ARBITER</h1><span class="tag">APS v{{ aps_version }} Conjunction Assessment</span></div>
   <div class="header-right">
+    <!-- SCRUM-466: LeoLabs attribution. This is a CONTRACTUAL string, not copy.
+         LeoLabs require that any public material featuring their results state
+         their credit verbatim; the exact wording is the pill's text below, and is
+         deliberately not repeated in this comment so that the shipped page holds
+         exactly one copy of it. Uppercase display is fine; do not abbreviate,
+         reword, reorder, or split it across elements -- the element's text content
+         has to be that exact string, so the words are kept on one source line and
+         the dot is an empty span before them.
+         Always on: never gated to live data, a LeoLabs fetch, a mode or a flag,
+         because a credit that can be absent is a credit that will be absent during
+         the one moment it is needed. A test pins the phrase so it cannot be
+         silently altered or dropped later. -->
+    <span class="attrib-pill" id="leolabsAttrib"><span class="attrib-dot"></span>UTILIZING LEOLABS PULSE SPACE SAFETY SERVICE</span>
     <span class="sys-status" id="sysStatus">SYSTEM ONLINE</span>
     <span class="clock" id="clock">--:--:-- UTC</span>
   </div>

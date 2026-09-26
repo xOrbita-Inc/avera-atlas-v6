@@ -1,0 +1,122 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LeoLabs Attribution Banner</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;700&family=JetBrains+Mono:wght@300;400;500;700&display=swap">
+<style>
+  :root{
+    --bg-deep:#060611;--bg-panel:#0c0d1a;--accent:#4ff8e8;--accent-dim:#2a9e94;
+    --accent-glow:rgba(79,248,232,0.15);--green:#3ddc84;--text:#e4e4ef;
+    --text-dim:#6b6d8a;--border:#1e2044;--border-accent:#2a3060;
+    --mono:'JetBrains Mono',ui-monospace,Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg-deep);color:var(--text);font-family:var(--mono);
+    padding:22px 16px 48px;max-width:1120px;margin:0 auto}
+  h1.pg{font-size:15px;letter-spacing:1.5px;margin:0 0 4px}
+  p.pg{font-size:11px;color:var(--text-dim);line-height:1.6;margin:0 0 22px;max-width:820px}
+  .variant{margin-bottom:26px}
+  .vlabel{font-size:10px;letter-spacing:1.5px;color:var(--accent);text-transform:uppercase;margin-bottom:7px}
+  .vlabel .rec{color:var(--green);border:1px solid rgba(61,220,132,0.4);border-radius:3px;
+    padding:1px 6px;margin-left:8px;font-size:8px}
+  .vnote{font-size:10.5px;color:var(--text-dim);margin-top:7px;line-height:1.5}
+
+  /* ---- the real ARBITER header, reproduced from index.html ---- */
+  .header{height:48px;background:linear-gradient(180deg,#0a0b1e,var(--bg-deep));
+    border:1px solid var(--border-accent);border-radius:5px;display:flex;align-items:center;
+    justify-content:space-between;padding:0 20px;position:relative;overflow:hidden}
+  .logo{display:flex;align-items:center;gap:10px;flex-shrink:0}
+  .logo h1{font-family:'Outfit',sans-serif;font-size:18px;font-weight:700;letter-spacing:4px;
+    color:var(--accent);text-shadow:0 0 20px rgba(79,248,232,0.3);margin:0}
+  .logo .tag{font-size:9px;letter-spacing:2px;color:var(--text-dim);text-transform:uppercase;
+    border-left:1px solid var(--border-accent);padding-left:12px}
+  .header-right{display:flex;align-items:center;gap:14px;flex-shrink:0}
+  .sys-status{font-size:9px;letter-spacing:1.5px;font-weight:500;padding:4px 10px;border-radius:3px;
+    background:rgba(61,220,132,0.1);color:var(--green);border:1px solid rgba(61,220,132,0.3);white-space:nowrap}
+  .clock{font-size:13px;color:var(--text-dim);font-weight:300;letter-spacing:1px;white-space:nowrap}
+
+  /* ---- A: accent attribution pill (uppercase), matches the status-pill family ---- */
+  .attrib-pill{display:inline-flex;align-items:center;gap:7px;font-size:9px;letter-spacing:1.5px;
+    font-weight:500;padding:4px 10px;border-radius:3px;color:var(--accent-dim);
+    background:var(--accent-glow);border:1px solid rgba(79,248,232,0.28);white-space:nowrap}
+  .attrib-pill .dot{width:6px;height:6px;border-radius:50%;background:var(--accent);
+    box-shadow:0 0 6px rgba(79,248,232,0.7);flex:0 0 auto}
+
+  /* ---- B: sentence-case credit pill, LeoLabs name emphasized ---- */
+  .attrib-credit{display:inline-flex;align-items:center;gap:7px;font-size:10px;letter-spacing:0.3px;
+    padding:4px 11px;border-radius:3px;color:var(--text-dim);
+    background:rgba(79,248,232,0.06);border:1px solid var(--border-accent);white-space:nowrap}
+  .attrib-credit b{color:var(--accent);font-weight:700}
+  .attrib-credit .dot{width:6px;height:6px;border-radius:50%;background:var(--accent);flex:0 0 auto}
+
+  /* ---- C: two-line quiet credit, no pill ---- */
+  .attrib-stack{display:flex;flex-direction:column;align-items:flex-end;line-height:1.2;
+    border-left:1px solid var(--border-accent);padding-left:14px}
+  .attrib-stack .eyebrow{font-size:7.5px;letter-spacing:2px;color:var(--text-dim);text-transform:uppercase}
+  .attrib-stack .phrase{font-size:10px;letter-spacing:0.3px;color:var(--text);white-space:nowrap}
+  .attrib-stack .phrase b{color:var(--accent);font-weight:700}
+</style>
+</head>
+<body>
+  <h1 class="pg">LEOLABS ATTRIBUTION BANNER &mdash; header placement</h1>
+  <p class="pg">Required phrase, verbatim: <b style="color:var(--accent)">utilizing LeoLabs Pulse space safety service</b>.
+  Three treatments, all placed to the right of the ARBITER title in the real header, always on. The header is reproduced
+  from index.html with the live palette and fonts, so what you see is what would ship. Pick one (or a blend) and I bake it in.</p>
+
+  <!-- A -->
+  <div class="variant">
+    <div class="vlabel">A &middot; Accent pill, uppercase<span class="rec">Recommended</span></div>
+    <div class="header">
+      <div class="logo"><h1>ARBITER</h1><span class="tag">APS v2.5 Conjunction Assessment</span></div>
+      <div class="header-right">
+        <span class="attrib-pill"><span class="dot"></span>UTILIZING LEOLABS PULSE SPACE SAFETY SERVICE</span>
+        <span class="sys-status">SYSTEM ONLINE</span>
+        <span class="clock">08:17:35 UTC</span>
+      </div>
+    </div>
+    <div class="vnote">Reads as a persistent data-source credit, same visual family as SYSTEM ONLINE but in the ARBITER cyan so
+    it does not look like a second status light. Most compact.</div>
+  </div>
+
+  <!-- B -->
+  <div class="variant">
+    <div class="vlabel">B &middot; Sentence-case credit, name emphasized</div>
+    <div class="header">
+      <div class="logo"><h1>ARBITER</h1><span class="tag">APS v2.5 Conjunction Assessment</span></div>
+      <div class="header-right">
+        <span class="attrib-credit"><span class="dot"></span>Utilizing <b>LeoLabs Pulse</b> space safety service</span>
+        <span class="sys-status">SYSTEM ONLINE</span>
+        <span class="clock">08:17:35 UTC</span>
+      </div>
+    </div>
+    <div class="vnote">Same footprint, softer case, and the LeoLabs name pops. Reads more like a credit than a system chip,
+    which leans into LeoLabs' "clearly state" requirement.</div>
+  </div>
+
+  <!-- C -->
+  <div class="variant">
+    <div class="vlabel">C &middot; Two-line quiet credit, no pill</div>
+    <div class="header">
+      <div class="logo"><h1>ARBITER</h1><span class="tag">APS v2.5 Conjunction Assessment</span></div>
+      <div class="header-right">
+        <span class="attrib-stack">
+          <span class="eyebrow">Data source</span>
+          <span class="phrase">Utilizing <b>LeoLabs Pulse</b> space safety service</span>
+        </span>
+        <span class="sys-status">SYSTEM ONLINE</span>
+        <span class="clock">08:17:35 UTC</span>
+      </div>
+    </div>
+    <div class="vnote">Quietest. The "Data source" eyebrow is decorative; the required phrase is still stated in full underneath.
+    Takes a touch more height, so it is the tightest fit in a 48px bar.</div>
+  </div>
+
+  <p class="pg" style="margin-top:6px">Notes: the phrase content is identical in all three; only case and weight differ, which LeoLabs review will
+  confirm is acceptable. On a narrow window the phrase can drop to the pipeline row rather than crowd the clock &mdash; it never
+  abbreviates. I would keep it always on rather than only in live mode, so it can never be missing during a live moment.</p>
+</body>
+</html>
