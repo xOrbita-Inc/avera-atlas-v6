@@ -99,19 +99,47 @@ Visible in `cov-slider-1x.jpg`. `cov-slider-1x-before-caption-fix.jpg` is kept a
 the before shot, since the collision is only obvious side by side. Three tests now
 pin the new placement so the fixed offset cannot come back.
 
-## What I could not capture
+## Both screenshots, same camera, same session
 
-**There is no 20x screenshot.** The Chrome capture frame clipped the viewport
-inconsistently between calls — 773x691 on a 1333x1192 window on several attempts,
-so the control cluster fell outside the captured region — and resizing the window,
-zooming the page and scrolling the element into view did not move it. I got one
-clean frame on a fresh tab, which is the 1x shot above, and stopped rather than keep
-retrying.
+`docs/scrum-463/cov-slider-1x.jpg` and `docs/scrum-463/cov-slider-20x.jpg` are a
+matched pair: same asset, same globe, same camera, 46 ellipsoids, one slider drag
+between them.
 
-So the 20x evidence in this document is numeric rather than visual: the readout, the
-caption, the 45 rescaled meshes and the per-axis comparison against the formula, all
-read out of the live page. The visual check at 20x is the one thing a reviewer
-should do by hand, and it is a drag of one slider.
+At **1x** the slider thumb sits at the far left, the readout says `1×`, the caption
+says *true scale*, and the ellipsoids are invisible at globe zoom -- they are at or
+under the marker dots. That is the SCRUM-448 picture, unchanged, and it is the
+problem this control exists to give the operator a handle on.
+
+At **20x** the thumb has moved, the readout says `20×`, the caption says *not to
+scale -- x20*, and the uncertainty volumes sweep visibly across the globe. Nothing
+was re-fetched and no geometry was rebuilt between the two frames.
+
+    sample mesh, one axis:  0.013104  ->  0.262089   (exactly x20)
+    biggest axis overall:   0.241     ->  4.819 Earth radii
+    every_mesh_correct:     true      (46 meshes, all three axes, against
+                                       max(sigma*3*N/(R*1000), floor))
+
+A note on the first attempt, recorded because the gap was reported before it was
+closed: the Chrome capture frame clipped the viewport inconsistently on the original
+run and only the 1x frame came out, so that run's evidence for 20x was numeric. It
+was re-run in a later session on a fresh tab and both frames captured cleanly. The
+numbers were identical either way.
+
+## COVARIANCE off still wins, at 20x
+
+    with the slider at 20x, COVARIANCE off:
+      visible ellipsoids: 0
+      caption:            hidden
+      slider:             disabled and dimmed
+      value:              kept at 20
+
+    COVARIANCE back on:
+      visible ellipsoids: 46
+      exaggeration:       still 20
+      caption:            "3σ CDM position uncertainty — not to scale — ×20"
+
+The toggle governs the ellipsoids absolutely, and the slider keeps the operator's
+setting across it rather than snapping back to 1x.
 
 ## Tests
 
