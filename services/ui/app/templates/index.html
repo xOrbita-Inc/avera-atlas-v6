@@ -310,10 +310,16 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 .partial-chip:hover{background:rgba(255,176,32,0.3)}
 /* SCRUM-447 follow-up: the floating control cluster over the globe, bottom-right,
    opposite the bottom-left status line. Hidden with the rest of the globe in 2D. */
-.globe-cov-note{position:absolute;right:10px;bottom:46px;z-index:6;font-size:9px;
-  letter-spacing:0.5px;color:var(--text-dim);background:rgba(0,0,0,0.55);
-  border:1px solid var(--border);border-radius:3px;padding:4px 8px;pointer-events:none;
-  max-width:60%;text-align:right}
+/* SCRUM-448 placed this at a fixed bottom:46px, just above a single-row control
+   cluster. SCRUM-463's slider widened that cluster enough to wrap, and the caption
+   then sat on top of the buttons -- measured overlapping on a 1440px window. A
+   fixed offset cannot track a cluster whose height depends on how it wraps, so the
+   caption is now a full-width row INSIDE the cluster: it is always directly above
+   the controls it describes, at any wrap, and cannot collide with them. */
+.globe-cov-note{flex:0 0 100%;order:-1;font-size:9px;
+  letter-spacing:0.5px;color:var(--text-dim);pointer-events:none;
+  padding:0 0 2px;text-align:right;border-bottom:1px solid var(--border);
+  margin-bottom:2px}
 .globe-controls{display:none;position:absolute;right:10px;bottom:10px;z-index:6;
   gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end;max-width:70%;
   background:rgba(0,0,0,0.55);border:1px solid var(--border);border-radius:4px;padding:6px 8px}
@@ -327,6 +333,29 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
   cursor:pointer;transition:color .2s,border-color .2s}
 .globe-toggle.visible{display:inline-flex;align-items:center}
 .globe-toggle:hover{color:var(--accent);border-color:var(--accent-dim)}
+/* SCRUM-463: the covariance exaggeration slider, styled to sit in the same cluster
+   as the toggles. Dimmed rather than hidden when COVARIANCE is off, so the control
+   stays discoverable and its position does not jump as the toggle is used. */
+.globe-scale{display:inline-flex;align-items:center;gap:5px;padding:2px 6px;
+  border:1px solid var(--border);border-radius:2px;color:var(--text-dim);
+  font-size:9px;letter-spacing:1px;transition:opacity .2s}
+.globe-scale.off{opacity:0.35}
+.globe-scale-lbl{font-size:8px;letter-spacing:1.2px}
+.globe-scale-val{min-width:26px;text-align:right;color:var(--accent);font-weight:700}
+.globe-scale.off .globe-scale-val{color:var(--text-dim)}
+.globe-scale input[type=range]{width:88px;height:12px;cursor:pointer;
+  -webkit-appearance:none;appearance:none;background:none}
+.globe-scale input[type=range]:disabled{cursor:default}
+.globe-scale input[type=range]::-webkit-slider-runnable-track{height:2px;
+  background:var(--border-accent);border-radius:1px}
+.globe-scale input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;
+  appearance:none;width:9px;height:9px;margin-top:-3.5px;border-radius:50%;
+  background:var(--accent);border:none;cursor:pointer}
+.globe-scale input[type=range]:disabled::-webkit-slider-thumb{background:var(--text-dim)}
+.globe-scale input[type=range]::-moz-range-track{height:2px;
+  background:var(--border-accent);border-radius:1px}
+.globe-scale input[type=range]::-moz-range-thumb{width:9px;height:9px;border-radius:50%;
+  background:var(--accent);border:none;cursor:pointer}
 .globe-toggle.on{color:var(--accent);border-color:var(--accent-dim)}
 .speed-control label{font-size:8px;color:var(--text-dim);letter-spacing:1px;text-transform:uppercase;white-space:nowrap}
 .speed-control input[type=range]{width:70px;height:4px;-webkit-appearance:none;appearance:none;background:#1e2044;border-radius:2px;outline:none;cursor:pointer}
@@ -590,6 +619,12 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
            covariance and the renderer to draw it. That is its own ticket, and a
            button that does nothing is worse than no button. -->
       <div id="globeControls" class="globe-controls">
+        <!-- SCRUM-448: while ellipsoids are drawn, the globe states what they are
+             and at what scale. An uncertainty volume with no stated scale is not
+             an honest thing to put on an operator's screen.
+             SCRUM-463: moved inside the cluster so it stays above the controls at
+             any wrap, and so it reads the live exaggeration the slider sets. -->
+        <div id="globeCovNote" class="globe-cov-note" style="display:none"></div>
         <button type="button" class="globe-toggle" id="globeRotateBtn"
           onclick="toggleGlobeAutoRotate()"
           title="Slowly drift the camera around the globe">AUTO-ROTATE</button>
@@ -602,14 +637,23 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
         <button type="button" class="globe-toggle" id="globeCovBtn"
           onclick="toggleGlobeCovariance()"
           title="Draw each object's 3-sigma CDM position uncertainty">COVARIANCE</button>
+        <!-- SCRUM-463: the exaggeration the ellipsoids are drawn at. Next to the
+             COVARIANCE button because that button is what governs it: the slider
+             is dimmed and inert while the ellipsoids are hidden, and keeps its
+             value so turning them back on restores the chosen scale.
+             1x is true scale and is the default, so the globe opens honest. -->
+        <span class="globe-scale off" id="globeCovScale"
+          title="Exaggerate the drawn 3-sigma ellipsoids. 1x is true scale; above it the caption says the view is not to scale.">
+          <span class="globe-scale-lbl">SCALE</span>
+          <input type="range" id="globeCovScaleInput" min="1" max="50" step="1" value="1"
+            disabled aria-label="Covariance exaggeration"
+            oninput="setGlobeCovExaggeration(this.value)">
+          <span class="globe-scale-val" id="globeCovScaleVal">1&times;</span>
+        </span>
         <button type="button" class="globe-toggle" id="globeFocusWorstBtn"
           onclick="focusWorstConjunction()"
           title="Frame the highest-Pc conjunction">FOCUS WORST</button>
       </div>
-      <!-- SCRUM-448: while ellipsoids are drawn, the globe states what they are
-           and at what scale. An uncertainty volume with no stated scale is not
-           an honest thing to put on an operator's screen. -->
-      <div id="globeCovNote" class="globe-cov-note" style="display:none"></div>
     </div>
     <div class="risk-bar">
       <div class="label">Pc</div>
@@ -3985,16 +4029,26 @@ let globeLabelParts=[];
 // SIGMA_MULTIPLIER 3 is the conventional 3-sigma (~99.7%) volume an operator
 // expects when a covariance is drawn.
 //
-// EXAGGERATION is 1.0 -- these are drawn at TRUE scale, and that is a
-// measurement, not a preference. Real LeoLabs conjunction covariances for SWARM C
-// run from 5.8 km to 1,569 km of along-track one-sigma, so a median 3-sigma major
-// axis is already ~0.07 scene units (about four times a marker) and the worst is
-// ~0.74 Earth radii. There is nothing to exaggerate; scaling these up would bury
-// the globe. The constant stays named and the caption reads the scale off it, so
-// if a future dataset really does need magnification the number changes in one
-// place and the note stops claiming true scale on its own.
+// SCRUM-448 drew these at TRUE scale, and that is a measurement, not a preference.
+// Real conjunction covariances for SWARM C run from 5.8 km to 1,569 km of
+// along-track one-sigma, so a median 3-sigma major axis is ~0.07 scene units (about
+// four times a marker) and the worst is ~0.74 Earth radii. Honest, but most
+// ellipsoids land at or under the marker dot, so the COVARIANCE toggle reads as
+// doing nothing except on the outliers.
+//
+// SCRUM-463 makes the exaggeration an operator control rather than a constant a
+// developer edits and redeploys. The rules it inherits are unchanged and are the
+// point of the feature:
+//   - the default is 1, so the globe opens honest and 1x draws exactly what
+//     SCRUM-448 drew, to the digit;
+//   - one value drives both the drawn size and the caption, so the note can never
+//     claim a scale that is not on screen;
+//   - exaggeration is a reading aid, never a change to the measurement.
 const GLOBE_COV_SIGMA_MULTIPLIER=3;
-const GLOBE_COV_EXAGGERATION=1.0;
+// Mutable: the slider writes it, covAxisScale and renderGlobeCovNote read it.
+let globeCovExaggeration=1;
+const GLOBE_COV_EXAGGERATION_MIN=1;
+const GLOBE_COV_EXAGGERATION_MAX=50;
 // Purely numerical: a principal axis can be metres against a neighbour of
 // megametres, and a literally zero scale gives a non-invertible transform. This
 // floor is ~6 m in scene units, far below anything visible, so it changes the
@@ -4009,6 +4063,44 @@ let globeWorstMeta=null;
 let globeWorstTrackEci=null;
 const GLOBE_AUTOROTATE_SPEED=0.5;   // a gentle drift, not a spin
 
+// The single scale formula. Both the builder and the slider call this, so the drawn
+// size and the rescale cannot drift apart -- which is the same failure as the
+// caption disagreeing with the picture, one level down.
+//
+// sigmas are metres; scene units are Earth radii. The floor is kept: a principal
+// axis can be metres against a neighbour of megametres, and a literally zero scale
+// gives a non-invertible transform. It is ~6 m in scene units, far below anything
+// visible, so it changes the picture nowhere at any slider value.
+function covAxisScale(sigma_m){
+  const k=GLOBE_COV_SIGMA_MULTIPLIER*globeCovExaggeration/(EARTH_RADIUS_KM*1000);
+  return Math.max(sigma_m*k,GLOBE_COV_MIN_SCALE);
+}
+
+// Live rescale. Walks the meshes already on screen and reapplies the formula to
+// each, rather than rebuilding geometry: the ellipsoids are unit spheres scaled and
+// oriented, so the only thing an exaggeration change touches is the scale.
+function setGlobeCovExaggeration(value){
+  const n=Math.round(Number(value));
+  globeCovExaggeration=Math.min(
+    GLOBE_COV_EXAGGERATION_MAX,
+    Math.max(GLOBE_COV_EXAGGERATION_MIN, isFinite(n)?n:GLOBE_COV_EXAGGERATION_MIN)
+  );
+  const out=document.getElementById('globeCovScaleVal');
+  if(out) out.textContent=globeCovExaggeration+'\u00d7';
+  const input=document.getElementById('globeCovScaleInput');
+  if(input&&Number(input.value)!==globeCovExaggeration){
+    input.value=String(globeCovExaggeration);
+  }
+  globeCovParts.forEach(m=>{
+    const sig=m&&m.userData&&m.userData.sigmas_m;
+    if(!sig)return;
+    m.scale.set(covAxisScale(sig[0]),covAxisScale(sig[1]),covAxisScale(sig[2]));
+  });
+  // One value drives both, so the caption is refreshed from the same state that
+  // just moved the meshes.
+  renderGlobeCovNote();
+}
+
 function toggleGlobeAutoRotate(){
   if(!globeControls)return;
   globeControls.autoRotate=!globeControls.autoRotate;
@@ -4022,7 +4114,18 @@ function toggleGlobeCovariance(){
   globeShowCovariance=!globeShowCovariance;
   document.getElementById('globeCovBtn')?.classList.toggle('on',globeShowCovariance);
   globeCovParts.forEach(m=>{ if(m) m.visible=globeShowCovariance; });
+  // SCRUM-463: the slider only means anything while the ellipsoids are drawn, so it
+  // dims and stops responding with them. It keeps its value, so turning COVARIANCE
+  // back on restores the ellipsoids at the exaggeration the operator had set.
+  syncGlobeCovScaleControl();
   renderGlobeCovNote();
+}
+
+function syncGlobeCovScaleControl(){
+  const wrap=document.getElementById('globeCovScale');
+  const input=document.getElementById('globeCovScaleInput');
+  if(wrap) wrap.classList.toggle('off',!globeShowCovariance);
+  if(input) input.disabled=!globeShowCovariance;
 }
 
 // The caption reads the scale off the constants rather than asserting one, so it
@@ -4034,9 +4137,9 @@ function renderGlobeCovNote(){
     el.style.display='none';
     return;
   }
-  const scale=(GLOBE_COV_EXAGGERATION===1)
+  const scale=(globeCovExaggeration===1)
     ? 'true scale'
-    : ('not to scale \u2014 \u00d7'+GLOBE_COV_EXAGGERATION);
+    : ('not to scale \u2014 \u00d7'+globeCovExaggeration);
   el.textContent=GLOBE_COV_SIGMA_MULTIPLIER+'\u03c3 CDM position uncertainty \u2014 '+scale;
   el.style.display='block';
 }
@@ -4066,12 +4169,17 @@ function buildCovEllipsoid(cov,colorHex,marker){
     })
   );
   mesh.quaternion.setFromRotationMatrix(basis);
-  // sigmas are metres; scene units are Earth radii.
-  const k=GLOBE_COV_SIGMA_MULTIPLIER*GLOBE_COV_EXAGGERATION/(EARTH_RADIUS_KM*1000);
+  // SCRUM-463: the base one-sigma extents ride with the mesh so the slider can
+  // rescale from the measurement itself rather than compounding whatever scale the
+  // mesh happens to be wearing -- which would make the exaggeration path-dependent
+  // and the caption a lie after two drags.
+  mesh.userData.sigmas_m=[cov.sigmas_m[0],cov.sigmas_m[1],cov.sigmas_m[2]];
+  // Reads the live exaggeration, so a rebuild on a fetch or an asset switch comes
+  // back at the operator's current setting with no extra wiring.
   mesh.scale.set(
-    Math.max(cov.sigmas_m[0]*k,GLOBE_COV_MIN_SCALE),
-    Math.max(cov.sigmas_m[1]*k,GLOBE_COV_MIN_SCALE),
-    Math.max(cov.sigmas_m[2]*k,GLOBE_COV_MIN_SCALE)
+    covAxisScale(cov.sigmas_m[0]),
+    covAxisScale(cov.sigmas_m[1]),
+    covAxisScale(cov.sigmas_m[2])
   );
   mesh.visible=globeShowCovariance;
   mesh.renderOrder=1;
@@ -4286,6 +4394,11 @@ function updateGlobeOrbits(orbits){
 
   // A refetch rebuilds every ellipsoid, so the caption follows the new set and
   // the meshes were created already honouring globeShowCovariance.
+  // SCRUM-463: they were also created at the current globeCovExaggeration, since
+  // buildCovEllipsoid goes through covAxisScale -- so an asset switch or a refresh
+  // comes back at the operator's setting rather than snapping to 1x. The control is
+  // re-synced here so it cannot drift from globeShowCovariance after a rebuild.
+  syncGlobeCovScaleControl();
   renderGlobeCovNote();
 
   // Dashed closest-approach link from the asset to the worst conjunction. Drawn
