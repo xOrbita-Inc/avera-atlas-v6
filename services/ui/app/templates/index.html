@@ -1919,6 +1919,50 @@ function showEvaluateError(msg){
 // SCRUM-383 constructed authority-loop inputs for the controlled ARBITER
 // simulation only. These values are integration fixtures, not measured sensor
 // data and are never attached to live LeoLabs / Space-Track / UDL events.
+function demoSecondaryScreenPayload(conj){
+  if(conj?.source!=='demo_scenario') return null;
+
+  const isClear = conj?.object_id==='OBJ-DEMO-ALWAYS';
+  const isHeld = conj?.object_id==='OBJ-DEMO-FLIP';
+  if(!isClear && !isHeld) return null;
+
+  if(isClear){
+    return {
+      status:'clear', clear:true, pending:false,
+      catalog_screened:'Controlled demo catalog',
+      screening_id:'DEMO-CLEAR',
+      conjunctions_total:1, conjunctions_truncated:false,
+      conjunctions:[{
+        object_id:'DEMO-SAFE-SECONDARY', secondary_norad:90001,
+        tca_utc:new Date(Date.now()+60*60*1000).toISOString(),
+        miss_distance_km:12.5, pc:2.5e-8,
+        covariance_repaired:false, covariance_untrusted:false
+      }],
+      verdict:{clear:true,evaluated:1,breaches:[]},
+      operator_note:'Controlled demo fixture: post-burn secondary screen CLEAR. Not a live LeoLabs result.'
+    };
+  }
+
+  return {
+    status:'not_clear', clear:false, pending:false,
+    catalog_screened:'Controlled demo catalog',
+    screening_id:'DEMO-HELD',
+    conjunctions_total:1, conjunctions_truncated:false,
+    conjunctions:[{
+      object_id:'DEMO-HELD-SECONDARY', secondary_norad:90002,
+      tca_utc:new Date(Date.now()+60*60*1000).toISOString(),
+      miss_distance_km:0.75, pc:2.5e-4,
+      covariance_repaired:false, covariance_untrusted:false
+    }],
+    verdict:{
+      clear:false,evaluated:1,
+      breaches:[{object_id:'DEMO-HELD-SECONDARY',limbs:['pc']}]
+    },
+    flagged_objects:['DEMO-HELD-SECONDARY'],
+    operator_note:'Controlled demo fixture: residual post-burn conjunction holds the maneuver. Not a live LeoLabs result.'
+  };
+}
+
 function mafDemoInputs(conj){
   if(conj?.source!=='demo_scenario') return {};
 
@@ -2250,8 +2294,16 @@ async function evaluateConjunction(conj,idx){
     updatePlannerDetails(result);
     updateRiskBar(result,conj);
     drawEncounter(conj,result);
-    // SCRUM-457: arm the screen poll before rendering, so the Secondary conflict
-    // row draws "screening in progress" on its first paint.
+    // SCRUM-443 controlled scenario fixture. Scenario mode has no real LeoLabs
+    // primary catalog object, so it cannot run the operational on-demand screen.
+    // The Demo story uses an explicitly labelled simulated clear/held result;
+    // live evaluates still use the real polling path below.
+    const demoScreen = demoSecondaryScreenPayload(conj);
+    if(demoScreen && result?.atlas_artifact?.post_maneuver){
+      secondaryScreen={seq:seq,jobId:null,phase:'resolved',payload:demoScreen,note:null,startedAt:Date.now(),polls:0};
+    }
+    // SCRUM-457: arm the real screen poll before rendering, so live mode paints
+    // "screening in progress" on its first frame.
     if(result.atlas_artifact)armSecondaryScreenPoll(result.atlas_artifact,seq);
     if(result.atlas_artifact)renderAtlasArtifact(result.atlas_artifact);
     // SCRUM-421: the Space-Track published-Pc lookup follows the source too --
@@ -5111,6 +5163,33 @@ function renderPostManeuverProjection(pm) {
       scNote = st.note;
     } else if (st && st.phase === 'resolved') {
       const p = st.payload;
+      const residuals = Array.isArray(p && p.conjunctions) ? p.conjunctions : [];
+      const residualTotal = (p && p.conjunctions_total != null)
+        ? Number(p.conjunctions_total) : residuals.length;
+
+      // SCRUM-443: the on-demand request omits secondaryCatalogNumber and
+      // secondaryFile, which is LeoLabs' contract for screening against the whole
+      // catalog. Surface that explicitly rather than leaving the operator to infer it.
+      scDetail = _ar('Catalog screened', p.catalog_screened || 'Full LeoLabs catalog');
+
+      if (p && p.verdict && p.verdict.evaluated != null) {
+        scDetail += _ar('Conjunctions screened', String(p.verdict.evaluated));
+      }
+      scDetail += _ar('Residual conjunctions', String(residualTotal));
+
+      if (p && p.conjunctions_truncated) {
+        scDetail += _ar('Residuals shown', residuals.length + ' of ' + residualTotal, 'amber');
+      }
+
+      residuals.forEach((c, i) => {
+        const objectLabel = c.object_id || c.secondary_designator || (c.secondary_norad != null ? ('NORAD ' + c.secondary_norad) : ('Object ' + (i + 1)));
+        const pc = c.pc != null && Number.isFinite(Number(c.pc)) ? Number(c.pc).toExponential(3) : 'not reported';
+        const miss = c.miss_distance_km != null && Number.isFinite(Number(c.miss_distance_km)) ? Number(c.miss_distance_km).toFixed(3) + ' km' : 'not reported';
+        const tca = c.tca_utc ? String(c.tca_utc).replace('T', ' ').replace('Z', ' UTC') : 'not reported';
+        const covarianceState = c.covariance_untrusted ? 'UNTRUSTED' : c.covariance_repaired ? 'repaired' : 'accepted';
+        scDetail += _ar('Residual ' + objectLabel, 'Pc ' + pc + ' | miss ' + miss + ' | TCA ' + tca + ' | covariance ' + covarianceState, c.covariance_untrusted ? 'red' : '');
+      });
+
       if (secondaryScreenIsClear(p)) {
         scLabel = 'CLEAR';
         scCls = 'green';
@@ -5119,37 +5198,18 @@ function renderPostManeuverProjection(pm) {
         scLabel = 'NOT CLEAR';
         scCls = 'red';
         scNote = p.operator_note || p.error || null;
-        // Name the events that breached, which is what an operator acts on. The
-        // verdict's breach list is authoritative and is never truncated by the
-        // poll response's conjunction cap.
         const breaches = (p.verdict && p.verdict.breaches) || [];
-        const flagged = (p.flagged_objects && p.flagged_objects.length)
-          ? p.flagged_objects
-          : breaches.map(b => b.object_id).filter(x => x != null);
-        if (flagged.length) {
-          scDetail = _ar('Breaching objects', flagged.join(', '), 'red');
-        }
+        const flagged = (p.flagged_objects && p.flagged_objects.length) ? p.flagged_objects : breaches.map(b => b.object_id).filter(x => x != null);
+        if (flagged.length) scDetail += _ar('Breaching objects', flagged.join(', '), 'red');
         if (breaches.length) {
-          const limbs = Array.from(new Set(
-            breaches.reduce((acc, b) => acc.concat(b.limbs || []), [])));
-          scDetail = (scDetail || '')
-            + _ar('Breached on', limbs.length ? limbs.join(', ') : 'not reported', 'red');
-        }
-        if (p.verdict && p.verdict.evaluated != null) {
-          scDetail = (scDetail || '')
-            + _ar('Conjunctions screened', String(p.verdict.evaluated));
+          const limbs = Array.from(new Set(breaches.reduce((acc, b) => acc.concat(b.limbs || []), [])));
+          scDetail += _ar('Breached on', limbs.length ? limbs.join(', ') : 'not reported', 'red');
         }
       }
-      if (p && p.screening_id) {
-        scDetail = (scDetail || '') + _ar('Screening id', String(p.screening_id));
-      }
-      if (p && p.closest_object_id) {
-        scDetail = (scDetail || '') + _ar('Closest object', String(p.closest_object_id));
-      }
-      if (p && p.closest_approach_km != null) {
-        scDetail = (scDetail || '')
-          + _ar('Closest approach', p.closest_approach_km.toFixed(3) + ' km');
-      }
+
+      if (p && p.screening_id) scDetail = (scDetail || '') + _ar('Screening id', String(p.screening_id));
+      if (p && p.closest_object_id) scDetail = (scDetail || '') + _ar('Closest object', String(p.closest_object_id));
+      if (p && p.closest_approach_km != null) scDetail = (scDetail || '') + _ar('Closest approach', p.closest_approach_km.toFixed(3) + ' km');
     } else if (sc.screen_pending) {
       // Pending on the artifact with no poll tracking it. Reachable only if the
       // poll was cancelled without this panel being redrawn from a newer result;
@@ -5200,6 +5260,19 @@ function renderNoGoReasoning(ng) {
 
 function renderVerificationResult(vr, maneuverRecommended, secondaryDeferred) {
   if (!vr) return;
+
+  // SCRUM-443: when the controlled Demo scenario supplies an explicit simulated
+  // secondary-screen result, use that same result in Verification so A4 and the
+  // verification checklist cannot disagree. Live mode is unchanged and continues
+  // to use the real async poll payload.
+  const demoScreen = (
+    secondaryScreen
+    && secondaryScreen.seq === evalSeq
+    && secondaryScreen.phase === 'resolved'
+    && secondaryScreen.payload
+    && secondaryScreen.payload.catalog_screened === 'Controlled demo catalog'
+  ) ? secondaryScreen.payload : null;
+
   const el = document.getElementById('verificationBody');
   const badge = document.getElementById('verifyOverallBadge');
   if (!el) return;
@@ -5211,7 +5284,7 @@ function renderVerificationResult(vr, maneuverRecommended, secondaryDeferred) {
     return;
   }
 
-  const passed = vr.passed;
+  const passed = demoScreen ? (vr.passed && secondaryScreenIsClear(demoScreen)) : vr.passed;
   badge.innerHTML = passed
     ? '<span style="color:var(--green);font-size:8px;letter-spacing:1px">PASSED</span>'
     : '<span style="color:var(--red);font-size:8px;letter-spacing:1px">FAILED</span>';
@@ -5228,8 +5301,12 @@ function renderVerificationResult(vr, maneuverRecommended, secondaryDeferred) {
     // verdict already excludes it, so showing a red FAIL row beside a PASSED
     // banner would tell an operator the opposite of what the result says.
     // Rendered with the existing skipped vocabulary.
-    const deferred = c.key === 'secondary_clear' && secondaryDeferred;
-    const val = deferred ? null : vr[c.key];
+    const deferred = c.key === 'secondary_clear' && secondaryDeferred && !demoScreen;
+    const val = deferred
+      ? null
+      : (demoScreen && c.key === 'secondary_clear'
+        ? secondaryScreenIsClear(demoScreen)
+        : vr[c.key]);
     const cls = val == null ? 'skip' : val ? 'pass' : 'fail';
     const icon = val == null ? '\u2014' : val ? '\u2713' : '\u2717';
     const verdict = deferred ? 'DEFERRED' : val == null ? 'N/A' : val ? 'PASS' : 'FAIL';
@@ -5239,8 +5316,11 @@ function renderVerificationResult(vr, maneuverRecommended, secondaryDeferred) {
       '<span class="verify-verdict">' + verdict + '</span>' +
       '</div>';
   });
-  if (vr.verification_note) {
-    html += '<div style="margin-top:6px;padding:5px 6px;background:var(--bg-panel);border-radius:3px;font-size:9px;color:var(--text-dim);line-height:1.4">' + vr.verification_note + '</div>';
+  const verificationNote = demoScreen
+    ? (demoScreen.operator_note || null)
+    : vr.verification_note;
+  if (verificationNote) {
+    html += '<div style="margin-top:6px;padding:5px 6px;background:var(--bg-panel);border-radius:3px;font-size:9px;color:var(--text-dim);line-height:1.4">' + verificationNote + '</div>';
   }
   html += '</div>';
   el.innerHTML = html;

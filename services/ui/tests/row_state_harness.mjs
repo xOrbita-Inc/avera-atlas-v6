@@ -118,14 +118,35 @@ ok(/spinner/.test(row.label), 'screening shows a spinner');
 ok(row.cls === 'amber', 'screening is amber, not green');
 ok(!/CLEAR<\/span>/.test(row.label), 'screening never says CLEAR alone');
 
-row = rowOf(renderWith({ seq: 1, phase: 'resolved',
-  payload: { status: 'clear', clear: true, screening_id: '603659' } }));
+let clearHtml = renderWith({ seq: 1, phase: 'resolved', payload: {
+  status: 'clear', clear: true, screening_id: '603659',
+  conjunctions_total: 1, conjunctions_truncated: false,
+  conjunctions: [{
+    object_id: 'SAFE-SAT', secondary_norad: 12345,
+    tca_utc: '2026-09-26T22:00:00Z',
+    miss_distance_km: 18.25, pc: 2.5e-8,
+    covariance_repaired: false, covariance_untrusted: false,
+  }],
+  verdict: { clear: true, evaluated: 1, breaches: [] },
+} });
+row = rowOf(clearHtml);
 ok(row.label === 'CLEAR' && row.cls === 'green', 'a real clear shows CLEAR green');
+ok(/Full LeoLabs catalog/.test(clearHtml), 'clear names the catalog screened');
+ok(/SAFE-SAT/.test(clearHtml), 'clear shows a non-breaching residual conjunction');
+ok(/2\.500e-8/.test(clearHtml), 'clear shows the residual covariance-backed Pc');
+ok(/accepted/.test(clearHtml), 'clear shows the covariance state');
 
 let html = renderWith({ seq: 1, phase: 'resolved', payload: {
   status: 'not_clear', clear: false, screening_id: '603659',
   flagged_objects: ['STARLINK-1661', 'R5-S4'],
   closest_object_id: 'STARLINK-1661', closest_approach_km: 4.396523,
+  conjunctions_total: 1223, conjunctions_truncated: true,
+  conjunctions: [{
+    object_id: 'STARLINK-1661', secondary_norad: 44713,
+    tca_utc: '2026-09-26T23:00:00Z',
+    miss_distance_km: 4.396523, pc: 1.23e-5,
+    covariance_repaired: true, covariance_untrusted: false,
+  }],
   verdict: { clear: false, evaluated: 1223, breaches: [
     { object_id: 'STARLINK-1661', limbs: ['mahalanobis'] },
     { object_id: 'R5-S4', limbs: ['mahalanobis'] }] },
@@ -137,6 +158,12 @@ ok(/mahalanobis/.test(html), 'not_clear names the limb breached');
 ok(/1223/.test(html), 'not_clear reports how many were screened');
 ok(/603659/.test(html), 'not_clear reports the screening id');
 ok(/4\.397 km/.test(html), 'not_clear reports the closest approach');
+ok(/Full LeoLabs catalog/.test(html), 'not_clear names the catalog screened');
+ok(/Residual conjunctions/.test(html) && /1223/.test(html),
+  'not_clear reports the full residual count');
+ok(/1 of 1223/.test(html), 'not_clear says when residual details are truncated');
+ok(/1\.230e-5/.test(html), 'not_clear shows the residual covariance-backed Pc');
+ok(/repaired/.test(html), 'not_clear shows repaired covariance provenance');
 
 row = rowOf(renderWith({ seq: 1, phase: 'resolved', payload: {
   status: 'error', clear: false, error: 'poll timed out',
