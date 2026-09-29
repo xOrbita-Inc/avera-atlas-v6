@@ -3907,7 +3907,12 @@ function setView(v){
     else resizeGlobe();
     fetchAndUpdateGlobeOrbits();
     if(currentConj)updateConjunctionArc(currentConj);
-    cameraFollowActive=true;
+    // SCRUM-482: the globe opens stationary. The soft camera-follow used to arm
+    // here, and because it lerps the OrbitControls target toward the asset marker
+    // every frame while the marker is animated around its orbit, it chased a moving
+    // point forever -- the slow up/down drift of the whole globe. Do not arm it on
+    // open. The rotate toggle (autoRotate) is separate and unaffected.
+    cameraFollowActive=false;
     startGlobeLoop();
   } else {
     wrap2d.style.display='';wrap3d.style.display='none';
@@ -4861,7 +4866,10 @@ function globeFocusOnConj(conj){
   const endTarget=midScene.clone().multiplyScalar(0.15);
   let t=0;
 
-  // Disable follow during transition then re-enable
+  // SCRUM-482: the focus swing animates the target to a fixed point and then holds
+  // there. It used to re-arm the soft follow when the swing finished, which put the
+  // target back to chasing the orbiting asset marker every frame -- the slow drift.
+  // Leave follow off so the view holds on the conjunction the operator asked to see.
   cameraFollowActive=false;
   function animStep(){
     t=Math.min(t+0.02,1);
@@ -4870,7 +4878,6 @@ function globeFocusOnConj(conj){
     globeControls.target.lerpVectors(startTarget,endTarget,ease);
     globeControls.update();
     if(t<1)requestAnimationFrame(animStep);
-    else cameraFollowActive=true;
   }
   animStep();
 }
