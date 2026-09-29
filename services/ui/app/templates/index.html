@@ -2877,7 +2877,11 @@ function initEncounter(){
 
 function drawEncounterEmpty(){
   const ctx=encounterCtx;if(!ctx)return;
-  ctx.clearRect(0,0,encounterW,encounterH);
+  // SCRUM-483: clear the full backing store under an identity transform rather than
+  // clearing encounterW x encounterH through the dpr scale. Those globals can be
+  // stale for a frame, and a short clear leaves the uncovered strip holding the
+  // previous render. Drawing below is unchanged and still runs under the dpr scale.
+  ctx.save();ctx.setTransform(1,0,0,1,0,0);ctx.clearRect(0,0,ctx.canvas.width,ctx.canvas.height);ctx.restore();
   drawGrid(ctx,encounterW,encounterH);
   ctx.fillStyle='#6b6d8a';ctx.font='11px "JetBrains Mono"';ctx.textAlign='center';
   ctx.fillText('Run a scenario to visualize encounter geometry',encounterW/2,encounterH/2);
@@ -2895,7 +2899,9 @@ function drawEncounter(conj,result){
   const W=encounterW,H=encounterH;
   // Asset sits left-of-center so burn arrow has room to the right
   const cx=W*0.38+panX,cy=H*0.48+panY;
-  ctx.clearRect(0,0,W,H);
+  // SCRUM-483: see drawEncounterEmpty -- clear the whole backing store, not W x H
+  // through the dpr scale, so a stale-dimension frame cannot leave a ghost trail.
+  ctx.save();ctx.setTransform(1,0,0,1,0,0);ctx.clearRect(0,0,ctx.canvas.width,ctx.canvas.height);ctx.restore();
   drawGrid(ctx,W,H);
 
   const dctx=evalDisplayCtx(result,conj);
@@ -3916,6 +3922,17 @@ function setView(v){
     startGlobeLoop();
   } else {
     wrap2d.style.display='';wrap3d.style.display='none';
+    // SCRUM-483: re-measure the encounter canvas on the way back from the globe.
+    // While 3D was up this wrap was display:none, so its clientWidth/Height were 0
+    // and resize() bailed out of every window-resize it saw. encounterW/H and the
+    // backing store are therefore stale: the centre is computed from the old width
+    // (off-centre render) and the dpr-scaled clearRect(0,0,encounterW,encounterH)
+    // no longer spans the canvas, so each pan leaves an uncleared ghost. rAF, not a
+    // direct call, because the wrap has only just been un-hidden and has not been
+    // laid out yet -- same reason and same pattern as the portlet expand/restore
+    // handlers. The synchronous draw below stays, so there is no empty flash while
+    // we wait a frame.
+    requestAnimationFrame(function(){ resizeEncounter(); });
     btn2d.classList.add('active');btn3d.classList.remove('active');
     document.getElementById('speedControl').classList.remove('visible');
     document.getElementById('globeDock')?.classList.remove('visible');
