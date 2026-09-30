@@ -47,3 +47,6 @@ services/*/models/
 # Local review/export artifacts
 *.zip
 verification-report-*.md
+
+# Local implementation-plan working files, never committed
+.plans/
