@@ -68,7 +68,7 @@ def _clean_store():
 
 @pytest.fixture
 def policy() -> OperatorPolicy:
-    return OperatorPolicy(operator_id="test", policy_version="v1")
+    return OperatorPolicy(operator_id="test", policy_version="v1", decision_mode="flight_rule_1e4")
 
 
 @pytest.fixture

@@ -348,51 +348,36 @@ def _passes_feasibility(
     miss_distance_km: Optional[float],
     mahalanobis: float,
 ) -> Tuple[bool, str, str, str]:
-    """Apply all feasibility filters before candidate scoring.
+    """Apply mode-specific risk gates and propulsion feasibility checks.
 
     Returns (passes, reason_code, human_readable, risk_gate).
-    risk_gate names which quantity actually decided, "pc" or "mahalanobis".
 
-    SCRUM-389: which gate runs, and why
-    -----------------------------------
-    The operator policy expresses risk in Pc. It always did, and both thresholds
-    are described in operator_policy.py as physics-based gates. But the Pc gate
-    only ran when an external CDM or UDL supplied a Pc, and the Mahalanobis
-    pre-screen ran always and first. So for every event without an external Pc,
-    a filter documented as a pre-screen was silently the maneuver decision, and
-    the two gates could disagree.
+    APS records risk_gate="utility" and bypasses the fixed Pc and Mahalanobis
+    pre-screen gates so candidates can be scored. The final recommendation
+    requires utility > 0; passing this function alone is not a recommendation.
+    Propulsion feasibility checks still apply.
 
-    Now that the planner can compute Pc, the Pc gate decides whenever a Pc
-    exists, whether supplied or computed, and the Mahalanobis screen decides
-    only when no Pc could be established at all. That is not two gates in
-    priority order; it is one gate with a documented fallback, and the result
-    records which one ran.
+    Flight-rule modes retain the existing pre-scoring path: supplied or
+    computed Pc uses the selected baseline and the miss-distance floor.
+    Mahalanobis is the legacy fallback when no Pc can be established.
+    The result records which path ran. Utility provenance separately identifies
+    whether scoring used Pc or a surrogate.
 
-    Why Mahalanobis is not simply deleted
-    -------------------------------------
-    A Pc needs a relative velocity to define the encounter plane, and the
-    conjunction contract makes that field optional. An event that omits it has
-    no Pc, and something still has to decide. Mahalanobis is that something.
-
-    The screen is conservative at every covariance this system produces, but it
-    is conservative by accident rather than by construction. At a hard-body
-    radius of 15 m, Pc at exactly MD 4.0 is 1.5e-07 at a 500 m covariance and
-    6.1e-07 at 250 m, both far below the 1e-5 monitor threshold. It stops being
-    conservative near a 65 m encounter-plane sigma, which is tighter than
-    anything we currently produce but not impossible for a well-tracked object
-    close to TCA. That is asserted in the tests so it fails loudly rather than
-    silently if a tighter covariance ever arrives.
+    These recommendation paths do not change authorization or safety arming.
     """
-    # 1. Risk gate. Pc when we have one, Mahalanobis only when we do not.
-    if pc is not None:
+    # 1. Recommendation path: APS utility, or the legacy flight-rule gate.
+    if policy.decision_mode == "aps":
+        # SCRUM-479: compute utility before deciding; retain propulsion checks.
+        risk_gate = "utility"
+    elif pc is not None:
         risk_gate = "pc"
-        if not policy.is_maneuver_required(pc, miss_distance_km or 999.0):
+        if not policy.is_recommendation_required(pc, miss_distance_km or 999.0):
             if policy.is_monitor_only(pc):
                 return (
                     False,
                     "pc_below_threshold",
                     f"Pc {pc:.2e} ({pc_source}) is below maneuver threshold "
-                    f"{policy.pc_maneuver_threshold:.1e} but above monitor "
+                    f"{policy.flight_rule_pc_threshold:.1e} but above monitor "
                     f"threshold {policy.pc_monitor_threshold:.1e}. "
                     f"Event escalated to watch status. No burn required.",
                     risk_gate,
@@ -401,7 +386,7 @@ def _passes_feasibility(
                 False,
                 "pc_below_threshold",
                 f"Pc {pc:.2e} ({pc_source}) is below maneuver threshold "
-                f"{policy.pc_maneuver_threshold:.1e}. No maneuver warranted.",
+                f"{policy.flight_rule_pc_threshold:.1e}. No maneuver warranted.",
                 risk_gate,
             )
     else:
@@ -1553,6 +1538,7 @@ def _policy_from_dict(policy_dict: Dict[str, Any]) -> OperatorPolicy:
     return OperatorPolicy(
         operator_id   = str(policy_dict.get("operator_id", "DEFAULT_LEO")),
         policy_version= str(policy_dict.get("policy_version", "2.5.0")),
+        decision_mode = policy_dict.get("decision_mode", "aps"),
         max_dv_per_event_ms = max_dv,
         scoring_weights     = weights,
         mission_lifetime_days_total = (

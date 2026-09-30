@@ -531,3 +531,104 @@ class TestSubsystemFailureFromAnyMode:
 
         assert decision.mode is FlightMode.M4_SAFE_HOLD
         assert decision.authorized_execution is None
+
+
+@pytest.mark.parametrize("pc", [5.0e-5, 0.99e-4, 1.0e-4, 2.0e-4])
+def test_scrum479_adapter_arming_parity(monkeypatch, pc):
+    """Hold the event and candidate fixed while changing recommendation mode."""
+    from datetime import timedelta
+    from types import SimpleNamespace
+    from common import monitor_adapter as adapter
+    from common.operator_policy import OperatorPolicy
+
+    baseline = staged_inputs()
+    # Validity computation has its own tests. Supply the same earned evidence
+    # here so this test isolates policy-to-safety wiring and arming.
+    monkeypatch.setattr(
+        adapter,
+        "_validity_fields",
+        lambda block, tca: {
+            "validity_routing": baseline.validity_routing,
+            "validity_evidence": dict(baseline.validity_evidence),
+            "validity_service_available": True,
+        },
+    )
+    body = {
+        "conjunction": {
+            "t_ca_utc": (T_NOW + timedelta(hours=6)).isoformat(),
+            "latest_burn_utc": (T_NOW + timedelta(hours=3)).isoformat(),
+            "data_age_s": 3600.0,
+        },
+        adapter.AUTHORIZATION_KEY: {
+            "authority_level": "L2",
+            "mission_class": "first_flight_leo",
+        },
+        adapter.IOD_KEY: {
+            "proceeds_to_validity": True,
+            "confidence_verdict": "CONFIDENT",
+        },
+    }
+    scoring = SimpleNamespace(
+        conjunction_id="479-SAFETY",
+        pc_pre=pc,
+        pc_source="cdm",
+        t_burn_utc=(T_NOW + timedelta(hours=2)).isoformat(),
+        dv_eci_km_s=[0.0, 0.00035, 0.0],
+        dv_magnitude_m_s=0.35,
+        direction="along_track",
+        no_go_reason_code="",
+    )
+    artifact = SimpleNamespace(
+        post_maneuver=SimpleNamespace(
+            secondary_conflict=SimpleNamespace(
+                secondary_check_performed=True,
+                secondary_conjunction_clear=True,
+                secondary_screen_deferred=False,
+                secondary_screen_pending=False,
+            ),
+        ),
+    )
+    cap = SimpleNamespace(
+        propulsion=SimpleNamespace(max_dv_per_burn_m_s=2.0),
+        lifetime=SimpleNamespace(
+            v_remaining_m_s=50.0,
+            v_reserved_m_s=5.0,
+        ),
+    )
+    guard_inputs = []
+    decisions = []
+    for mode in ("aps", "flight_rule_1e4", "flight_rule_1e5"):
+        policy = OperatorPolicy(
+            operator_id="TEST",
+            policy_version="2.5.0",
+            decision_mode=mode,
+        )
+        inputs = adapter.build_guard_inputs(
+            body=body,
+            scoring=scoring,
+            artifact=artifact,
+            policy=policy,
+            cap=cap,
+            covariance_source="real_cdm",
+            current_mode=FlightMode.M1_WATCH,
+            t_now_utc=T_NOW,
+        )
+        assert inputs.pc_maneuver_threshold == 1.0e-4
+        assert inputs.pc_monitor_threshold == 1.0e-5
+        assert inputs.envelope_error == ""
+        assert inputs.envelope_version
+        decision = evaluate_safety_monitor(inputs)
+        expected = (
+            FlightMode.M2_STAGED if pc >= 1.0e-4 else FlightMode.M1_WATCH
+        )
+        assert decision.mode is expected
+        assert decision.authorized_execution is None
+        if pc >= 1.0e-4:
+            assert decision.transition.trigger == "m1_to_m2_guards_all_satisfied"
+        guard_inputs.append(inputs)
+        decisions.append(
+            (decision.mode, decision.transition, decision.authorized_execution)
+        )
+
+    assert guard_inputs[0] == guard_inputs[1] == guard_inputs[2]
+    assert decisions[0] == decisions[1] == decisions[2]

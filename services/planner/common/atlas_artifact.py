@@ -95,7 +95,8 @@ class RiskSummary:
         'good' | 'degraded' | 'dilution_region'
         Derived from m2_pre (< 1.0 = dilution_region, < 4.0 = degraded).
     maneuver_required : bool
-        True if Pc >= pc_maneuver_threshold OR miss_distance < floor.
+        Recommendation-mode verdict: utility > 0 in APS mode; otherwise
+        Pc >= the selected flight-rule threshold OR miss_distance < floor.
     monitor_only : bool
         True if Pc is between monitor and maneuver thresholds.
     pc_source : str
@@ -1306,12 +1307,11 @@ def build_atlas_artifact(
     # artifacts must use that resolved value rather than the supplied-only input.
     resolved_pc = scoring.pc_pre
 
-    maneuver_required = False
+    maneuver_required = policy.is_recommendation_required(
+        resolved_pc, miss_distance_km or 999.0, utility=scoring.utility,
+    )
     monitor_only = False
     if resolved_pc is not None:
-        maneuver_required = policy.is_maneuver_required(
-            resolved_pc, miss_distance_km or 999.0
-        )
         monitor_only = policy.is_monitor_only(resolved_pc)
 
     risk_summary = RiskSummary(

@@ -82,6 +82,7 @@ def policy():
     return OperatorPolicy(
         operator_id="TEST_OP",
         policy_version="2.5.0",
+        decision_mode="flight_rule_1e4",
         max_dv_per_event_ms=2.0,
         mission_lifetime_days_total=1825.0,
         scoring_weights=ScoringWeights(
