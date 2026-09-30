@@ -42,7 +42,7 @@ _P_POST = [[0.04, 0.0, 0.0], [0.0, 0.09, 0.0], [0.0, 0.0, 0.16]]
 
 @pytest.fixture
 def policy() -> OperatorPolicy:
-    return OperatorPolicy(operator_id="test", policy_version="v1")
+    return OperatorPolicy(operator_id="test", policy_version="v1", decision_mode="flight_rule_1e4")
 
 
 @pytest.fixture

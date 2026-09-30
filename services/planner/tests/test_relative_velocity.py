@@ -116,7 +116,7 @@ def _request_from(state: dict, include_v_rel: bool = True) -> dict:
             "v_remaining_m_s": 25.0,
         },
         "conjunction": conjunction,
-        "policy": {},
+        "policy": {"decision_mode": "flight_rule_1e4"},
     }
 
 

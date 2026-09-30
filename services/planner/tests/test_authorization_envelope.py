@@ -344,3 +344,31 @@ def test_section6_safety_floor_validation_rejects_laxer_policy(
 ) -> None:
     with pytest.raises(EnvelopeCompileError, match=match):
         validate_section6_safety_floors(_policy(**override))
+
+def test_scrum479_envelope_identical_across_modes():
+    from common.operator_policy import OperatorPolicy
+
+    envelopes = []
+    for mode in ("aps", "flight_rule_1e4", "flight_rule_1e5"):
+        policy = OperatorPolicy(
+            operator_id="DEFAULT_LEO",
+            policy_version="2.5.0",
+            decision_mode=mode,
+        )
+        envelope = compile_from_operator_policy(
+            policy,
+            profile_id="scrum479-envelope",
+            mission_class="first_flight_leo",
+            risk_budget_id="scrum479-risk",
+            maneuver_capacity=ManeuverCapacityInput(
+                max_dv_per_burn_m_s=10.0,
+                v_remaining_m_s=50.0,
+                v_reserved_m_s=5.0,
+                max_maneuvers_per_week=3,
+            ),
+            authority_level=AuthorityLevel.L2,
+        )
+        assert envelope.pc_action == 1.0e-4
+        envelopes.append(envelope.to_dict())
+
+    assert envelopes[0] == envelopes[1] == envelopes[2]

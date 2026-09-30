@@ -248,7 +248,12 @@ class OperatorPolicy:
     # None means unknown; lifetime_fraction_used returns 0.0 as before.
     mission_lifetime_days_total: Optional[float] = None
 
+    # SCRUM-479: recommendation mode, independent of safety thresholds.
+    decision_mode: str = "aps"
+
     def __post_init__(self) -> None:
+        if self.decision_mode not in ("aps", "flight_rule_1e4", "flight_rule_1e5"):
+            raise ValueError("Invalid decision_mode")
         if not self.operator_id:
             raise ValueError("operator_id must be a non-empty string")
         if not self.policy_version:
@@ -351,6 +356,7 @@ class OperatorPolicy:
         return cls(
             operator_id                = str(data["operator_id"]),
             policy_version             = str(data["policy_version"]),
+            decision_mode = data.get("decision_mode", "aps"),
             pc_maneuver_threshold      = float(rt.get("pc_maneuver_threshold", 1.0e-4)),
             pc_monitor_threshold       = float(rt.get("pc_monitor_threshold",  1.0e-5)),
             min_miss_distance_km       = float(rt.get("min_miss_distance_km",  1.0)),
@@ -461,6 +467,25 @@ class OperatorPolicy:
             or miss_distance_km < self.min_miss_distance_km
         )
 
+    @property
+    def flight_rule_pc_threshold(self) -> float:
+        # Recommendation baseline only; never an authorization threshold.
+        if self.decision_mode == "flight_rule_1e4":
+            return 1.0e-4
+        if self.decision_mode == "flight_rule_1e5":
+            return 1.0e-5
+        raise ValueError("APS mode has no flight-rule threshold")
+
+    def is_recommendation_required(
+        self, pc: Optional[float], miss_distance_km: float, utility: float = 0.0,
+    ) -> bool:
+        if self.decision_mode == "aps":
+            return utility > 0.0
+        return pc is not None and (
+            pc >= self.flight_rule_pc_threshold
+            or miss_distance_km < self.min_miss_distance_km
+        )
+
     def is_monitor_only(self, pc: float) -> bool:
         """
         True if the event is above the monitor threshold but below the
@@ -474,6 +499,7 @@ class OperatorPolicy:
         return {
             "operator_id":                  self.operator_id,
             "policy_version":               self.policy_version,
+            "decision_mode":                self.decision_mode,
             "pc_maneuver_threshold":        self.pc_maneuver_threshold,
             "pc_monitor_threshold":         self.pc_monitor_threshold,
             "min_miss_distance_km":         self.min_miss_distance_km,

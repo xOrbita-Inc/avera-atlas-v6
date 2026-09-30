@@ -75,6 +75,7 @@ def policy_default():
     return OperatorPolicy(
         operator_id="TEST_OP",
         policy_version="2.5.0",
+        decision_mode="flight_rule_1e4",
         max_dv_per_event_ms=2.0,
         mission_lifetime_days_total=1825.0,
         scoring_weights=ScoringWeights(
@@ -297,7 +298,7 @@ class TestFeasibilityFilters:
         )
 
     def _policy(self, md_thresh=4.0, pc_thresh=1e-4):
-        return OperatorPolicy(
+        return OperatorPolicy(decision_mode="flight_rule_1e4",
             operator_id="T", policy_version="2.5.0",
             mahalanobis_screen_threshold=md_thresh,
             pc_maneuver_threshold=pc_thresh,
@@ -617,7 +618,7 @@ class TestLifetimeFractionScoring:
 
     def test_lifetime_fraction_zero_when_total_none(self, std_vectors):
         r_sat, v_sat, r_rel, P = std_vectors
-        policy_no_total = OperatorPolicy(
+        policy_no_total = OperatorPolicy(decision_mode="flight_rule_1e4",
             operator_id="T", policy_version="2.5.0",
             mission_lifetime_days_total=None,
         )
@@ -638,8 +639,8 @@ class TestLifetimeFractionScoring:
 # ---------------------------------------------------------------------------
 
 class TestNoGoConditions:
-    def test_no_utility_gain_low_risk(self, cap_solo, policy_default, low_risk_vectors):
-        """Low-risk geometry: all candidates have negative utility -> no-burn."""
+    def test_low_risk_rejected_by_legacy_gate(self, cap_solo, policy_default, low_risk_vectors):
+        """Legacy risk gate rejects this geometry before candidate scoring."""
         r_sat, v_sat, r_rel, P = low_risk_vectors
         result = score_maneuver_candidates(
             "NOGO-U", r_sat, v_sat, r_rel, P, T_BURN, T_CA, cap_solo, policy_default
@@ -674,7 +675,7 @@ class TestNoGoConditions:
 
     def test_nogo_trivial_event(self, cap_solo, std_vectors):
         r_sat, v_sat, r_rel, P = std_vectors
-        tight_policy = OperatorPolicy(
+        tight_policy = OperatorPolicy(decision_mode="flight_rule_1e4",
             operator_id="T", policy_version="2.5.0",
             mahalanobis_screen_threshold=0.1,  # extremely tight screen
         )
@@ -874,6 +875,7 @@ class TestEvaluateConjunctionV25:
             "policy": {
                 "operator_id": "DEFAULT_LEO",
                 "policy_version": "2.5.0",
+                "decision_mode": "flight_rule_1e4",
                 "lambda_v": 1.0,
                 "lambda_L": 0.8,
                 "dv_mag_limit_m_s": 2.0,
@@ -913,12 +915,12 @@ class TestPhysicalSanity:
     ):
         """Higher lambda_v -> higher dv penalty -> lower utility."""
         r_sat, v_sat, r_rel, P = std_vectors
-        p_low = OperatorPolicy(
+        p_low = OperatorPolicy(decision_mode="flight_rule_1e4",
             operator_id="T", policy_version="2.5.0",
             scoring_weights=ScoringWeights(lambda_dv=0.1, lambda_lifetime=0.0,
                                            lambda_slot_deviation=0.0),
         )
-        p_high = OperatorPolicy(
+        p_high = OperatorPolicy(decision_mode="flight_rule_1e4",
             operator_id="T", policy_version="2.5.0",
             scoring_weights=ScoringWeights(lambda_dv=10.0, lambda_lifetime=0.0,
                                            lambda_slot_deviation=0.0),
@@ -952,3 +954,76 @@ class TestPhysicalSanity:
         assert _parse_slot_id("P00-S00") == (0, 0)
         assert _parse_slot_id("INVALID") == (0, 0)
         assert _parse_slot_id("") == (0, 0)
+
+
+@pytest.mark.parametrize(
+    "pc,lifetime_weight,aps_required,baseline_required",
+    [
+        (5.0e-5, 0.8, True, False),
+        (2.0e-4, 1.0e12, False, True),
+    ],
+)
+def test_scrum479_scorer_modes(
+    pc, lifetime_weight, aps_required, baseline_required,
+):
+    """Controlled utility cases; the large penalty is a test stress input."""
+    from common.operator_policy import OperatorPolicy, ScoringWeights
+    from common.satellite_capability import SatelliteCapability, LifetimeProfile
+    from common.maneuver_scorer import score_maneuver_candidates
+
+    cap = SatelliteCapability(
+        sat_id="479-TEST",
+        a_ref_km=6853.0,
+        lifetime=LifetimeProfile(
+            mass_kg=100.0,
+            v_remaining_m_s=50.0,
+            v_reserved_m_s=5.0,
+            mission_lifetime_days_remaining=365.0,
+        ),
+    )
+    for mode in ("aps", "flight_rule_1e4", "flight_rule_1e5"):
+        policy = OperatorPolicy(
+            operator_id="TEST",
+            policy_version="2.5.0",
+            decision_mode=mode,
+            mission_lifetime_days_total=1825.0,
+            scoring_weights=ScoringWeights(
+                lambda_dv=1.0,
+                lambda_lifetime=lifetime_weight,
+                lambda_slot_deviation=1.2,
+            ),
+        )
+        result = score_maneuver_candidates(
+            "479-TEST",
+            np.array([6853.0, 0.0, 0.0]),
+            np.array([0.0, 7.626, 0.0]),
+            np.array([2.0, 0.0, 0.0]),
+            np.eye(3) * 0.01,
+            "2026-04-14T08:00:00Z",
+            "2026-04-14T12:00:00Z",
+            cap,
+            policy,
+            pc_precomputed=pc,
+            miss_distance_km=2.0,
+            v_rel_km_s=np.array([0.0, 10.0, 0.0]),
+        )
+        required = policy.is_recommendation_required(
+            pc, 2.0, utility=result.utility,
+        )
+        expected = {
+            "aps": aps_required,
+            "flight_rule_1e4": baseline_required,
+            "flight_rule_1e5": True,
+        }[mode]
+        assert required is expected
+
+        if mode == "aps" and aps_required:
+            assert result.direction != "no-burn"
+            assert result.utility > 0.0
+            assert result.utility_basis == "pc_traded"
+        elif mode == "aps":
+            assert result.direction == "no-burn"
+            assert result.no_go_reason_code == "no_utility_gain"
+        elif mode == "flight_rule_1e4" and not baseline_required:
+            assert result.direction == "no-burn"
+            assert result.no_go_reason_code == "pc_below_threshold"

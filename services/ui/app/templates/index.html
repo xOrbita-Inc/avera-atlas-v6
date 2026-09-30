@@ -577,18 +577,19 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
         </div>
         <div class="policy-group">
   <div class="policy-label">
-    <span>Pc Action</span>
-    <span class="policy-val" id="pcActionVal">1e-4</span>
+    <span>Decision Mode</span>
+    <span class="policy-val" id="pcActionVal">APS</span>
   </div>
   <select id="pcActionSelect"
           onchange="onPolicyChange()"
           style="width:100%;background:var(--bg-panel);color:var(--cyan);border:1px solid var(--border);padding:5px;font-family:inherit;font-size:9px">
-    <option value="0.0001" selected>1e-4</option>
-    <option value="0.00001">1e-5</option>
+    <option value="aps" selected>Policy-derived (APS)</option>
+    <option value="flight_rule_1e4">Flight rule 1e-4</option>
+    <option value="flight_rule_1e5">Flight rule 1e-5</option>
   </select>
   <div class="policy-range">
-    <span>default</span>
-    <span>strict</span>
+    <span>Recommendation mode</span>
+    <span>Safety unchanged</span>
   </div>
 </div>
 <button class="policy-replan-btn" id="replanBtn" onclick="replanWithPolicy()" disabled>RE-PLAN WITH NEW POLICY</button>
@@ -2384,7 +2385,11 @@ function evalDisplayCtx(result, conj){
       : (typeof conj.relative_velocity_km_s==='number' ? conj.relative_velocity_km_s : null);
     return {live:true, risk, label, missM, pc, tcaMin, rtn, relVelKmS};
   }
-  return {live:false, risk:conj.risk_level, label:conj.object_id, missM:(conj.miss_distance_m||0), pc:(conj.pc||0), tcaMin:conj.time_to_tca_min, rtn:null,
+  // SCRUM-479: evaluated scenarios follow the returned recommendation verdict.
+  const risk = typeof rs.maneuver_required === "boolean"
+    ? (rs.maneuver_required ? "RED" : (rs.monitor_only ? "AMBER" : "GREEN"))
+    : conj.risk_level;
+  return {live:false, risk, label:conj.object_id, missM:(conj.miss_distance_m||0), pc:(conj.pc||0), tcaMin:conj.time_to_tca_min, rtn:null,
     relVelKmS:(typeof conj.relative_velocity_km_s==='number'?conj.relative_velocity_km_s:null)};
 }
 
@@ -2535,11 +2540,11 @@ function updateDecisionCard(result,conj){
   const dctx=evalDisplayCtx(result,conj);
   const card=document.getElementById('decisionCard'),status=document.getElementById('decisionStatus'),badge=document.getElementById('decisionBadge');
   const utility=result.recommendation?.utility||0;
-  const pos=utility>0.001;
+  const pos=utility>0.0;
   let dec='MONITORING',bc='badge-nogo',bt='NO ACTION',cc='';
-  if(dctx.risk==='RED'&&pos){dec='EXECUTE MANEUVER';bc='badge-go';bt='GO';cc='alert-red'}
+  if(dctx.risk==='RED'&&pos){dec='MANEUVER REQUIRED';bc='badge-go';bt='GO';cc='alert-red'}
   else if(dctx.risk==='AMBER'&&pos){dec='PREPARE SYSTEMS';bc='badge-standby';bt='STANDBY';cc='alert-amber'}
-  else if(dctx.risk==='RED'){dec='ASSESSING';bc='badge-standby';bt='ANALYZING';cc='alert-red'}
+  else if(dctx.risk==='RED'){dec='MANEUVER REQUIRED';bc='badge-standby';bt='ANALYZING';cc='alert-red'}
   else if(dctx.risk==='AMBER'){dec='MONITORING';bc='badge-nogo';bt='WATCH';cc='alert-amber'}
   status.textContent=dec;badge.className='decision-badge '+bc;badge.textContent=bt;
   card.className='decision-card '+cc;
@@ -2592,37 +2597,38 @@ function getPolicy(){
   const lv=parseFloat(document.getElementById('sliderLv')?.value||0.01);
   const ll=parseFloat(document.getElementById('sliderLl')?.value||0.005);
   const dv=parseFloat(document.getElementById('sliderDv')?.value||1.0);
-  const pcAction=parseFloat(document.getElementById('pcActionSelect')?.value||0.0001);
+  const decisionMode=document.getElementById('pcActionSelect')?.value||'aps';
 
   return{
     lambda_v:lv,
     lambda_L:ll,
     dv_mag_limit_m_s:dv,
     a_ref_km:6878.0,
-    pc_maneuver_threshold:pcAction,
-    pc_monitor_threshold:pcAction/10.0
+    decision_mode:decisionMode,
+    pc_maneuver_threshold:0.0001,
+    pc_monitor_threshold:0.00001
   };
 }
 
-let policyDefaults={lv:0.01,ll:0.005,dv:1.0,pc:0.0001};
+let policyDefaults={lv:0.01,ll:0.005,dv:1.0,mode:'aps'};
 function onPolicyChange(){
   const lv=parseFloat(document.getElementById('sliderLv').value);
   const ll=parseFloat(document.getElementById('sliderLl').value);
   const dv=parseFloat(document.getElementById('sliderDv').value);
-  const pc=parseFloat(document.getElementById('pcActionSelect')?.value||0.0001);
+  const mode=document.getElementById('pcActionSelect')?.value||'aps';
 
   document.getElementById('lvVal').textContent=lv.toFixed(3);
   document.getElementById('llVal').textContent=ll.toFixed(3);
   document.getElementById('dvLimVal').textContent=dv.toFixed(2);
 
   const pcVal=document.getElementById('pcActionVal');
-  if(pcVal) pcVal.textContent=pc===0.00001?'1e-5':'1e-4';
+  if(pcVal) pcVal.textContent=mode==='aps'?'APS':(mode==='flight_rule_1e5'?'1e-5':'1e-4');
 
   const changed=
     lv!==policyDefaults.lv ||
     ll!==policyDefaults.ll ||
     dv!==policyDefaults.dv ||
-    pc!==policyDefaults.pc;
+    mode!==policyDefaults.mode;
 
   document.getElementById('replanBtn').disabled=!changed;
 
@@ -2637,7 +2643,7 @@ async function replanWithPolicy(){
   btn.disabled=true;btn.innerHTML='<span class="spinner"></span>RE-PLANNING...';btn.classList.remove('active');
   document.getElementById('policyMsg').textContent='Calling planner with new policy...';
   const p=getPolicy();
-  policyDefaults={lv:p.lambda_v,ll:p.lambda_L,dv:p.dv_mag_limit_m_s,pc:p.pc_maneuver_threshold};
+  policyDefaults={lv:p.lambda_v,ll:p.lambda_L,dv:p.dv_mag_limit_m_s,mode:p.decision_mode};
   selectedCandidateDir=null;
   await evaluateConjunction(currentConj,selectedConjunction);
   btn.textContent='RE-PLAN WITH NEW POLICY';
@@ -2805,7 +2811,8 @@ function clearAll(){
   document.getElementById('encounterTitleText').textContent='Encounter Geometry';
   document.getElementById('scenarioMsg').textContent='Select scenario and run';
   document.getElementById('sliderLv').value=0.01;document.getElementById('sliderLl').value=0.005;document.getElementById('sliderDv').value=1.0;
-  policyDefaults={lv:0.01,ll:0.005,dv:1.0};onPolicyChange();
+  document.getElementById('pcActionSelect').value='aps';
+  policyDefaults={lv:0.01,ll:0.005,dv:1.0,mode:'aps'};onPolicyChange();
   if(encounterCtx)drawEncounterEmpty();
   clearAtlasArtifact();
 }
@@ -3476,6 +3483,7 @@ function openFuelConfidenceInfoModal(){
 
 function openOperatorPolicyInfoModal(){
   openInfoModal('Operator Policy \u2014 Field Reference',[
+    {label:'Decision Mode',description:'Policy-derived (APS) requires a maneuver when the computed candidate utility is positive. Flight rule baselines use Pc >= 1e-4 or 1e-5, or the existing minimum miss-distance floor. This selector changes recommendations; authorization and safety arming retain their existing thresholds.'},
     {label:'Fuel Weight (\u03BBv)',description:'Weighting applied to delta-v cost in the utility function. Higher values make the optimizer prefer fuel-efficient burns, potentially accepting lower risk reduction.'},
     {label:'Lifetime Weight (\u03BBL)',description:'Weighting applied to lifetime penalty in the utility function. Higher values penalize burns that significantly reduce remaining maneuver authority.'},
     {label:'\u0394v Limit (m/s)',description:'Hard upper bound on burn magnitude. No candidate burn will exceed this value regardless of utility score. Drives the feasible solution space for the planner.'}

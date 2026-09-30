@@ -377,3 +377,67 @@ class TestSerialization:
         d = policy_with_windows.to_dict()
         assert len(d["blackout_windows"]) == 1
         assert d["blackout_windows"][0]["source"] == "operator"
+
+
+def test_scrum479_decision_modes():
+    from common.operator_policy import OperatorPolicy
+
+    default = OperatorPolicy(operator_id="TEST", policy_version="2.5.0")
+    assert default.decision_mode == "aps"
+    assert default.to_dict()["decision_mode"] == "aps"
+
+    for utility, expected in ((-1.0, False), (0.0, False), (1.0, True)):
+        assert default.is_recommendation_required(
+            2.0e-4, 2.0, utility=utility,
+        ) is expected
+        assert default.is_recommendation_required(
+            5.0e-6, 2.0, utility=utility,
+        ) is expected
+
+    for mode, threshold in (
+        ("flight_rule_1e4", 1.0e-4),
+        ("flight_rule_1e5", 1.0e-5),
+    ):
+        policy = OperatorPolicy(
+            operator_id="TEST", policy_version="2.5.0", decision_mode=mode,
+        )
+        assert policy.flight_rule_pc_threshold == threshold
+        assert policy.to_dict()["decision_mode"] == mode
+        assert policy.pc_maneuver_threshold == 1.0e-4
+        assert policy.pc_monitor_threshold == 1.0e-5
+        assert policy.is_recommendation_required(
+            threshold, 2.0, utility=-1.0,
+        ) is True
+        assert policy.is_recommendation_required(
+            threshold * 0.5, 2.0, utility=1.0,
+        ) is False
+        assert policy.is_recommendation_required(
+            threshold * 0.5, 0.5, utility=-1.0,
+        ) is True
+
+
+def test_scrum479_policy_loading():
+    from unittest.mock import mock_open, patch
+    from common.operator_policy import OperatorPolicy
+    from common.maneuver_scorer import _policy_from_dict
+
+    for mode in (None, "aps", "flight_rule_1e4", "flight_rule_1e5"):
+        expected = mode or "aps"
+        data = {} if mode is None else {"decision_mode": mode}
+        policy = _policy_from_dict(data)
+        assert policy.decision_mode == expected
+        assert policy.to_dict()["decision_mode"] == expected
+        assert policy.pc_maneuver_threshold == 1.0e-4
+
+        yaml_text = "operator_id: TEST\npolicy_version: '2.5.0'\n"
+        if mode is not None:
+            yaml_text += "decision_mode: " + mode + "\n"
+        with patch("common.operator_policy.Path.exists", return_value=True):
+            with patch("builtins.open", mock_open(read_data=yaml_text)):
+                loaded = OperatorPolicy.from_yaml("controlled-policy.yaml")
+        assert loaded.decision_mode == expected
+        assert loaded.pc_maneuver_threshold == 1.0e-4
+
+    for invalid in ("unknown", "", None):
+        with pytest.raises(ValueError, match="decision_mode"):
+            _policy_from_dict({"decision_mode": invalid})

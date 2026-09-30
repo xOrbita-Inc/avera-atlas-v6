@@ -116,6 +116,7 @@ def _cap(**propulsion) -> SatelliteCapability:
 def _policy(**kw) -> OperatorPolicy:
     base = dict(
         operator_id="TEST", policy_version="2.5.0",
+        decision_mode="flight_rule_1e4",
         pc_maneuver_threshold=1.0e-4, pc_monitor_threshold=1.0e-5,
         mahalanobis_screen_threshold=4.0,
     )

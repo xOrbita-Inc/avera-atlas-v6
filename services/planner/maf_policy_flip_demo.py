@@ -992,6 +992,12 @@ def run_case(
     scenario = _load_scenario()
 
     # Preserve every physical conjunction input. Only operator policy changes.
+    # This legacy simulation explicitly varies authorization thresholds.
+    # Select the matching recommendation baseline rather than the APS default.
+    scenario["policy"]["decision_mode"] = {
+        BASE_PC_ACTION: "flight_rule_1e4",
+        STRICT_PC_ACTION: "flight_rule_1e5",
+    }[pc_action]
     scenario["policy"]["pc_maneuver_threshold"] = pc_action
     scenario["policy"]["pc_monitor_threshold"] = pc_action / 10.0
     scenario["policy"]["policy_version"] = (
