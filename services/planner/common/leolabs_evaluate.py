@@ -159,3 +159,139 @@ def build_evaluate_request(
         "conjunction": conjunction,
         "policy": dict(policy) if policy is not None else dict(_DEFAULT_POLICY),
     }
+
+
+def analyze_leolabs_portfolio(
+    primary_norad: int, *, satellite=None, policy=None,
+    now=None, lookback_days=1, lookahead_days=7,
+    volume_filters=None, client=None, registry=None,
+    processing_budget_s=25.0,
+) -> Dict[str, Any]:
+    """SCRUM-480: bounded, read-only comparison over one asset window.
+
+    Fetch bounds and event deduplication are shared with the live list.
+    The processing budget is checked between events; an individual scoring
+    call is allowed to finish. Partial totals cover only analyzed events.
+    """
+    from time import perf_counter
+    from common import leolabs_runtime as runtime
+    from common.leolabs_cdm_parser import parse_leolabs_cdm, LeoLabsParseError
+    from common.maneuver_scorer import analyze_conjunction_modes
+
+    now = now or datetime.now(timezone.utc)
+    satellite = dict(satellite or {})
+    filters = dict(volume_filters or {})
+    started = perf_counter()
+    client = client or runtime.get_client()
+    registry = registry or runtime.get_registry(client)
+
+    catalog, ordered, cdm_count, pull = runtime._raw_cdms_in_risk_order(
+        primary_norad, client, registry, now,
+        lookback_days, lookahead_days, filters,
+        deadline_s=runtime._LIST_FETCH_DEADLINE_S,
+        max_cdms=runtime._LIST_FETCH_MAX_CDMS,
+    )
+    fetched = perf_counter()
+    rows = []
+    failures = []
+    attempted = 0
+    score_calls = 0
+    processing_truncated = False
+
+    for cdm in ordered:
+        if perf_counter() - fetched >= processing_budget_s:
+            processing_truncated = True
+            break
+        attempted += 1
+        identity = {
+            "cdm_id": cdm.get("CDM_ID"),
+            "event_id": cdm.get("COMMENT_EVENT_ID"),
+        }
+        stage = "parse"
+        try:
+            our_id = registry.resolve_our_catalog_id(cdm)
+            parsed = parse_leolabs_cdm(cdm, our_id)
+            identity = {
+                "cdm_id": parsed.provenance.get("cdm_id"),
+                "event_id": parsed.provenance.get("event_id"),
+            }
+            stage = "score"
+            req = build_evaluate_request(
+                parsed,
+                sat_id=str(satellite.get("sat_id", primary_norad)),
+                v_remaining_m_s=float(satellite.get("v_remaining_m_s", 0.0)),
+                t_burn_utc=satellite.get("t_burn_utc"),
+                a_ref_km=satellite.get("a_ref_km"),
+                policy=policy or None,
+            )
+            score_calls += 1
+            row = analyze_conjunction_modes(req)
+            row.update(identity)
+            row["tca_utc"] = parsed.t_ca_utc
+            row["secondary_norad"] = parsed.secondary.norad_id
+            rows.append(row)
+        except (LeoLabsParseError, LookupError, ValueError, TypeError) as exc:
+            failures.append({
+                **identity, "stage": stage, "reason": str(exc),
+            })
+
+    finished = perf_counter()
+    summaries = {}
+    for mode in ("aps", "flight_rule_1e4", "flight_rule_1e5"):
+        verdicts = [row["modes"][mode] for row in rows]
+        missing = sum(not verdict["pricing_available"] for verdict in verdicts)
+        subtotal = sum(
+            verdict["dv_m_s"] for verdict in verdicts
+            if verdict["dv_m_s"] is not None
+        )
+        summaries[mode] = {
+            "maneuver_count": sum(verdict["maneuver_required"] for verdict in verdicts),
+            "total_dv_m_s": subtotal if missing == 0 else None,
+            "known_dv_m_s": subtotal,
+            "unpriced_maneuver_count": missing,
+        }
+
+    reasons = []
+    if not pull.complete:
+        reasons.append("fetch_" + (pull.reason or "incomplete"))
+    if processing_truncated:
+        reasons.append("processing_deadline")
+    if failures:
+        reasons.append("event_failures")
+    min_tca, max_tca = runtime.conjunction_window(
+        now, lookback_days, lookahead_days,
+    )
+    return {
+        "primary_norad": int(primary_norad),
+        "catalog_number": catalog,
+        "source": "leolabs",
+        "analysis_only": True,
+        "dv_basis": "best_candidate_avoidance_burn",
+        "complete": not reasons,
+        "partial": bool(reasons),
+        "partial_reasons": reasons,
+        "count": len(rows),
+        "events_in_fetched_set": len(ordered),
+        "events_attempted": attempted,
+        "events_not_attempted": len(ordered) - attempted,
+        "cdm_count": cdm_count,
+        "cdms_in_window": pull.window_total,
+        "window": {
+            "min_tca_utc": min_tca,
+            "max_tca_utc": max_tca,
+            "lookback_days": lookback_days,
+            "lookahead_days": lookahead_days,
+        },
+        "volume_filters": filters,
+        "modes": summaries,
+        "conjunctions": rows,
+        "failures": failures,
+        "cost": {
+            "fetch_ms": (fetched - started) * 1000.0,
+            "processing_ms": (finished - fetched) * 1000.0,
+            "total_ms": (finished - started) * 1000.0,
+            "scoring_calls": score_calls,
+            "processing_budget_s": processing_budget_s,
+        },
+        "analyzed_at_utc": now.isoformat().replace("+00:00", "Z"),
+    }

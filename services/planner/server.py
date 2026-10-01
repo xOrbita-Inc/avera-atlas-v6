@@ -95,7 +95,7 @@ from common.leolabs_conjunction_list import (
     select_conjunction,
     selector_from_conjunction_block,
 )
-from common.leolabs_evaluate import build_evaluate_request
+from common.leolabs_evaluate import build_evaluate_request, analyze_leolabs_portfolio
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -1498,6 +1498,123 @@ GLOBE_TRACK_STEPS = 90
 MIN_GLOBE_TRACK_STEPS = 8
 MAX_GLOBE_TRACK_STEPS = 360
 MAX_GLOBE_OBJECTS = 250
+
+
+
+@svc.post("/v1/leolabs/portfolio")
+async def leolabs_portfolio(
+    request: Request,
+    primary_norad: int,
+    lookahead_days: int = leolabs_runtime.DEFAULT_LOOKAHEAD_DAYS,
+    lookback_days: int = leolabs_runtime.DEFAULT_LOOKBACK_DAYS,
+    in_volume: bool = True,
+    max_relative_position_r_m: Optional[float] = None,
+    max_relative_position_i_m: Optional[float] = None,
+    max_relative_position_c_m: Optional[float] = None,
+) -> JSONResponse:
+    """SCRUM-480: read-only portfolio comparison; no authorization or emission.
+
+    Body accepts satellite and policy blocks with the same operational inputs
+    used by live evaluate. Counts and modeled avoidance-burn delta-v describe
+    analyzed events only; incomplete coverage is explicitly marked partial.
+    """
+    from math import isfinite
+
+    if not LEOLABS_ENABLED:
+        return JSONResponse(
+            status_code=503,
+            content=error_response(
+                "LEOLABS_ENABLED=false; the live portfolio is unavailable"
+            ),
+        )
+
+    try:
+        if primary_norad <= 0:
+            raise ValueError("primary_norad must be positive")
+        if lookback_days < 0 or lookahead_days < 0:
+            raise ValueError("lookback_days and lookahead_days must be >= 0")
+        if lookback_days + lookahead_days > leolabs_runtime.MAX_WINDOW_DAYS:
+            raise ValueError(
+                f"requested window exceeds {leolabs_runtime.MAX_WINDOW_DAYS} days"
+            )
+
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("request must be a JSON object")
+        satellite = body.get("satellite", {})
+        policy = body.get("policy", {})
+        if not isinstance(satellite, dict) or not isinstance(policy, dict):
+            raise ValueError("satellite and policy must be JSON objects")
+        _policy_from_dict(policy)
+
+        remaining = float(satellite.get("v_remaining_m_s", 0.0))
+        if not isfinite(remaining) or remaining < 0:
+            raise ValueError("v_remaining_m_s must be finite and >= 0")
+        if satellite.get("a_ref_km") is not None:
+            a_ref = float(satellite["a_ref_km"])
+            if not isfinite(a_ref) or a_ref <= 0:
+                raise ValueError("a_ref_km must be finite and positive")
+        if satellite.get("t_burn_utc") is not None:
+            datetime.fromisoformat(
+                str(satellite["t_burn_utc"]).replace("Z", "+00:00")
+            )
+
+        for value in (
+            max_relative_position_r_m,
+            max_relative_position_i_m,
+            max_relative_position_c_m,
+        ):
+            if value is not None and (not isfinite(value) or value <= 0):
+                raise ValueError("reporting-volume limits must be finite and positive")
+        filters = leolabs_runtime.resolve_volume_filters(
+            max_relative_position_r_m,
+            max_relative_position_i_m,
+            max_relative_position_c_m,
+            in_volume=in_volume,
+        )
+    except (ValueError, TypeError, OverflowError) as exc:
+        return JSONResponse(status_code=422, content=error_response(str(exc)))
+
+    try:
+        result = await _run_list_fetch(
+            analyze_leolabs_portfolio,
+            int(primary_norad),
+            satellite=satellite,
+            policy=policy,
+            now=datetime.now(timezone.utc),
+            lookback_days=lookback_days,
+            lookahead_days=lookahead_days,
+            volume_filters=filters,
+        )
+    except ListFetchBusy as exc:
+        return JSONResponse(
+            status_code=503,
+            content=error_response(
+                f"Planner busy; retry the portfolio analysis in a few seconds. ({exc})"
+            ),
+        )
+    except LeoLabsRuntimeError as exc:
+        return JSONResponse(status_code=404, content=error_response(str(exc)))
+    except Exception as exc:
+        log.warning(
+            "LeoLabs portfolio analysis failed",
+            extra={"event": "leolabs_portfolio_failed",
+                   "primary_norad": primary_norad, "exc": str(exc)},
+        )
+        return JSONResponse(
+            status_code=503,
+            content=error_response(f"LeoLabs portfolio analysis failed: {exc}"),
+        )
+
+    log.info(
+        "LeoLabs portfolio analysis completed",
+        extra={"event": "leolabs_portfolio_completed",
+               "primary_norad": primary_norad,
+               "count": result["count"],
+               "complete": result["complete"],
+               "cost": result["cost"]},
+    )
+    return JSONResponse(status_code=200, content=result)
 
 
 @svc.get("/v1/leolabs/conjunctions")

@@ -1661,3 +1661,57 @@ def _build_nogo_result(
         # string says that, where either basis name would be a claim.
         utility_basis="",
     )
+
+
+def analyze_conjunction_modes(req: Dict[str, Any]) -> Dict[str, Any]:
+    """SCRUM-480: score once and derive read-only policy comparisons.
+
+    Prices the highest-utility burn candidate, including nonpositive utility.
+    This is modeled avoidance-burn delta-v, not measured fuel consumption or
+    authorization to execute. Required events without a feasible candidate
+    have unavailable pricing rather than a fabricated zero cost.
+    """
+    from copy import deepcopy
+    from dataclasses import replace
+
+    policy = _policy_from_dict(req.get("policy", {}))
+    scoring_req = deepcopy(req)
+    scoring_req.setdefault("policy", {})["decision_mode"] = "aps"
+    scoring = evaluate_conjunction_v25(scoring_req)
+
+    best_burn = max(
+        scoring.candidates_v25,
+        key=lambda candidate: candidate.utility,
+        default=None,
+    )
+    burn_dv = float(best_burn.dv_avoid_m_s) if best_burn is not None else None
+    miss_km = scoring_req.get("conjunction", {}).get("miss_distance_km") or 999.0
+
+    modes = {}
+    for mode in ("aps", "flight_rule_1e4", "flight_rule_1e5"):
+        mode_policy = replace(policy, decision_mode=mode)
+        required = mode_policy.is_recommendation_required(
+            scoring.pc_pre, miss_km, utility=scoring.utility,
+        )
+        modes[mode] = {
+            "maneuver_required": bool(required),
+            "dv_m_s": burn_dv if required else 0.0,
+            "pricing_available": not required or best_burn is not None,
+        }
+
+    return {
+        "conjunction_id": scoring.conjunction_id,
+        "pc_pre": scoring.pc_pre,
+        "pc_source": scoring.pc_source,
+        "miss_distance_km": scoring_req.get("conjunction", {}).get("miss_distance_km"),
+        "utility": scoring.utility,
+        "best_burn": {
+            "direction": best_burn.direction,
+            "dv_m_s": burn_dv,
+            "utility": float(best_burn.utility),
+            "utility_basis": best_burn.utility_basis,
+        } if best_burn is not None else None,
+        "no_go_reason_code": scoring.no_go_reason_code,
+        "dv_basis": "best_candidate_avoidance_burn",
+        "modes": modes,
+    }
