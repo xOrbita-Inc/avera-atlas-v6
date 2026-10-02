@@ -13,7 +13,7 @@ from cdm_to_conjunction import cdm_to_conjunction_state
 from fastapi.responses import JSONResponse
 from db import (
     init_db, save_cdm_record, CdmRecord, PlannerOutput, DecisionLogRecord,
-    EvidenceRecordRow, get_session,
+    EvidenceRecordRow, ScreeningRecord, get_session,
 )
 
 # === CONFIGURATION ===
@@ -200,6 +200,9 @@ async def get_cdm(
             [row.ct_r_sec, row.ct_t_sec, row.cn_t_sec],
             [row.cn_r_sec, row.cn_t_sec, row.cn_n_sec],
         ]
+        def _km2(m):
+            return [[m[i][j] / 1e6 for j in range(3)] for i in range(3)]
+
         combined = [
             [(c_primary[i][j] + c_secondary[i][j]) / 1e6 for j in range(3)]
             for i in range(3)
@@ -212,6 +215,18 @@ async def get_cdm(
             "miss_distance_m":         row.miss_distance_m,
             "pc_space_track":          row.pc_space_track,
             "covariance_combined_rtn": combined,
+            # SCRUM-453 item 2: the per-object blocks, which were stored all
+            # along but summed away on assembly. The combined matrix is what the
+            # scorer's Pc needs -- primary plus secondary relative uncertainty --
+            # but it over-states the primary's OWN uncertainty, so using it to
+            # seed the secondary screen inflates the seed (SCRUM-454 measured
+            # 2.72x in sigma, 7.4x in trace on a live CDM). The live LeoLabs path
+            # already seeds from the primary's own block off the parsed CDM; this
+            # puts the same quantity on the wire for the stored and reference
+            # path. Same unit convention as combined: m^2 stored, km^2 returned.
+            # combined is unchanged and is still the sum of these two.
+            "covariance_primary_rtn":   _km2(c_primary),
+            "covariance_secondary_rtn": _km2(c_secondary),
             "covariance_source":       _SOURCE_MAP.get(row.source, "surrogate_identity"),
             "ingested_at":             row.ingested_at,
         }
@@ -471,6 +486,162 @@ async def store_decision_log(log_id: str):
     except Exception as e:
         logging.error("[INGEST] store_decision_log error: %s", e)
         return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/screening/persist", status_code=200)
+async def persist_screening(request: Request) -> dict:
+    """SCRUM-453: store the on-demand secondary screening a decision was made on.
+
+    Accepts the record the planner's _persist_screening_result already builds and
+    posts. That planner code is unchanged by this ticket; it was written against
+    this endpoint before the endpoint existed, so the contract here is whatever it
+    sends: decision_log_id, screening_id, source, cdm_count, conjunction_count,
+    skipped (a list of unparseable CDMs with reasons), clear, breaches,
+    conjunctions, covariance_model, p_post_source.
+
+    Idempotent, like /cdm/persist. The planner posts once per evaluate and
+    re-evaluating the same conjunction must reuse the row rather than accumulate
+    one per evaluate, so a repeat for the same decision_log_id updates in place.
+    Deliberately NOT the 409-on-different-content rule /decision_log uses: that
+    endpoint guards an append-only audit record of the decision itself, whereas
+    this is the derived record of the screen behind it, and a retry after a
+    partial write has to be able to land. The decision is never reachable from
+    here -- the planner already treats any failure of this call as non-fatal.
+
+    Returns {stored, decision_log_id, screening_id, id, created}. The planner only
+    reads the status code and keeps its own screening id, so nothing here depends
+    on the body shape.
+    """
+    body = await request.json()
+    if not isinstance(body, dict):
+        return JSONResponse(
+            status_code=422,
+            content={"error": "expected a single screening record object"},
+        )
+
+    decision_log_id = body.get("decision_log_id")
+    screening_id = body.get("screening_id")
+    if decision_log_id is None and screening_id is None:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "decision_log_id or screening_id required"},
+        )
+
+    def _as_int(value):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    skipped = body.get("skipped")
+    if skipped is None:
+        skipped = []
+    elif not isinstance(skipped, list):
+        # Tolerate a producer that sends a count or a flag rather than the list,
+        # so an older or third-party caller still stores instead of 500ing.
+        skipped = [skipped]
+
+    breaches = body.get("breaches") or []
+    conjunctions = body.get("conjunctions") or []
+    clear = body.get("clear")
+
+    try:
+        with get_session() as session:
+            existing = None
+            if decision_log_id is not None:
+                existing = (
+                    session.query(ScreeningRecord)
+                    .filter(ScreeningRecord.decision_log_id == decision_log_id)
+                    .first()
+                )
+            if existing is None and screening_id is not None:
+                existing = (
+                    session.query(ScreeningRecord)
+                    .filter(ScreeningRecord.screening_id == str(screening_id))
+                    .first()
+                )
+
+            row = existing if existing is not None else ScreeningRecord()
+            row.decision_log_id   = decision_log_id
+            row.screening_id      = None if screening_id is None else str(screening_id)
+            row.source            = body.get("source")
+            row.cdm_count         = _as_int(body.get("cdm_count"))
+            row.conjunction_count = _as_int(body.get("conjunction_count"))
+            row.skipped_count     = len(skipped)
+            row.skipped_json      = json.dumps(skipped)
+            row.clear             = None if clear is None else bool(clear)
+            row.covariance_model  = body.get("covariance_model")
+            row.p_post_source     = body.get("p_post_source")
+            row.breaches_json     = json.dumps(breaches)
+            row.conjunctions_json = json.dumps(conjunctions)
+            if existing is None:
+                row.created_at = datetime.utcnow().isoformat() + "Z"
+                session.add(row)
+            session.flush()      # assigns row.id inside this transaction
+            row_id = int(row.id)
+
+        logging.info(
+            "[INGEST] Screening record stored: screening_id=%s decision_log_id=%s "
+            "conjunctions=%d created=%s",
+            screening_id, decision_log_id, len(conjunctions), existing is None,
+        )
+        return {
+            "stored": True,
+            "decision_log_id": decision_log_id,
+            "screening_id": screening_id,
+            "id": row_id,
+            "created": existing is None,
+        }
+    except Exception as exc:
+        logging.error("[INGEST] persist_screening error: %s", exc)
+        return JSONResponse(status_code=500, content={"error": str(exc)})
+
+
+@app.get("/store/screening/{decision_log_id}")
+async def store_screening(decision_log_id: str):
+    """Return the stored screening for a decision log id, or 404 (SCRUM-453).
+
+    Mirrors GET /store/decision_log/{log_id}. This is what makes a CLEAR or
+    NOT CLEAR auditable: it hands back the exact conjunctions and breaches the
+    verdict was formed over, not a summary of them.
+    """
+    try:
+        with get_session() as session:
+            row = (
+                session.query(ScreeningRecord)
+                .filter(ScreeningRecord.decision_log_id == decision_log_id)
+                .order_by(ScreeningRecord.id.desc())
+                .first()
+            )
+            if row is None:
+                return JSONResponse(
+                    status_code=404,
+                    content={
+                        "error": (
+                            f"No screening record found for decision_log_id "
+                            f"'{decision_log_id}'"
+                        )
+                    },
+                )
+            return {
+                "id":                row.id,
+                "decision_log_id":   row.decision_log_id,
+                "screening_id":      row.screening_id,
+                "source":            row.source,
+                "cdm_count":         row.cdm_count,
+                "conjunction_count": row.conjunction_count,
+                "skipped":           json.loads(row.skipped_json or "[]"),
+                "skipped_count":     row.skipped_count,
+                "clear":             row.clear,
+                "covariance_model":  row.covariance_model,
+                "p_post_source":     row.p_post_source,
+                "breaches":          json.loads(row.breaches_json or "[]"),
+                "conjunctions":      json.loads(row.conjunctions_json or "[]"),
+                "created_at":        row.created_at,
+            }
+    except Exception as exc:
+        logging.error("[INGEST] store_screening error: %s", exc)
+        return JSONResponse(status_code=500, content={"error": str(exc)})
 
 
 @app.delete("/store/cdm_records/duplicates", status_code=200)

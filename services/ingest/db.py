@@ -17,7 +17,8 @@ from typing import Any, Generator
 import os
 
 from sqlalchemy import (
-    create_engine, Column, Integer, Float, String, text, UniqueConstraint, Index,
+    create_engine, Column, Integer, Float, String, Boolean, text, UniqueConstraint,
+    Index,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from sqlalchemy.pool import StaticPool
@@ -156,6 +157,51 @@ class EvidenceRecordRow(Base):
     __table_args__ = (
         UniqueConstraint("chain_id", "seq", name="uq_evidence_chain_seq"),
         Index("ix_evidence_chain_seq", "chain_id", "seq"),
+    )
+
+
+class ScreeningRecord(Base):
+    """One on-demand secondary screening, keyed to the decision it was made for.
+
+    SCRUM-453 (part of SCRUM-433). The planner runs the on-demand screen as part
+    of a decision and POSTs the result here; before this table existed the POST
+    404'd and the decision came back with screening_record_id null, so a CLEAR or
+    NOT CLEAR verdict was auditable only through the service logs. This is the
+    store side of ADR-008 for that record: it holds the screening id and the exact
+    conjunctions the verdict was judged on, tied to decision_log_id so the verdict
+    can be read back against the events behind it.
+
+    Shape follows DecisionLogRecord rather than a child table: the lists are kept
+    as JSON text in one row, which matches how decision_log_json already stores a
+    nested audit payload and keeps a screening retrievable in a single read.
+
+    On `skipped`: the planner sends a LIST of the CDMs it could not parse, each
+    with a reason, not a count or a flag. It is stored whole. A non-empty skipped
+    means the set the verdict was formed over was incomplete, which is exactly the
+    kind of thing an auditor needs the reasons for -- reducing it to a number
+    would throw away the only record of why the set was short. skipped_count is
+    carried alongside it so that question can be asked without parsing the JSON.
+    """
+    __tablename__ = "screening_records"
+
+    id                = Column(Integer, primary_key=True, autoincrement=True)
+    decision_log_id   = Column(String, nullable=True, index=True)
+    screening_id      = Column(String, nullable=True, index=True)
+    source            = Column(String, nullable=True)
+    cdm_count         = Column(Integer, nullable=True)
+    conjunction_count = Column(Integer, nullable=True)
+    skipped_count     = Column(Integer, nullable=True)
+    skipped_json      = Column(String, nullable=False, default="[]")
+    clear             = Column(Boolean, nullable=True)
+    covariance_model  = Column(String, nullable=True)
+    p_post_source     = Column(String, nullable=True)
+    breaches_json     = Column(String, nullable=False, default="[]")
+    conjunctions_json = Column(String, nullable=False, default="[]")
+    created_at        = Column(String, nullable=False)   # ISO 8601 UTC text
+
+    __table_args__ = (
+        Index("ix_screening_decision_log_id", "decision_log_id"),
+        Index("ix_screening_screening_id", "screening_id"),
     )
 
 
