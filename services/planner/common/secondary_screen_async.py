@@ -131,6 +131,15 @@ class ScreenEntry:
     # Context, for the poll response and the audit trail.
     screening_epoch_utc: Optional[str] = None
     primary_catalog_number: Optional[str] = None
+    # SCRUM-484: the decision this screen was run for, stamped during the evaluate
+    # once the decision log exists. The screening record is keyed to it, so
+    # without it the resolved screen cannot be tied back to the decision and is
+    # not persisted at all.
+    decision_log_id: Optional[str] = None
+    # Set once the record has been written, so a repeated poll does not re-post.
+    # The ingest endpoint upserts, so a double post is harmless; this is an
+    # optimisation and a record of what happened, not a correctness guard.
+    screening_record_id: Optional[str] = None
 
     @property
     def is_clear(self) -> bool:
@@ -164,6 +173,33 @@ def get_entry(job_id: str) -> Optional[ScreenEntry]:
     with _lock:
         _evict_locked()
         return _entries.get(job_id)
+
+
+def set_decision_log_id(job_id: str, decision_log_id: Optional[str]) -> bool:
+    """Stamp the decision this screen belongs to onto its entry (SCRUM-484).
+
+    Lock-guarded like _finish, because the worker thread may be writing the same
+    entry while the evaluate is still running. Returns False when the entry is
+    gone -- evicted, or the store reset under a test -- which is not an error: the
+    screen simply cannot be tied to a decision any more, and nothing downstream
+    may read that as a screen having passed.
+    """
+    with _lock:
+        entry = _entries.get(job_id)
+        if entry is None:
+            return False
+        entry.decision_log_id = decision_log_id
+        return True
+
+
+def set_screening_record_id(job_id: str, screening_record_id: Optional[str]) -> bool:
+    """Record that this screen's record has been persisted (SCRUM-484)."""
+    with _lock:
+        entry = _entries.get(job_id)
+        if entry is None:
+            return False
+        entry.screening_record_id = screening_record_id
+        return True
 
 
 def reset_store() -> None:
@@ -403,6 +439,11 @@ def entry_to_dict(entry: ScreenEntry) -> Dict[str, Any]:
         "clear": entry.is_clear,
         "pending": entry.status == STATUS_PENDING,
         "screening_id": entry.screening_id,
+        # SCRUM-484: null until the screen resolves and the record is written.
+        # The evaluate response cannot carry this -- the screen has not finished
+        # when the evaluate returns -- so the poll is where it becomes available.
+        "screening_record_id": entry.screening_record_id,
+        "decision_log_id": entry.decision_log_id,
         "seed_source": entry.seed_source,
         "screening_epoch_utc": entry.screening_epoch_utc,
         "primary_catalog_number": entry.primary_catalog_number,

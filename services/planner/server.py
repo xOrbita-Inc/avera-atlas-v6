@@ -447,6 +447,112 @@ def _persist_screening_result(
         return None
 
 
+async def _persist_resolved_screen(entry) -> None:
+    """SCRUM-484: write the screening record for a resolved async screen.
+
+    Called from the poll endpoint, which is where both halves exist at once: the
+    decision log id was stamped during the evaluate, and the worker has since
+    written the result and verdict onto the same entry. The inline path keeps its
+    own persist and is untouched.
+
+    Runs the POST in a worker thread. The poll handler is `async def`, the service
+    runs a single uvicorn worker, and _persist_screening_result does a blocking
+    HTTP POST with a five second timeout -- doing that on the event loop would
+    stall every other request behind a slow store, which is exactly the failure
+    SCRUM-459 fixed elsewhere. The dashboard polls this endpoint repeatedly, so it
+    is the last place that can afford to block. A short POST does not justify the
+    capped _LIST_EXECUTOR, which exists to keep minutes-long window fetches off
+    the shared pool, so this uses the default threadpool instead.
+
+    Everything here is best-effort by design. Any failure is logged and swallowed:
+    the caller reports the verdict from the entry regardless, so whether the
+    record was written cannot change whether the screen reads clear.
+    """
+    try:
+        if not entry.is_terminal:
+            return                      # still running; nothing to write yet
+        if entry.screening_record_id:
+            return                      # already written by an earlier poll
+        if entry.result is None or not entry.decision_log_id:
+            # An errored screen that never produced a result has nothing to
+            # record, and a screen with no decision log id cannot be tied to one.
+            return
+
+        from starlette.concurrency import run_in_threadpool
+        from common.secondary_screen_async import set_screening_record_id
+
+        record_id = await run_in_threadpool(
+            _persist_screening_result,
+            entry.result,
+            entry.verdict,
+            entry.decision_log_id,
+            p_post_source=entry.seed_source,
+        )
+        if record_id:
+            set_screening_record_id(entry.job_id, record_id)
+            entry.screening_record_id = record_id
+            log.info(
+                "async screening record persisted on resolution",
+                extra={"event": "async_screening_persisted",
+                       "job_id": entry.job_id,
+                       "decision_log_id": entry.decision_log_id,
+                       "screening_record_id": record_id},
+            )
+    except Exception as exc:
+        # _persist_screening_result already swallows its own failures; this is
+        # the belt for anything else -- an evicted entry, a threadpool refusal.
+        log.warning(
+            "async screening record could not be persisted",
+            extra={"event": "async_screening_persist_failed",
+                   "job_id": getattr(entry, "job_id", None), "exc": str(exc)},
+        )
+
+
+def _async_screen_job_id(artifact) -> Optional[str]:
+    """The pending async screen's poll id for this decision, if there is one.
+
+    Returns None whenever the screen did not run async -- deferred, inline, not
+    enabled, or no maneuver recommended -- so callers do not have to know which.
+    """
+    try:
+        secondary = artifact.post_maneuver.secondary_conflict
+    except AttributeError:
+        return None
+    return getattr(secondary, "screen_job_id", None)
+
+
+def _stamp_async_screen_decision(artifact, decision_log_id: str) -> None:
+    """SCRUM-484: tie a running async screen to the decision it was run for.
+
+    The screening record is keyed to the decision log id, and that id does not
+    exist until after the artifact is built, so it cannot be handed to the worker
+    when the screen starts. Stamping it on the entry here is what lets the poll
+    endpoint persist the record once the screen resolves.
+
+    Guarded like every other audit-adjacent write on this path: a store entry
+    that has already been evicted, or any failure here, costs the record and
+    never the decision.
+    """
+    job_id = _async_screen_job_id(artifact)
+    if not job_id:
+        return
+    try:
+        from common.secondary_screen_async import set_decision_log_id
+
+        if not set_decision_log_id(job_id, decision_log_id):
+            log.info(
+                "async screen entry gone before it could be tied to its decision",
+                extra={"event": "screening_stamp_entry_missing",
+                       "job_id": job_id, "decision_log_id": decision_log_id},
+            )
+    except Exception as exc:
+        log.warning(
+            "could not tie the async screen to its decision",
+            extra={"event": "screening_stamp_failed", "job_id": job_id,
+                   "exc": str(exc)},
+        )
+
+
 def _persist_leolabs_cdm(parsed_ll) -> Optional[int]:
     """SCRUM-429: store the LeoLabs CDM this evaluate is scoring, return its id.
 
@@ -2771,6 +2877,14 @@ async def post_evaluate(request: Request):
                 )
                 if _sc_id:
                     result["screening_record_id"] = _sc_id
+                # SCRUM-484: the inline persist above fires only when the screen
+                # ran inline. On the default async path the screen is still
+                # running here, so there is no result to write yet -- which is
+                # why a live decision returned screening_record_id null and no
+                # record was ever stored. Stamp the decision onto the screen's
+                # store entry instead; the poll endpoint persists once the screen
+                # resolves, when both halves finally exist.
+                _stamp_async_screen_decision(artifact, decision_log.log_id)
                 _ev_id = _post_evidence_record(artifact, decision_log, _pol)
                 if _ev_id:
                     result["evidence_record_id"] = _ev_id
@@ -2926,4 +3040,11 @@ async def get_secondary_screen(job_id: str):
                 f"been evicted. This is NOT a clear screen."
             ),
         )
+    # SCRUM-484: a resolved screen is where the screening record finally can be
+    # written -- the evaluate returned before the screen had a result. This is
+    # the only side effect on this endpoint and it is deliberately incapable of
+    # changing what the endpoint reports: the verdict is read off the entry
+    # afterwards either way, so a store that is down costs the record and leaves
+    # the clear / not-clear answer exactly as it was.
+    await _persist_resolved_screen(entry)
     return JSONResponse(status_code=200, content=entry_to_dict(entry))
