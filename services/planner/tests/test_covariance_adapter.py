@@ -146,7 +146,7 @@ class TestFetchCdmCovariancePriority:
 
     def test_missing_both_norads_uses_surrogate_without_network_call(self):
         with patch.object(server.http_requests, "get") as mock_get:
-            p_rel_km2, source, cdm_id = server._fetch_cdm_covariance(
+            p_rel_km2, source, cdm_id, _ = server._fetch_cdm_covariance(
                 "", "", R_SAT_KM, V_SAT_KM_S
             )
         mock_get.assert_not_called()
@@ -155,7 +155,7 @@ class TestFetchCdmCovariancePriority:
 
     def test_missing_primary_norad_uses_surrogate(self):
         with patch.object(server.http_requests, "get") as mock_get:
-            _, source, _ = server._fetch_cdm_covariance(
+            _, source, _, _ = server._fetch_cdm_covariance(
                 "", "35929", R_SAT_KM, V_SAT_KM_S
             )
         mock_get.assert_not_called()
@@ -169,7 +169,7 @@ class TestFetchCdmCovariancePriority:
             "id": 42,
         })
         with patch.object(server.http_requests, "get", return_value=resp):
-            p_rel_km2, source, cdm_id = server._fetch_cdm_covariance(
+            p_rel_km2, source, cdm_id, _ = server._fetch_cdm_covariance(
                 "226", "35929", R_SAT_KM, V_SAT_KM_S
             )
         assert source == "cdm_store"
@@ -178,7 +178,7 @@ class TestFetchCdmCovariancePriority:
 
     def test_network_failure_falls_back_to_surrogate(self):
         with patch.object(server.http_requests, "get", side_effect=ConnectionError("down")):
-            _, source, _ = server._fetch_cdm_covariance(
+            _, source, _, _ = server._fetch_cdm_covariance(
                 "226", "35929", R_SAT_KM, V_SAT_KM_S
             )
         assert source == "surrogate_elliptical"
@@ -186,7 +186,7 @@ class TestFetchCdmCovariancePriority:
     def test_404_falls_back_to_surrogate(self):
         resp = _make_response(404)
         with patch.object(server.http_requests, "get", return_value=resp):
-            _, source, _ = server._fetch_cdm_covariance(
+            _, source, _, _ = server._fetch_cdm_covariance(
                 "226", "35929", R_SAT_KM, V_SAT_KM_S
             )
         assert source == "surrogate_elliptical"
@@ -194,7 +194,7 @@ class TestFetchCdmCovariancePriority:
     def test_503_falls_back_to_surrogate(self):
         resp = _make_response(503)
         with patch.object(server.http_requests, "get", return_value=resp):
-            _, source, _ = server._fetch_cdm_covariance(
+            _, source, _, _ = server._fetch_cdm_covariance(
                 "226", "35929", R_SAT_KM, V_SAT_KM_S
             )
         assert source == "surrogate_elliptical"
@@ -202,7 +202,7 @@ class TestFetchCdmCovariancePriority:
     def test_other_bad_status_falls_back_to_surrogate(self):
         resp = _make_response(500, ok=False)
         with patch.object(server.http_requests, "get", return_value=resp):
-            _, source, _ = server._fetch_cdm_covariance(
+            _, source, _, _ = server._fetch_cdm_covariance(
                 "226", "35929", R_SAT_KM, V_SAT_KM_S
             )
         assert source == "surrogate_elliptical"
@@ -212,7 +212,7 @@ class TestFetchCdmCovariancePriority:
         back to the surrogate instead."""
         resp = _make_response(200, json_data={"unexpected": "shape"})
         with patch.object(server.http_requests, "get", return_value=resp):
-            _, source, _ = server._fetch_cdm_covariance(
+            _, source, _, _ = server._fetch_cdm_covariance(
                 "226", "35929", R_SAT_KM, V_SAT_KM_S
             )
         assert source == "surrogate_elliptical"
@@ -344,7 +344,7 @@ class TestRealCovarianceSourceLabeling:
             "id": 7,
         })
         with patch.object(server.http_requests, "get", return_value=resp):
-            _, source, cdm_id = server._fetch_cdm_covariance(
+            _, source, cdm_id, _ = server._fetch_cdm_covariance(
                 "226", "35929", R_SAT_KM, V_SAT_KM_S
             )
         assert source == "real"
@@ -360,7 +360,7 @@ class TestRealCovarianceSourceLabeling:
             "id": 8,
         })
         with patch.object(server.http_requests, "get", return_value=resp):
-            _, source, _ = server._fetch_cdm_covariance(
+            _, source, _, _ = server._fetch_cdm_covariance(
                 "226", "35929", R_SAT_KM, V_SAT_KM_S
             )
         assert source == "cdm_store_v2"

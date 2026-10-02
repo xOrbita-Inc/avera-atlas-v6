@@ -207,12 +207,24 @@ class TestScoringPathUntouched:
         expected = np.asarray(parsed.p_rel_eci_km2(), dtype=float)
         assert np.allclose(p_rel, expected)
 
-    def test_the_stored_path_still_returns_only_the_combined(self):
-        """Documented, not silently worked around.
+    def test_the_stored_path_can_now_supply_the_primary_block(self):
+        """SCRUM-453 removed the limitation SCRUM-454 had to document here.
 
-        The ingest endpoint computes the two blocks and returns only their sum,
-        so _fetch_cdm_covariance cannot supply a primary-only seed. Exposing it
-        is an ingest change and this ticket is planner-only.
+        This test used to assert that server.py still CARRIED the comment saying
+        _fetch_cdm_covariance "cannot return the primary's own" covariance -- the
+        ingest endpoint summed the two blocks away, and SCRUM-454 was
+        planner-only, so the stored path was stuck with the combined stand-in.
+        SCRUM-453 exposes covariance_primary_rtn from ingest and reads it here,
+        so that statement is no longer true and asserting it would now pin a
+        limitation that has been fixed.
+
+        The real behaviour is covered by test_stored_path_screening_seed.py; what
+        is kept here is the narrow fact this class exists for, that the stored
+        path returns the primary block IN ADDITION to the combined one and does
+        not replace it.
         """
         source = Path("services/planner/server.py").read_text()
-        assert "cannot return\n    the primary's own" in source
+        assert "cannot return\n    the primary's own" not in source
+        assert "primary_cov_km2" in source
+        # The combined is still what p_rel_km2 is built from.
+        assert 'cov_rtn = np.array(data["covariance_combined_rtn"], dtype=float)' in source

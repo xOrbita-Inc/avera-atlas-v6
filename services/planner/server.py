@@ -191,18 +191,27 @@ def _fetch_cdm_covariance(
     secondary_norad: str,
     r_sat_km: list,
     v_sat_km_s: list,
-) -> tuple[list, str, int | None]:
+) -> tuple[list, str, int | None, list | None]:
     """Fetch RTN covariance from the ingest service and rotate to ECI.
 
-    Returns (p_rel_km2, covariance_source, cdm_record_id).
+    Returns (p_rel_km2, covariance_source, cdm_record_id, primary_cov_km2).
 
-    SCRUM-454 note: this returns only the COMBINED covariance, and cannot return
-    the primary's own. The ingest endpoint behind it computes c_primary and
-    c_secondary separately and then returns only their sum, so the primary-only
-    block is not on the wire; exposing it is an ingest change, and SCRUM-454 is
-    planner-only. The LeoLabs path does not call this function at all -- a test
-    asserts that -- and takes the primary's own covariance straight off the
-    parsed CDM instead, which is where the demo path gets its seed.
+    p_rel_km2 is the COMBINED covariance, flattened, which is what the scorer's
+    Pc wants. primary_cov_km2 is the primary's OWN 3x3 block in ECI, or None.
+
+    SCRUM-453: the primary block used to be unavailable here. Ingest computed
+    c_primary and c_secondary separately and then returned only their sum, so the
+    primary-only block was not on the wire -- exposing it was an ingest change,
+    which is why SCRUM-454 (planner-only) could not use it and the stored path
+    fell back to the combined stand-in. Ingest now returns
+    covariance_primary_rtn, so this reads it and the screening seed on the stored
+    and reference path can prefer the primary's own covariance exactly as the
+    live path already does. It stays None when the field is absent -- older rows
+    assembled before that change, or a surrogate -- and the caller falls back to
+    the combined stand-in as before.
+
+    The LeoLabs path does not call this function at all -- a test asserts that --
+    and takes the primary's own covariance straight off the parsed CDM.
 
     SCRUM-369: always returns a real, usable covariance. Falls back to
     the documented elliptical surrogate (_surrogate_covariance) on any
@@ -218,26 +227,26 @@ def _fetch_cdm_covariance(
             "using surrogate covariance",
             extra={"event": "surrogate_covariance", "reason": "primary_or_secondary_norad_missing"},
         )
-        return _surrogate_covariance(r_sat_km, v_sat_km_s)
+        return (*_surrogate_covariance(r_sat_km, v_sat_km_s), None)
 
     try:
         url = f"{_ingest_url()}/cdm/{primary_norad}/{secondary_norad}"
         resp = http_requests.get(url, timeout=5.0)
     except Exception as exc:
         log.warning("covariance fetch failed", extra={"event": "covariance_fetch_fail", "reason": "unreachable", "pair": f"{primary_norad}/{secondary_norad}", "exc": str(exc)})
-        return _surrogate_covariance(r_sat_km, v_sat_km_s)
+        return (*_surrogate_covariance(r_sat_km, v_sat_km_s), None)
 
     if resp.status_code == 404:
         log.warning("covariance fetch failed", extra={"event": "covariance_fetch_fail", "reason": "not_found", "pair": f"{primary_norad}/{secondary_norad}"})
-        return _surrogate_covariance(r_sat_km, v_sat_km_s)
+        return (*_surrogate_covariance(r_sat_km, v_sat_km_s), None)
 
     if resp.status_code == 503:
         log.warning("covariance fetch failed", extra={"event": "covariance_fetch_fail", "reason": "store_unavailable", "pair": f"{primary_norad}/{secondary_norad}"})
-        return _surrogate_covariance(r_sat_km, v_sat_km_s)
+        return (*_surrogate_covariance(r_sat_km, v_sat_km_s), None)
 
     if not resp.ok:
         log.warning("covariance fetch failed", extra={"event": "covariance_fetch_fail", "reason": f"http_{resp.status_code}", "pair": f"{primary_norad}/{secondary_norad}"})
-        return _surrogate_covariance(r_sat_km, v_sat_km_s)
+        return (*_surrogate_covariance(r_sat_km, v_sat_km_s), None)
 
     try:
         data = resp.json()
@@ -251,12 +260,39 @@ def _fetch_cdm_covariance(
         cov_eci = rot @ cov_rtn @ rot.T
         p_rel_km2 = cov_eci.flatten().tolist()
 
-        log.info("covariance fetched", extra={"event": "covariance_fetched", "pair": f"{primary_norad}/{secondary_norad}", "source": covariance_source, "cdm_id": cdm_record_id})
-        return p_rel_km2, covariance_source, cdm_record_id
+        # SCRUM-453: the primary's own block, rotated with the SAME rotation as
+        # the combined so the two are in one frame, and left in km^2 to match the
+        # seed's units. Guarded separately from the combined parse on purpose: a
+        # malformed or absent primary block must cost the screen its preferred
+        # seed, not cost the decision its covariance.
+        primary_cov_km2 = None
+        _primary_rtn = data.get("covariance_primary_rtn")
+        if _primary_rtn is not None:
+            try:
+                _m = np.array(_primary_rtn, dtype=float)
+                if _m.shape == (3, 3):
+                    primary_cov_km2 = [
+                        [float(c) for c in row] for row in (rot @ _m @ rot.T)
+                    ]
+                else:
+                    log.info(
+                        "primary covariance ignored, unexpected shape",
+                        extra={"event": "cdm_primary_covariance_bad_shape",
+                               "shape": str(_m.shape)},
+                    )
+            except Exception as exc:
+                log.info(
+                    "primary covariance could not be read from the CDM response",
+                    extra={"event": "cdm_primary_covariance_unavailable",
+                           "exc": str(exc)},
+                )
+
+        log.info("covariance fetched", extra={"event": "covariance_fetched", "pair": f"{primary_norad}/{secondary_norad}", "source": covariance_source, "cdm_id": cdm_record_id, "primary_covariance": primary_cov_km2 is not None})
+        return p_rel_km2, covariance_source, cdm_record_id, primary_cov_km2
 
     except Exception as exc:
         log.warning("covariance parse failed", extra={"event": "covariance_parse_fail", "pair": f"{primary_norad}/{secondary_norad}", "exc": str(exc)})
-        return _surrogate_covariance(r_sat_km, v_sat_km_s)
+        return (*_surrogate_covariance(r_sat_km, v_sat_km_s), None)
 
 
 # ---------------------------------------------------------------------------
@@ -2408,7 +2444,9 @@ async def post_evaluate(request: Request):
     # above. Skip the ingest CDM fetch so it cannot overwrite the UDL source.
     _conj_block = body.get("conjunction", {}) or {}
     _is_leolabs = str(_conj_block.get("source", "")).lower() == "leolabs"
-    # SCRUM-454: set only on the LeoLabs path, where a parsed CDM exists.
+    # SCRUM-454: set on the LeoLabs path, where a parsed CDM exists.
+    # SCRUM-453: and on the stored/reference path, when ingest supplies the
+    # per-object block. None otherwise, which selects the combined stand-in.
     _cdm_primary_cov_km2 = None
     if leolabs_used:
         # SCRUM-412: the LeoLabs fetch above rebuilt the request from a parsed
@@ -2462,14 +2500,24 @@ async def post_evaluate(request: Request):
             r_sat_km = sat.get("r_sat_km", [])
             v_sat_km_s = sat.get("v_sat_km_s", [])
 
-            p_rel_km2, covariance_source, cdm_record_id = _fetch_cdm_covariance(
-                str(primary_norad) if primary_norad else "",
-                secondary_norad,
-                r_sat_km,
-                v_sat_km_s,
+            p_rel_km2, covariance_source, cdm_record_id, _primary_cov = (
+                _fetch_cdm_covariance(
+                    str(primary_norad) if primary_norad else "",
+                    secondary_norad,
+                    r_sat_km,
+                    v_sat_km_s,
+                )
             )
             body["conjunction"]["p_rel_km2"] = p_rel_km2
             body["conjunction"]["covariance_source"] = covariance_source
+            # SCRUM-453: the stored and reference path can now seed the screen
+            # from the primary's own covariance, like the live path. The
+            # seed-selection block below already prefers _cdm_primary_cov_km2 and
+            # labels it cdm_primary_own; until ingest exposed the per-object
+            # block there was nothing to put here, so the stored path always fell
+            # through to the combined stand-in. None when ingest did not supply
+            # it, which keeps that fallback exactly as it was.
+            _cdm_primary_cov_km2 = _primary_cov
         except Exception as exc:
             log.warning("covariance adapter error", extra={"event": "covariance_adapter_error", "exc": str(exc)})
             covariance_source = "surrogate_elliptical"
