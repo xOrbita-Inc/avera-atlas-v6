@@ -200,3 +200,78 @@ class TestFailsClosed:
         for resp in bodies:
             with patch("app.main.requests.get", return_value=resp):
                 assert client.get(_URL).json()["clear"] is False
+
+
+# SCRUM-481: controlled proxy responses, not live portfolio measurements.
+class TestPortfolioProxy:
+    @pytest.mark.parametrize("status,payload", [
+        (200, {"analysis_only": True, "complete": True,
+               "count": 0, "conjunctions": [], "modes": {}}),
+        (200, {"analysis_only": True, "complete": False, "partial": True,
+               "partial_reasons": ["fetch_cap"], "count": 2}),
+        (404, {"error": {"message": "asset unavailable"}}),
+        (422, {"error": {"message": "invalid window"}}),
+        (503, {"error": {"message": "planner busy"}}),
+    ])
+    def test_preserves_payload_status_and_operational_inputs(
+        self, client, status, payload,
+    ):
+        body = {
+            "satellite": {"sat_id": "36508", "v_remaining_m_s": 25.0},
+            "policy": {"decision_mode": "aps", "lambda_v": 0.01},
+        }
+        with patch(
+            "app.main.requests.post", return_value=_Resp(payload, status),
+        ) as post:
+            response = client.post(
+                "/api/planner/portfolio?primary_norad=36508"
+                "&lookback_days=1&lookahead_days=7&in_volume=false",
+                json=body,
+            )
+        assert response.status_code == status
+        assert response.json() == payload
+        post.assert_called_once()
+        assert post.call_args.args[0].endswith("/v1/leolabs/portfolio")
+        assert dict(post.call_args.kwargs["params"]) == {
+            "primary_norad": "36508", "lookback_days": "1",
+            "lookahead_days": "7", "in_volume": "false",
+        }
+        assert post.call_args.kwargs["json"] == body
+        assert post.call_args.kwargs["timeout"] == 90
+
+    @pytest.mark.parametrize("failure", [
+        requests.exceptions.ConnectionError("controlled refusal"),
+        requests.exceptions.Timeout("controlled timeout"),
+    ])
+    def test_unavailable_is_an_error_not_an_empty_portfolio(self, client, failure):
+        with patch("app.main.requests.post", side_effect=failure):
+            response = client.post("/api/planner/portfolio", json={})
+        assert response.status_code == 503
+        assert response.json()["error"]
+        assert "conjunctions" not in response.json()
+        assert "modes" not in response.json()
+
+    @pytest.mark.parametrize("payload,invalid_json", [
+        (None, True), ([], False), (None, False),
+    ])
+    def test_invalid_upstream_response_is_not_a_result(
+        self, client, payload, invalid_json,
+    ):
+        with patch(
+            "app.main.requests.post",
+            return_value=_Resp(payload, invalid_json=invalid_json),
+        ):
+            response = client.post("/api/planner/portfolio", json={})
+        assert response.status_code == 502
+        assert response.json()["error"]
+        assert "conjunctions" not in response.json()
+
+    @pytest.mark.parametrize("content", ["{broken", "[]"])
+    def test_invalid_body_does_not_call_the_planner(self, client, content):
+        with patch("app.main.requests.post") as post:
+            response = client.post(
+                "/api/planner/portfolio", content=content,
+                headers={"Content-Type": "application/json"},
+            )
+        assert response.status_code == 422
+        post.assert_not_called()

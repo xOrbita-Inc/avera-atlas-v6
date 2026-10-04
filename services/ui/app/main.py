@@ -236,6 +236,50 @@ async def planner_secondary_screen(job_id: str):
     )
 
 
+
+@app.post("/api/planner/portfolio")
+async def get_policy_portfolio(request: Request):
+    """SCRUM-481: relay the read-only portfolio response and its status."""
+    from starlette.concurrency import run_in_threadpool
+
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse(status_code=422, content={"error": "Invalid JSON body"})
+    if not isinstance(body, dict):
+        return JSONResponse(
+            status_code=422, content={"error": "request must be a JSON object"},
+        )
+
+    try:
+        response = await run_in_threadpool(
+            requests.post,
+            f"{PLANNER_SERVICE_URL}/v1/leolabs/portfolio",
+            params=list(request.query_params.multi_items()),
+            json=body,
+            timeout=90,
+        )
+    except requests.RequestException:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Planner portfolio unavailable; retry the comparison"},
+        )
+
+    try:
+        result = response.json()
+    except ValueError:
+        return JSONResponse(
+            status_code=502,
+            content={"error": "Planner returned an invalid portfolio response"},
+        )
+    if not isinstance(result, dict):
+        return JSONResponse(
+            status_code=502,
+            content={"error": "Planner returned an invalid portfolio response"},
+        )
+    return JSONResponse(status_code=response.status_code, content=result)
+
+
 @app.get("/api/orbits/live")
 async def get_orbits_live(request: Request):
     """SCRUM-447: proxy the planner's live globe tracks.

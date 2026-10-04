@@ -487,6 +487,25 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
 .smoke-result.fail{background:rgba(255,59,92,0.08);border:1px solid rgba(255,59,92,0.2);color:var(--red)}
 .smoke-result.info{background:rgba(79,248,232,0.05);border:1px solid var(--border);color:var(--text-dim)}
 
+
+/* SCRUM-481: window-level decision comparison. */
+#policyAbWrap{display:none;flex:1;min-height:0;overflow:auto;padding:14px;flex-direction:column;gap:12px}
+.policy-ab-heading{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.policy-ab-heading h3{margin:0;font-size:12px;color:var(--cyan)}
+.policy-ab-note{font-size:10px;color:var(--text-dim);line-height:1.6;overflow-wrap:anywhere}
+.policy-ab-warning{padding:10px;border:1px solid var(--amber);color:var(--amber);font-size:10px;line-height:1.6}
+.policy-ab-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.policy-ab-mode{padding:12px;border:1px solid var(--border);background:var(--bg-panel);min-width:0}
+.policy-ab-mode.active{border-color:var(--cyan)}
+.policy-ab-mode h4{margin:0 0 8px;font-size:10px;line-height:1.5}
+.policy-ab-mode .metric{font-size:18px;margin:5px 0;color:var(--cyan)}
+.policy-ab-active{color:var(--cyan);font-size:9px}
+.policy-ab-table-wrap{overflow:auto}
+.policy-ab-table{width:100%;border-collapse:collapse;font-size:10px}
+.policy-ab-table th,.policy-ab-table td{padding:9px 7px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}
+.policy-ab-table th{color:var(--cyan)}
+.policy-ab-table .active{background:rgba(0,200,255,0.06)}
+.decision-mode-provenance{font-size:10px;color:var(--cyan);margin-top:8px;line-height:1.6}
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js">
 </script>
@@ -658,6 +677,7 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
              table shows. Unhidden here as the last step, after the live path was
              confirmed rendering. 2D remains the default view. -->
         <button class="view-toggle-btn" id="btn3D" onclick="setView('3d')">3D GLOBE</button>
+        <button class="view-toggle-btn" id="btnPolicyAb" onclick="setView('policy')" title="Compare decision policies for the current asset window">POLICY A/B</button>
         <!-- SCRUM-447 follow-up: NOMINAL used to sit here. It moved into the
              floating control cluster over the globe (#globeControls), where the
              mockup puts it and where it sits with the other globe-only controls
@@ -670,6 +690,28 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
         </div>
       </div>
     </div>
+
+    <section id="policyAbWrap" aria-label="Policy decision comparison">
+      <div class="policy-ab-heading">
+        <h3>Decision comparison</h3>
+        <button class="view-toggle-btn" id="policyAbRefresh" onclick="refreshPolicyPortfolio()">REFRESH COMPARISON</button>
+      </div>
+      <div class="policy-ab-note">
+        Read-only analysis of the current asset window. Counts describe maneuver-required events;
+        delta-v is modeled avoidance-burn cost, not executed fuel use.
+        Changing the active mode applies to a conjunction when you evaluate or re-plan it.
+      </div>
+      <div id="policyAbStatus" class="policy-ab-note" role="status" aria-live="polite">Select a live asset to compare its window.</div>
+      <div id="policyAbCoverage" class="policy-ab-warning" role="status" style="display:none"></div>
+      <div id="policyAbContext" class="policy-ab-note"></div>
+      <div id="policyAbRollup" class="policy-ab-grid"></div>
+      <div class="policy-ab-table-wrap">
+        <table class="policy-ab-table">
+          <thead id="policyAbHead"></thead>
+          <tbody id="policyAbRows"></tbody>
+        </table>
+      </div>
+    </section>
     <div class="encounter-canvas-wrap"><canvas id="encounterCanvas"></canvas></div>
     <div id="globeWrap"><canvas id="globeCanvas"></canvas>
       <!-- SCRUM-447: says what the globe is showing, or why it is showing nothing.
@@ -747,6 +789,7 @@ body{background:var(--bg-deep);color:var(--text);font-family:'JetBrains Mono',mo
         <div class="decision-status" id="decisionStatus">MONITORING</div>
         <span class="decision-badge badge-nogo" id="decisionBadge">NO ACTION</span>
       </div>
+      <div id="decisionModeProvenance" class="decision-mode-provenance">Decision mode: no evaluation yet</div>
       <div id="covSourceBadge"></div>
       <div class="decision-meta">
         <div class="item"><div class="k">Target</div><div class="v" id="dTarget">--</div></div>
@@ -1069,6 +1112,7 @@ function updateConjSourceNote(){
 }
 
 function clearConjunctionsForSourceSwitch(){
+  resetPolicyPortfolio();
   conjunctionData=null;selectedConjunction=null;
   // SCRUM-445: a cursor is only valid for the query that minted it, so a source
   // or asset switch discards the walk rather than carrying an offset across.
@@ -1096,6 +1140,7 @@ function clearConjunctionsForSourceSwitch(){
 // clearAll(), which also sets userCleared and resets the policy sliders -- a
 // source switch should not throw away the operator's policy.
 function clearScoredResultForSourceSwitch(){
+  updateDecisionModeProvenance(null);
   currentPlannerResult=null;currentConj=null;currentCandidates=null;selectedCandidateDir=null;
   zoomLevel=2.5;panX=0;panY=0;
   const set=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v;};
@@ -1630,6 +1675,7 @@ function renderConjPager(){
 function toggleConjVolumeFilter(){
   if(conjPaging.loading)return;
   conjPaging.inVolume=!conjPaging.inVolume;
+  resetPolicyPortfolio();
   // The volume is part of what a cursor is valid against, so widening or
   // narrowing restarts at page one rather than replaying a now-foreign cursor.
   resetConjPaging();
@@ -2275,7 +2321,9 @@ async function evaluateConjunction(conj,idx){
   // Evaluate succeeded. A rendering error past this point is a display bug, not an
   // evaluate failure, so log it rather than falsely reporting EVALUATE FAILED.
   try{
-    currentPlannerResult=result;currentConj=conj;
+    recordEvaluatedPolicy(result,request.policy);
+  currentPlannerResult=result;currentConj=conj;
+  onPolicyChange();
     // SCRUM-445: the row's own CDM geometry was a pre-score stand-in; the scored
     // result supersedes it, so stop preferring the row.
     selectedRowGeom=null;
@@ -2537,6 +2585,7 @@ function updateMafDecisionFields(result){
 }
 
 function updateDecisionCard(result,conj){
+  updateDecisionModeProvenance(result);
   const dctx=evalDisplayCtx(result,conj);
   const card=document.getElementById('decisionCard'),status=document.getElementById('decisionStatus'),badge=document.getElementById('decisionBadge');
   const utility=result.recommendation?.utility||0;
@@ -2593,6 +2642,247 @@ function semiMajorAxisFromStateKm(rKm,vKmS){
   return -mu/(2*energy);
 }
 
+
+// SCRUM-481: display backend comparisons without deriving new verdicts.
+const POLICY_AB_MODES=['aps','flight_rule_1e4','flight_rule_1e5'];
+let policyAbState={data:null,key:null,loading:false,controller:null,sequence:0};
+
+function policyModeLabel(mode){
+  return {
+    aps:'Policy-derived (APS)',
+    flight_rule_1e4:'Flight rule 1e-4',
+    flight_rule_1e5:'Flight rule 1e-5'
+  }[mode]||'Unknown mode';
+}
+
+function policyAbEscape(value){
+  return String(value??'--').replace(/[&<>"']/g,function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+  });
+}
+
+function policyAbNumber(value){
+  return typeof value==='number'&&Number.isFinite(value)
+    ? String(Number(value.toPrecision(6))) : 'Unavailable';
+}
+
+function policyAbDv(value){
+  return typeof value==='number'&&Number.isFinite(value)
+    ? policyAbNumber(value)+' m/s' : 'Unavailable';
+}
+
+function policyPortfolioRequest(){
+  const query=new URLSearchParams(conjPagingUrl(null).split('?')[1]);
+  query.delete('page_size');
+  query.delete('cursor');
+  const policy={...getPolicy()};
+  // One comparison already contains all modes. Changing only the mode needs no fetch.
+  delete policy.decision_mode;
+  const body={
+    satellite:{sat_id:liveAssetNorad,v_remaining_m_s:25.0},
+    policy
+  };
+  return {
+    url:'/api/planner/portfolio?'+query.toString(),
+    body,
+    key:JSON.stringify([isLiveMode(),query.toString(),body])
+  };
+}
+
+function updateDecisionModeProvenance(result){
+  const el=document.getElementById('decisionModeProvenance');
+  if(!el)return;
+  const evaluated=result?._decision_mode;
+  if(!POLICY_AB_MODES.includes(evaluated)){
+    el.textContent='Decision mode: no evaluation yet';
+    return;
+  }
+  const selected=getPolicy().decision_mode;
+  el.textContent='Verdict driven by: '+policyModeLabel(evaluated)
+    +(selected!==evaluated
+      ? ' | Selected: '+policyModeLabel(selected)+' - re-plan to apply'
+      : '');
+}
+
+function renderPolicyPortfolio(data){
+  const active=getPolicy().decision_mode;
+  const rollup=document.getElementById('policyAbRollup');
+  const head=document.getElementById('policyAbHead');
+  const rows=document.getElementById('policyAbRows');
+  const coverage=document.getElementById('policyAbCoverage');
+  const context=document.getElementById('policyAbContext');
+  const status=document.getElementById('policyAbStatus');
+  const refresh=document.getElementById('policyAbRefresh');
+  if(!rollup||!head||!rows||!coverage||!context||!status)return;
+  if(refresh)refresh.disabled=policyAbState.loading||!isLiveMode()||!liveAssetNorad;
+  if(!data){
+    rollup.innerHTML='';head.innerHTML='';rows.innerHTML='';
+    coverage.style.display='none';coverage.textContent='';context.textContent='';
+    status.textContent=policyAbState.loading
+      ? 'Fetching and scoring the asset window...'
+      : (isLiveMode()&&liveAssetNorad
+        ? 'Refresh comparison to analyze the current asset window.'
+        : 'Select a live asset to compare its window. Scenario mode has no live portfolio.');
+    return;
+  }
+
+  const complete=data.complete===true&&data.partial!==true;
+  const reasonLabels={
+    fetch_cap:'fetch size limit',
+    fetch_deadline:'fetch time limit',
+    fetch_incomplete:'incomplete fetch',
+    processing_deadline:'scoring time limit',
+    event_failures:'events could not be analyzed'
+  };
+  const reasons=(Array.isArray(data.partial_reasons)?data.partial_reasons:[])
+    .map(reason=>reasonLabels[reason]||String(reason));
+  coverage.style.display=complete?'none':'block';
+  coverage.textContent=complete?''
+    : 'PARTIAL WINDOW - totals cover analyzed events only. '
+      +(reasons.length?reasons.join('; '):'Complete coverage was not confirmed.')
+      +' Not attempted: '+policyAbNumber(data.events_not_attempted)
+      +'. Failed: '+(Array.isArray(data.failures)?data.failures.length:'Unavailable')+'.';
+  status.textContent=policyAbNumber(data.count)+' analyzed event(s)'
+    +(complete?' - complete requested window.':' - partial requested window.');
+
+  const window=data.window||{};
+  const cost=data.cost||{};
+  context.textContent='Asset '+String(data.primary_norad??'--')
+    +' | Window: '+String(window.min_tca_utc??'--')
+    +' to '+String(window.max_tca_utc??'--')
+    +' | '+(conjPaging.inVolume?'Reporting volume enabled':'Whole-window volume')
+    +' | Analysis time: '+String(data.analyzed_at_utc??'--')
+    +' | Processing: '+policyAbNumber(cost.processing_ms)+' ms'
+    +' | Total: '+policyAbNumber(cost.total_ms)+' ms'
+    +' | Scoring calls: '+policyAbNumber(cost.scoring_calls)
+    +' | Uses the live-evaluate assumption of 25 m/s remaining delta-v.';
+
+  rollup.innerHTML=POLICY_AB_MODES.map(function(mode){
+    const summary=data.modes[mode];
+    const selected=mode===active;
+    const unpriced=summary.unpriced_maneuver_count;
+    return '<div class="policy-ab-mode'+(selected?' active':'')+'">'
+      +'<h4>'+policyModeLabel(mode)+'</h4>'
+      +'<div class="policy-ab-active">'+(selected?'ACTIVE MODE':'Comparison baseline')+'</div>'
+      +'<div class="metric">'+policyAbNumber(summary.maneuver_count)+'</div>'
+      +'<div class="policy-ab-note">Maneuver-required events</div>'
+      +'<div class="metric">'+policyAbDv(summary.total_dv_m_s)+'</div>'
+      +'<div class="policy-ab-note">Modeled avoidance delta-v'
+      +(complete?'':' (analyzed events only)')+'</div>'
+      +(unpriced>0?'<div class="policy-ab-note">'
+        +policyAbNumber(unpriced)+' required event(s) unpriced. Known subtotal: '
+        +policyAbDv(summary.known_dv_m_s)+'</div>':'')
+      +'</div>';
+  }).join('');
+
+  head.innerHTML='<tr><th>Conjunction / provenance</th>'
+    +POLICY_AB_MODES.map(mode=>'<th class="'+(mode===active?'active':'')+'">'
+      +policyModeLabel(mode)+'</th>').join('')+'</tr>';
+  rows.innerHTML=data.conjunctions.map(function(row){
+    const burn=row.best_burn;
+    const identity='Event '+String(row.event_id??row.conjunction_id??'--')
+      +' | Secondary '+String(row.secondary_norad??'--');
+    const provenance='Pc '+policyAbNumber(row.pc_pre)
+      +' ('+String(row.pc_source??'unavailable')+')'
+      +' | Candidate utility '+policyAbNumber(burn?.utility)
+      +' | Basis '+String(burn?.utility_basis??'unavailable');
+    return '<tr><td>'+policyAbEscape(identity)
+      +'<div class="policy-ab-note">'+policyAbEscape(row.tca_utc)+'</div>'
+      +'<div class="policy-ab-note">'+policyAbEscape(provenance)+'</div></td>'
+      +POLICY_AB_MODES.map(function(mode){
+        const verdict=row.modes?.[mode]||{};
+        const label=verdict.maneuver_required===true?'MANEUVER REQUIRED'
+          :(verdict.maneuver_required===false?'NOT REQUIRED':'Unavailable verdict');
+        const dv=verdict.pricing_available===false?'Unavailable':policyAbDv(verdict.dv_m_s);
+        return '<td class="'+(mode===active?'active':'')+'">'+label
+          +'<div class="policy-ab-note">'+dv+'</div></td>';
+      }).join('')+'</tr>';
+  }).join('');
+  if(!data.conjunctions.length){
+    rows.innerHTML='<tr><td colspan="4" class="policy-ab-note">'
+      +(complete?'No conjunctions in the requested window.'
+        :'No events were analyzed; this is not a confirmed empty window.')
+      +'</td></tr>';
+  }
+}
+
+function resetPolicyPortfolio(){
+  policyAbState.controller?.abort();
+  policyAbState.sequence+=1;
+  policyAbState.controller=null;
+  policyAbState.loading=false;
+  policyAbState.data=null;
+  policyAbState.key=null;
+  renderPolicyPortfolio(null);
+}
+
+function synchronizePolicyPortfolio(){
+  if(policyAbState.key&&policyAbState.key!==policyPortfolioRequest().key){
+    resetPolicyPortfolio();
+  }else if(policyAbState.data){
+    renderPolicyPortfolio(policyAbState.data);
+  }
+}
+
+async function refreshPolicyPortfolio(){
+  if(!isLiveMode()||!liveAssetNorad){
+    resetPolicyPortfolio();
+    return;
+  }
+  resetPolicyPortfolio();
+  const request=policyPortfolioRequest();
+  const sequence=policyAbState.sequence;
+  const controller=new AbortController();
+  policyAbState.controller=controller;
+  policyAbState.key=request.key;
+  policyAbState.loading=true;
+  renderPolicyPortfolio(null);
+  try{
+    const response=await fetch(request.url,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(request.body),signal:controller.signal
+    });
+    const data=await response.json();
+    if(sequence!==policyAbState.sequence||request.key!==policyPortfolioRequest().key)return;
+    if(!response.ok){
+      throw new Error(typeof data.error==='string'?data.error
+        :(data.error?.message||data.detail||'Portfolio request failed: HTTP '+response.status));
+    }
+    if(data.analysis_only!==true||!Array.isArray(data.conjunctions)
+      ||!POLICY_AB_MODES.every(mode=>data.modes?.[mode]
+        &&typeof data.modes[mode].maneuver_count==='number')){
+      throw new Error('Invalid portfolio response; comparison unavailable');
+    }
+    policyAbState.data=data;
+    policyAbState.loading=false;
+    renderPolicyPortfolio(data);
+  }catch(error){
+    if(sequence!==policyAbState.sequence||request.key!==policyPortfolioRequest().key
+      ||error.name==='AbortError')return;
+    policyAbState.data=null;
+    policyAbState.loading=false;
+    renderPolicyPortfolio(null);
+    document.getElementById('policyAbStatus').textContent=
+      'Comparison unavailable: '+error.message+'. Refresh to retry.';
+  }finally{
+    if(sequence===policyAbState.sequence){
+      policyAbState.loading=false;
+      policyAbState.controller=null;
+      const button=document.getElementById('policyAbRefresh');
+      if(button)button.disabled=!isLiveMode()||!liveAssetNorad;
+    }
+  }
+}
+
+
+function recordEvaluatedPolicy(result,policy){
+  result._decision_mode=policy.decision_mode;
+  policyDefaults={
+    lv:policy.lambda_v,ll:policy.lambda_L,
+    dv:policy.dv_mag_limit_m_s,mode:policy.decision_mode
+  };
+}
+
 function getPolicy(){
   const lv=parseFloat(document.getElementById('sliderLv')?.value||0.01);
   const ll=parseFloat(document.getElementById('sliderLl')?.value||0.005);
@@ -2612,6 +2902,8 @@ function getPolicy(){
 
 let policyDefaults={lv:0.01,ll:0.005,dv:1.0,mode:'aps'};
 function onPolicyChange(){
+  synchronizePolicyPortfolio();
+  updateDecisionModeProvenance(currentPlannerResult);
   const lv=parseFloat(document.getElementById('sliderLv').value);
   const ll=parseFloat(document.getElementById('sliderLl').value);
   const dv=parseFloat(document.getElementById('sliderDv').value);
@@ -2782,6 +3074,8 @@ function setEncounterAlert(risk, label){
 }
 
 function clearAll(){
+  resetPolicyPortfolio();
+  updateDecisionModeProvenance(null);
   userCleared=true;
   conjunctionData=null;selectedConjunction=null;currentPlannerResult=null;currentConj=null;zoomLevel=2.5;panX=0;panY=0;selectedCandidateDir=null;currentCandidates=null;
   selectedRowGeom=null;resetConjPaging();renderConjPager();setConjGeomNote('Select a row');
@@ -3908,6 +4202,22 @@ function setView(v){
   const wrap3d=document.getElementById('globeWrap');
   const btn2d=document.getElementById('btn2D');
   const btn3d=document.getElementById('btn3D');
+
+  document.getElementById('btnPolicyAb')?.classList.toggle('active',v==='policy');
+  document.getElementById('policyAbWrap').style.display=v==='policy'?'flex':'none';
+  if(v==='policy'){
+    wrap2d.style.display='none';wrap3d.style.display='none';
+    btn2d.classList.remove('active');btn3d.classList.remove('active');
+    document.getElementById('speedControl').classList.remove('visible');
+    document.getElementById('globeDock')?.classList.remove('visible');
+    stopGlobeLoop();cameraFollowActive=false;
+    synchronizePolicyPortfolio();
+    renderPolicyPortfolio(policyAbState.data);
+    if(!policyAbState.data&&!policyAbState.loading&&isLiveMode()&&liveAssetNorad){
+      refreshPolicyPortfolio();
+    }
+    return;
+  }
   if(v==='3d'){
     wrap2d.style.display='none';wrap3d.style.display='block';
     btn2d.classList.remove('active');btn3d.classList.add('active');
