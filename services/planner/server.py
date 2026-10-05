@@ -47,7 +47,9 @@ from avoid.decision_model import (
     error_response,
     evaluate_batch,
 )
-from common.maneuver_scorer import evaluate_conjunction_v25, _policy_from_dict
+from common.maneuver_scorer import (
+    evaluate_conjunction_v25, _policy_from_dict, aps_decision_state, aps_pc_usable,
+)
 from common.evidence_record import (
     EvidenceRecord, RecordType, canonical_json, build_decision_record,
     build_transition_record, GENESIS_HASH,
@@ -2639,12 +2641,40 @@ async def post_evaluate(request: Request):
     try:
         scoring = evaluate_conjunction_v25(body)
 
+        # SCRUM-485: this block is the commanded burn a caller acts on, and it
+        # is built from the scoring directly rather than from the artifact, so
+        # gating the artifact alone would still have handed back a capped burn
+        # on an event with no usable Pc. The scorer prices a candidate for every
+        # event, including those priced on the unbounded delta_c_legacy
+        # fallback; APS must not command one of those.
+        #
+        # Same gate and same helpers as the artifact, so the two cannot drift.
+        # Flight-rule modes are untouched: they never consulted the basis.
+        _eval_policy = _policy_from_dict(body.get("policy", {}))
+        _eval_pc_usable = aps_pc_usable(scoring.pc_pre)
+        _eval_required = _eval_policy.is_recommendation_required(
+            scoring.pc_pre,
+            float((body.get("conjunction") or {}).get("miss_distance_km") or 999.0),
+            utility=scoring.utility,
+            pc_usable=_eval_pc_usable,
+        )
+        _eval_aps_state = (
+            aps_decision_state(scoring.pc_pre, bool(_eval_required))
+            if _eval_policy.decision_mode == "aps"
+            else ""
+        )
+        _aps_refuses_burn = (
+            _eval_policy.decision_mode == "aps"
+            and not _eval_pc_usable
+            and scoring.is_maneuver_recommended()
+        )
+
         result: Dict[str, Any] = {
             "conjunction_id": scoring.conjunction_id,
             "recommendation": {
-                "direction":        scoring.direction,
-                "dv_eci_km_s":      scoring.dv_eci_km_s,
-                "dv_magnitude_m_s": scoring.dv_magnitude_m_s,
+                "direction":        "no-burn" if _aps_refuses_burn else scoring.direction,
+                "dv_eci_km_s":      [0.0, 0.0, 0.0] if _aps_refuses_burn else scoring.dv_eci_km_s,
+                "dv_magnitude_m_s": 0.0 if _aps_refuses_burn else scoring.dv_magnitude_m_s,
                 "t_burn_utc":       scoring.t_burn_utc,
                 "utility":          scoring.utility,
             },
@@ -2658,6 +2688,11 @@ async def post_evaluate(request: Request):
                 # provenance/risk-gate values that travel with it.
                 "pc_pre":              scoring.pc_pre,
                 "pc_source":           scoring.pc_source,
+                # SCRUM-485: which basis the utility came from, and what APS
+                # concluded. Without these a reader sees a huge utility beside a
+                # zero burn and has no way to tell why.
+                "utility_basis":       scoring.utility_basis,
+                "aps_state":           _eval_aps_state,
                 "hbr_m":               scoring.hbr_m,
                 "risk_gate":           scoring.risk_gate,
                 "risk_surrogate_post": scoring.risk_surrogate_post,

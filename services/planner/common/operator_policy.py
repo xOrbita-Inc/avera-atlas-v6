@@ -477,10 +477,46 @@ class OperatorPolicy:
         raise ValueError("APS mode has no flight-rule threshold")
 
     def is_recommendation_required(
-        self, pc: Optional[float], miss_distance_km: float, utility: float = 0.0,
+        self,
+        pc: Optional[float],
+        miss_distance_km: float,
+        utility: float = 0.0,
+        pc_usable: bool = False,
     ) -> bool:
+        """Recommendation-mode verdict. Never an authorization.
+
+        APS requires BOTH a positive utility and a utility that was actually
+        derived from a usable, nonzero probability of collision.
+
+        The second condition is not redundant. The scorer prices a burn on one
+        of two bases: it trades in Pc when a positive geometric Pc exists, and
+        otherwise falls back to the raw Mahalanobis separation gain, which is
+        unbounded. A negligible-risk pass whose Pc underflows to exactly zero
+        takes that fallback, and the fallback's benefit term reaches the
+        millions against roughly 0.02 for a real event -- so "utility > 0" alone
+        recommended a maneuver on events carrying no collision risk at all, and
+        the highest-utility candidate on that basis is simply the largest burn
+        the policy permits. pc_usable is what the caller knows and this method
+        cannot see: which basis produced the number it is being handed.
+
+        It is passed in rather than inferred from `pc` because a nonzero Pc does
+        not imply a Pc-traded utility -- an externally supplied Pc can be large
+        while the geometric Pc underflows, and that event takes the fallback
+        basis exactly like a zero-Pc one. Inferring from `pc` here would leave
+        that case still commanding a capped burn.
+
+        It defaults to False so that a caller which has not established the
+        basis cannot trip an APS recommendation by accident. The failure
+        direction is deliberate: not recommending a burn is recoverable, and
+        an event whose Pc is unusable is surfaced as its own state rather than
+        silently cleared.
+
+        Flight-rule modes are untouched by this and ignore pc_usable: they key
+        off the fixed Pc threshold and the miss-distance floor, and these
+        events are Pc zero, so they never fired on them in the first place.
+        """
         if self.decision_mode == "aps":
-            return utility > 0.0
+            return pc_usable and utility > 0.0
         return pc is not None and (
             pc >= self.flight_rule_pc_threshold
             or miss_distance_km < self.min_miss_distance_km

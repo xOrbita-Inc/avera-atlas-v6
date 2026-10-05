@@ -550,6 +550,83 @@ UTILITY_BASIS_PC = "pc_traded"
 UTILITY_BASIS_DELTA_C = "delta_c_legacy"
 
 
+# ---------------------------------------------------------------------------
+# SCRUM-485: what APS concluded, when it did not conclude "maneuver"
+# ---------------------------------------------------------------------------
+#
+# APS used to express this as a single bool, and that bool was true for any
+# positive utility -- including the unbounded utilities the delta_c_legacy
+# fallback produces for events whose Pc is exactly zero. Those events carry no
+# collision risk; APS was recommending a capped burn on them anyway.
+#
+# Three outcomes, because the two non-maneuver ones are not the same claim and
+# collapsing them would say something false about one of them:
+#
+#   maneuver_required : a usable, nonzero Pc was traded down by a burn whose
+#                       utility is positive.
+#   not_required      : the event WAS assessed and is safe. Its Pc was computed
+#                       and is effectively zero -- a negligible-risk in-volume
+#                       pass whose geometric Pc underflows. Zero burn.
+#   no_usable_pc      : no Pc could be established, or none that the utility
+#                       model could trade on. The event is NOT claimed safe and
+#                       is NOT a maneuver; it is unassessed and says so. Zero
+#                       burn, because a burn priced off the fallback basis is
+#                       not a burn anyone should fly.
+APS_STATE_REQUIRED = "maneuver_required"
+APS_STATE_NOT_REQUIRED = "not_required"
+APS_STATE_NO_USABLE_PC = "no_usable_pc"
+
+
+def aps_pc_usable(pc: Optional[float]) -> bool:
+    """A probability of collision APS may recommend a maneuver against.
+
+    Usable means established and not zero. Both exclusions matter and for
+    different reasons:
+
+      pc is None  -- nothing was established. There is no risk estimate to act
+                     on, and the fallback utility is not one.
+      pc == 0.0   -- a real estimate, and it says there is no risk. Spending
+                     delta-v against it is spending it against nothing.
+
+    Deliberately NOT keyed on the utility basis, although the fallback basis is
+    where the huge utilities come from and the two coincide on every event in
+    the reported window. They come apart when a Pc is supplied externally while
+    the geometric Pc underflows: that event takes the fallback basis but it has
+    a real, authority-supplied probability attached, and it can be above the
+    maneuver threshold. Refusing a burn there would suppress a maneuver on a
+    genuinely risky event -- and it would not even stop the burn, because the
+    mode machine authorizes off the Pc threshold and would still execute, while
+    the recommendation beside it said no-burn. A gate that makes the response
+    disagree with what the system actually does is worse than no gate.
+
+    So the basis is not the test; the Pc is. What remains unfixed for that
+    supplied-Pc case is the SIZE of the burn, which the unbounded fallback still
+    chooses and still caps at the delta-v limit. That is a sizing defect on an
+    event that does warrant some burn, which is a different problem from
+    commanding one on an event that warrants none.
+    """
+    return pc is not None and pc > 0.0
+
+
+def aps_decision_state(pc: Optional[float], required: bool) -> str:
+    """Which of the three outcomes above this event reached under APS.
+
+    `required` is the policy verdict, already gated on a usable Pc, so this only
+    has to separate the two non-maneuver cases -- and the separation is simply
+    whether a probability was ever established.
+
+    "Assessed and safe" is claimed only when a Pc actually exists. An absent one
+    reports no_usable_pc, because labelling it not_required would tell an
+    operator the event had been assessed and cleared when it had not been
+    assessed at all. That is the one error here that could cost something.
+    """
+    if required:
+        return APS_STATE_REQUIRED
+    if pc is None:
+        return APS_STATE_NO_USABLE_PC
+    return APS_STATE_NOT_REQUIRED
+
+
 def risk_exchange_rate(policy: OperatorPolicy) -> float:
     """Value of one unit of collision probability, in the same units as the cost
     terms. SCRUM-387.
@@ -1687,17 +1764,30 @@ def analyze_conjunction_modes(req: Dict[str, Any]) -> Dict[str, Any]:
     burn_dv = float(best_burn.dv_avoid_m_s) if best_burn is not None else None
     miss_km = scoring_req.get("conjunction", {}).get("miss_distance_km") or 999.0
 
+    # SCRUM-485: APS may only recommend against a Pc that exists and is not
+    # zero. The zero-Pc events in the reported window scored on the unbounded
+    # fallback basis and every one of them recommended a capped burn.
+    pc_usable = aps_pc_usable(scoring.pc_pre)
+
     modes = {}
     for mode in ("aps", "flight_rule_1e4", "flight_rule_1e5"):
         mode_policy = replace(policy, decision_mode=mode)
         required = mode_policy.is_recommendation_required(
             scoring.pc_pre, miss_km, utility=scoring.utility,
+            pc_usable=pc_usable,
         )
         modes[mode] = {
             "maneuver_required": bool(required),
             "dv_m_s": burn_dv if required else 0.0,
             "pricing_available": not required or best_burn is not None,
         }
+        # The state is APS-specific. A flight-rule mode decides on a fixed Pc
+        # threshold and has no notion of a utility basis, so reporting a
+        # no_usable_pc state there would describe a judgement it never made.
+        if mode == "aps":
+            modes[mode]["state"] = aps_decision_state(
+                scoring.pc_pre, bool(required),
+            )
 
     return {
         "conjunction_id": scoring.conjunction_id,
@@ -1713,5 +1803,9 @@ def analyze_conjunction_modes(req: Dict[str, Any]) -> Dict[str, Any]:
         } if best_burn is not None else None,
         "no_go_reason_code": scoring.no_go_reason_code,
         "dv_basis": "best_candidate_avoidance_burn",
+        # SCRUM-485: the selected candidate's basis, alongside the modes, so a
+        # row can be read without re-deriving why APS decided what it did.
+        "utility_basis": scoring.utility_basis,
+        "pc_usable": pc_usable,
         "modes": modes,
     }
