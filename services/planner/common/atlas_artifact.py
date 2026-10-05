@@ -67,6 +67,9 @@ from common.constellation_geometry import SlotRecoveryPlan
 from common.maneuver_scorer import (
     ManeuverScoringResult,
     CandidateScore,
+    APS_STATE_NOT_REQUIRED,
+    aps_decision_state,
+    aps_pc_usable,
 )
 from common.secondary_horizon import screen_secondary_catalog
 
@@ -95,12 +98,20 @@ class RiskSummary:
         'good' | 'degraded' | 'dilution_region'
         Derived from m2_pre (< 1.0 = dilution_region, < 4.0 = degraded).
     maneuver_required : bool
-        Recommendation-mode verdict: utility > 0 in APS mode; otherwise
+        Recommendation-mode verdict: in APS mode a positive utility that traded
+        a usable, nonzero Pc (SCRUM-485); otherwise
         Pc >= the selected flight-rule threshold OR miss_distance < floor.
     monitor_only : bool
         True if Pc is between monitor and maneuver thresholds.
     pc_source : str
         Provenance of pc_pre: supplied, computed, or unavailable.
+    aps_state : str
+        SCRUM-485. In APS mode, which of the three outcomes this event reached:
+        maneuver_required, not_required, or no_usable_pc. maneuver_required is
+        the same fact as the bool above; the other two distinguish an event that
+        was assessed and is safe from one whose Pc could not be used at all,
+        which the bool alone cannot express. Empty in flight-rule modes, which
+        decide on a fixed threshold and make no such distinction.
     """
     pc_pre: Optional[float]
     miss_distance_km: Optional[float]
@@ -110,6 +121,7 @@ class RiskSummary:
     maneuver_required: bool
     monitor_only: bool
     pc_source: str = ""
+    aps_state: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -1307,8 +1319,21 @@ def build_atlas_artifact(
     # artifacts must use that resolved value rather than the supplied-only input.
     resolved_pc = scoring.pc_pre
 
+    # SCRUM-485: APS may only recommend a maneuver off a utility that traded a
+    # real, nonzero Pc. Without this gate a negligible-risk pass whose Pc
+    # underflows to zero scores on the unbounded delta_c_legacy fallback and
+    # the live decision reads MANEUVER REQUIRED at the delta-v cap. The state
+    # below records WHICH non-maneuver conclusion was reached, because "assessed
+    # and safe" and "no usable Pc" are different claims.
+    _pc_usable = aps_pc_usable(resolved_pc)
     maneuver_required = policy.is_recommendation_required(
         resolved_pc, miss_distance_km or 999.0, utility=scoring.utility,
+        pc_usable=_pc_usable,
+    )
+    aps_state = (
+        aps_decision_state(resolved_pc, bool(maneuver_required))
+        if policy.decision_mode == "aps"
+        else ""
     )
     monitor_only = False
     if resolved_pc is not None:
@@ -1323,7 +1348,33 @@ def build_atlas_artifact(
         maneuver_required=maneuver_required,
         monitor_only=monitor_only,
         pc_source=scoring.pc_source,
+        aps_state=aps_state,
     )
+
+    # SCRUM-485: the scorer prices a burn for every event, including the ones it
+    # priced on the unbounded delta_c_legacy fallback. Gating only the
+    # maneuver_required flag above leaves that burn in the artifact -- the
+    # operator summary still reads MANEUVER RECOMMENDED and the recommendation
+    # block still carries a delta-v capped at the policy limit, which is the
+    # commanded burn this ticket exists to stop. So the refusal has to reach the
+    # recommendation itself, not just the verdict beside it.
+    #
+    # Scoped to the fallback basis. An APS event with a real Pc whose utility
+    # simply did not justify a burn is unchanged, and so is every flight-rule
+    # mode, which never consulted the basis.
+    aps_fallback_burn_refused = (
+        policy.decision_mode == "aps"
+        and not _pc_usable
+        and scoring.is_maneuver_recommended()
+    )
+    # Deliberately NOT used to skip the secondary screen below. Skipping it
+    # looks like an obvious saving -- there is no burn, so there is no post-burn
+    # trajectory to screen, and each screen costs a rate-limited LeoLabs create.
+    # But an event with no usable Pc reaches here too, and for that one the
+    # screen failing to run is what makes verification fail closed. Skipping it
+    # turns "safety could not be established" into a deferred screen and a
+    # PASSING verification, which is the one reading this ticket exists to
+    # prevent. The screen stays.
 
     # --- Secondary conflict check ---
     # SCRUM-442: with the screen enabled this is now the real, live path -- the
@@ -1417,7 +1468,7 @@ def build_atlas_artifact(
 
     # --- A2: ManeuverRecommendation ---
     recommendation: Optional[ManeuverRecommendation] = None
-    if scoring.is_maneuver_recommended():
+    if scoring.is_maneuver_recommended() and not aps_fallback_burn_refused:
         recommendation = ManeuverRecommendation(
             direction=scoring.direction,
             dv_eci_km_s=scoring.dv_eci_km_s,
@@ -1486,7 +1537,36 @@ def build_atlas_artifact(
 
     # --- A5: NoGoReasoning ---
     no_go: Optional[NoGoReasoning] = None
-    if not scoring.is_maneuver_recommended():
+    if aps_fallback_burn_refused:
+        # SCRUM-485. Named for the state so the artifact says which conclusion
+        # was reached rather than leaving "no action" to be interpreted.
+        if aps_state == APS_STATE_NOT_REQUIRED:
+            no_go = NoGoReasoning(
+                reason_code="pc_zero_negligible_risk",
+                human_readable=(
+                    "Collision probability was computed for this event and is "
+                    "effectively zero, so no maneuver is required. The scored "
+                    "utility came from the separation-gain fallback, which is "
+                    "unbounded and is not a measure of risk bought down, so it "
+                    "does not justify a burn."
+                ),
+                pc_at_decision=resolved_pc,
+                mahalanobis_at_decision=math.sqrt(max(0.0, scoring.m2_pre)),
+            )
+        else:
+            no_go = NoGoReasoning(
+                reason_code="no_usable_pc",
+                human_readable=(
+                    "No usable collision probability could be established for "
+                    "this event, so it has NOT been assessed as safe. No burn "
+                    "is commanded: the scored utility came from the "
+                    "separation-gain fallback, which is unbounded and is not a "
+                    "measure of risk bought down. Review this event manually."
+                ),
+                pc_at_decision=resolved_pc,
+                mahalanobis_at_decision=math.sqrt(max(0.0, scoring.m2_pre)),
+            )
+    elif not scoring.is_maneuver_recommended():
         no_go = NoGoReasoning(
             reason_code=scoring.no_go_reason_code,
             human_readable=scoring.no_go_human_readable,

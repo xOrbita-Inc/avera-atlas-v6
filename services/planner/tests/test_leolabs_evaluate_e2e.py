@@ -183,6 +183,10 @@ def test_480_scores_once_and_prices_forced_burn(monkeypatch, candidate_utility):
         conjunction_id="480-controlled", pc_pre=2e-4, pc_source="supplied",
         utility=max(0.0, candidate_utility), candidates_v25=[candidate],
         no_go_reason_code="no_utility_gain" if candidate_utility <= 0 else "",
+        # SCRUM-485: APS reads the basis off the result to decide whether the
+        # utility may recommend at all. This case is a real Pc-traded event, so
+        # the verdict here is still "required iff utility > 0".
+        utility_basis="pc_traded",
     )
     spy = Mock(return_value=scoring)
     monkeypatch.setattr(scorer, "evaluate_conjunction_v25", spy)
@@ -206,6 +210,8 @@ def test_480_missing_candidate_is_unpriced(monkeypatch):
     scoring = SimpleNamespace(
         conjunction_id="480-unpriced", pc_pre=2e-4, pc_source="supplied",
         utility=0.0, candidates_v25=[], no_go_reason_code="insufficient_budget",
+        # No candidate was selected, so no basis applies (SCRUM-485).
+        utility_basis="",
     )
     monkeypatch.setattr(scorer, "evaluate_conjunction_v25", lambda req: scoring)
     result = scorer.analyze_conjunction_modes({
@@ -222,6 +228,7 @@ def test_480_real_scorer_verdict_parity(parsed, pc, miss):
     from copy import deepcopy
     from common.maneuver_scorer import (
         analyze_conjunction_modes, evaluate_conjunction_v25, _policy_from_dict,
+        aps_pc_usable,
     )
 
     req = build_evaluate_request(parsed, sat_id="480", v_remaining_m_s=25.0)
@@ -236,6 +243,9 @@ def test_480_real_scorer_verdict_parity(parsed, pc, miss):
         policy = _policy_from_dict(mode_req["policy"])
         expected = policy.is_recommendation_required(
             scoring.pc_pre, miss, utility=scoring.utility,
+            # SCRUM-485: APS may only recommend against a Pc that exists and
+            # is not zero, so the recomputation carries the same signal.
+            pc_usable=aps_pc_usable(scoring.pc_pre),
         )
         assert verdict["maneuver_required"] == expected
         if expected and scoring.utility > 0:

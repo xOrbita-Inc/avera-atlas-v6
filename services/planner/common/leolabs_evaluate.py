@@ -176,7 +176,11 @@ def analyze_leolabs_portfolio(
     from time import perf_counter
     from common import leolabs_runtime as runtime
     from common.leolabs_cdm_parser import parse_leolabs_cdm, LeoLabsParseError
-    from common.maneuver_scorer import analyze_conjunction_modes
+    from common.maneuver_scorer import (
+        analyze_conjunction_modes,
+        APS_STATE_NOT_REQUIRED,
+        APS_STATE_NO_USABLE_PC,
+    )
 
     now = now or datetime.now(timezone.utc)
     satellite = dict(satellite or {})
@@ -250,6 +254,21 @@ def analyze_leolabs_portfolio(
             "known_dv_m_s": subtotal,
             "unpriced_maneuver_count": missing,
         }
+        # SCRUM-485: both non-maneuver APS outcomes are already excluded from
+        # the count and the delta-v above -- they carry maneuver_required False
+        # and a zero burn -- but excluding them silently would leave a window
+        # that collapsed from hundreds of maneuvers to a handful looking like
+        # events had gone missing. Tally them so the rollup accounts for every
+        # event it analysed, and so "assessed and safe" stays distinguishable
+        # from "could not be assessed".
+        if mode == "aps":
+            states = [verdict.get("state") for verdict in verdicts]
+            summaries[mode]["not_required_count"] = sum(
+                state == APS_STATE_NOT_REQUIRED for state in states
+            )
+            summaries[mode]["no_usable_pc_count"] = sum(
+                state == APS_STATE_NO_USABLE_PC for state in states
+            )
 
     reasons = []
     if not pull.complete:

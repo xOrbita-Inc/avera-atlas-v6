@@ -386,13 +386,35 @@ def test_scrum479_decision_modes():
     assert default.decision_mode == "aps"
     assert default.to_dict()["decision_mode"] == "aps"
 
+    # SCRUM-485: APS needs BOTH a positive utility and a utility that came from
+    # a usable, nonzero Pc. With the Pc usable, the utility threshold behaves
+    # exactly as before.
     for utility, expected in ((-1.0, False), (0.0, False), (1.0, True)):
         assert default.is_recommendation_required(
-            2.0e-4, 2.0, utility=utility,
+            2.0e-4, 2.0, utility=utility, pc_usable=True,
         ) is expected
         assert default.is_recommendation_required(
-            5.0e-6, 2.0, utility=utility,
+            5.0e-6, 2.0, utility=utility, pc_usable=True,
         ) is expected
+
+    # And without a usable Pc, no utility recommends anything. This is the
+    # defect: the delta_c_legacy fallback produces utilities in the millions on
+    # events whose Pc is exactly zero, and every one of them used to recommend
+    # a maneuver at the delta-v cap.
+    for utility in (-1.0, 0.0, 1.0, 1.0e6):
+        assert default.is_recommendation_required(
+            2.0e-4, 2.0, utility=utility, pc_usable=False,
+        ) is False
+        assert default.is_recommendation_required(
+            0.0, 2.0, utility=utility, pc_usable=False,
+        ) is False
+        assert default.is_recommendation_required(
+            None, 2.0, utility=utility, pc_usable=False,
+        ) is False
+
+    # The default is deliberately fail-safe: a caller that has not established
+    # the basis cannot trip an APS recommendation by omission.
+    assert default.is_recommendation_required(2.0e-4, 2.0, utility=1.0) is False
 
     for mode, threshold in (
         ("flight_rule_1e4", 1.0e-4),
@@ -414,6 +436,19 @@ def test_scrum479_decision_modes():
         assert policy.is_recommendation_required(
             threshold * 0.5, 0.5, utility=-1.0,
         ) is True
+        # SCRUM-485 is an APS-only gate. Flight-rule modes key off the fixed Pc
+        # threshold and the miss-distance floor and must ignore pc_usable
+        # entirely, in both directions.
+        for usable in (True, False):
+            assert policy.is_recommendation_required(
+                threshold, 2.0, utility=-1.0, pc_usable=usable,
+            ) is True
+            assert policy.is_recommendation_required(
+                threshold * 0.5, 2.0, utility=1.0, pc_usable=usable,
+            ) is False
+            assert policy.is_recommendation_required(
+                threshold * 0.5, 0.5, utility=-1.0, pc_usable=usable,
+            ) is True
 
 
 def test_scrum479_policy_loading():

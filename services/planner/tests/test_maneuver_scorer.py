@@ -36,6 +36,7 @@ import pytest
 import numpy as np
 
 from common.maneuver_scorer import (
+    aps_pc_usable,
     compute_lifetime_fraction,
     score_maneuver_candidates,
     evaluate_conjunction_v25,
@@ -1009,6 +1010,10 @@ def test_scrum479_scorer_modes(
         )
         required = policy.is_recommendation_required(
             pc, 2.0, utility=result.utility,
+            # SCRUM-485: APS recommends only against a Pc that exists and is
+            # not zero. Taken from the result rather than hardcoded, so this
+            # still reflects what the scorer actually resolved.
+            pc_usable=aps_pc_usable(result.pc_pre),
         )
         expected = {
             "aps": aps_required,
