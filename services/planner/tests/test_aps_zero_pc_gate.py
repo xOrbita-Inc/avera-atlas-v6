@@ -261,11 +261,17 @@ class TestTheGateKeysOffThePcNotTheBasis:
         return analyze_conjunction_modes(
             _request(miss_km=10.0, with_rel_velocity=True, pc_precomputed=5.0e-3))
 
-    def test_the_case_really_does_take_the_fallback_basis(
+    def test_the_case_really_is_the_one_this_class_is_about(
             self, supplied_pc_on_fallback):
-        """Otherwise this class is testing nothing."""
+        """A real supplied Pc whose own geometric Pc underflows. Otherwise this
+        class is testing nothing.
+
+        It no longer takes the FALLBACK basis -- SCRUM-487 gave it a Pc-traded
+        path of its own -- but it is still the case where the Pc and the basis
+        would have disagreed, which is what the gate's design turns on.
+        """
         assert supplied_pc_on_fallback["pc_pre"] == 5.0e-3
-        assert supplied_pc_on_fallback["utility_basis"] == UTILITY_BASIS_DELTA_C
+        assert supplied_pc_on_fallback["utility_basis"] == UTILITY_BASIS_PC
 
     def test_a_real_supplied_pc_keeps_its_maneuver(self, supplied_pc_on_fallback):
         """It has a real probability attached and is above the maneuver
@@ -280,15 +286,21 @@ class TestTheGateKeysOffThePcNotTheBasis:
         for mode in _FLIGHT_RULE_MODES:
             assert supplied_pc_on_fallback["modes"][mode]["maneuver_required"] is True
 
-    def test_what_is_still_not_fixed_for_that_case(self, supplied_pc_on_fallback):
-        """Documented rather than quietly left: the burn SIZE is still chosen by
-        the unbounded fallback, so it pins to the delta-v cap. That is a sizing
-        defect on an event that does warrant some burn, which is a different
-        problem from commanding one on an event that warrants none.
+    def test_the_burn_size_is_now_fixed_too(self, supplied_pc_on_fallback):
+        """This test used to assert the opposite.
+
+        SCRUM-485 left the SIZE of this burn open and said so here: it was
+        chosen by the unbounded fallback and pinned to the delta-v cap, which is
+        a sizing defect on an event that does warrant some burn rather than the
+        485 defect of commanding one on an event that warrants none. SCRUM-487
+        closed it by pricing this case on the Pc-traded basis with the supplied
+        Pc as the level, so the burn is now sized to the risk and sits well
+        below the cap. Asserting the cap here now would pin a defect that has
+        been fixed.
         """
         policy = OperatorPolicy(operator_id="T", policy_version="2.5.0")
-        assert supplied_pc_on_fallback["modes"]["aps"]["dv_m_s"] == pytest.approx(
-            policy.max_dv_per_event_ms)
+        dv = supplied_pc_on_fallback["modes"]["aps"]["dv_m_s"]
+        assert 0.0 < dv < policy.max_dv_per_event_ms
 
     def test_pc_usability_is_what_the_gate_reads(self):
         assert aps_pc_usable(1.0e-9) is True
