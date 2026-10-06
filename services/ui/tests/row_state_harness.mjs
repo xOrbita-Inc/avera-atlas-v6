@@ -303,6 +303,16 @@ function headline(badgeText, badgeCls, mode){
 }
 const HOLD_MODE = HOLD_MODE_SRC[0].match(/'([^']*)'/)[1];
 
+// HOLD_MODE is read out of the template, so every check below that compares
+// dMafMode against it is circular: it passes whatever the constant says, even if
+// the constant is wrong. This is the one assertion that pins the VALUE, against
+// the planner rule it is supposed to mirror -- safety_monitor section 4.2
+// escalates a performed-and-not-clear secondary to FlightMode.M4_SAFE_HOLD, and
+// a planner test pins that transition. Changing the template constant to
+// anything else has to fail here.
+ok(HOLD_MODE === 'M4',
+  'hold mode is M4, FlightMode.M4_SAFE_HOLD per safety_monitor 4.2');
+
 ctx.setSeq(30);
 ctx.setResult({ decision_state_machine: { to_mode: 'M1' } });
 
@@ -434,6 +444,43 @@ ok(!!secondaryRow && secondaryRow.includes('FAIL'),
   'and that row reads the resolved FAIL');
 ok(!!secondaryRow && !secondaryRow.includes('PASS'),
   'and does not still read PASS from the evaluate-time artifact');
+
+// The same, with a LIVE-shaped payload: no catalog_screened, so it does not take
+// the SCRUM-443 demo branch. renderVerificationResult used to read the resolved
+// screen only for the demo catalog, which is what left the live path showing a
+// stale PASS; re-gating it to demo-only has to fail here.
+//
+// The artifact deliberately says secondary_clear TRUE, so the row can only read
+// FAIL if the resolved screen actually overrode it. If the override is removed
+// the row falls back to that TRUE and renders PASS.
+ctx.setResult({
+  atlas_artifact: {
+    post_maneuver: PM_PENDING, recommendation: { direction: 'prograde' },
+    verification: VERIFICATION,
+  },
+  decision_state_machine: { to_mode: 'M1' },
+});
+headline('GO', 'badge-go', 'M1');
+els.verificationBody.innerHTML = '';
+ctx.setState({ seq: 40, jobId: 'job-live', phase: 'resolved',
+  payload: {
+    status: 'not_clear', clear: false, pending: false,
+    screening_id: '603659',
+    conjunctions_total: 1223, conjunctions_truncated: true, conjunctions: [],
+    verdict: { clear: false, evaluated: 1223, breaches: ['miss_distance'] },
+    operator_note: 'Live LeoLabs on-demand screen: NOT CLEAR.',
+  },
+  note: null, startedAt: Date.now(), polls: 0 });
+ctx.propagate();
+
+const liveRow = els.verificationBody.innerHTML
+  .split('verify-check')
+  .find(chunk => chunk.includes('Secondary conflict clear'));
+ok(!!liveRow, 'a live-shaped resolved screen renders a secondary-conflict row');
+ok(!!liveRow && liveRow.includes('FAIL'),
+  'and a LIVE resolved NOT CLEAR reads FAIL, not just the demo-catalog one');
+ok(!!liveRow && !liveRow.includes('PASS'),
+  'and does not fall back to the artifact\'s stale secondary_clear');
 
 // The clear demo fixture must not be dragged along with it.
 ctx.setResult({
