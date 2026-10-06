@@ -243,8 +243,17 @@ class ParsedLeoLabsCDM:
             "v_rel_km_s": self.v_rel_km_s().tolist(),
             "v_rel_source": "state_vector_difference",
             "p_rel_km2": self.p_rel_eci_km2().flatten().tolist(),
-            # Intentionally None: the CDM Pc is a cross-check, not our Pc. The
-            # planner computes Pc from this real geometry.
+            # SCRUM-489: the secondary's measured radius, so Pc is computed on
+            # the real combined hard-body radius rather than the 15 m screening
+            # floor. The floor implies a ~14.8 m secondary and inflated every
+            # live Pc by roughly 17x; it now applies only when the size is
+            # genuinely unknown. The primary's radius already reaches the scorer
+            # on the satellite block.
+            #
+            # Still intentionally None: the CDM Pc is a cross-check, not our Pc.
+            # The planner computes Pc from this real geometry. Only the
+            # hard-body radius input changes.
+            "secondary_radius_m": self.secondary.radius_m,
             "pc_precomputed": None,
         }
 

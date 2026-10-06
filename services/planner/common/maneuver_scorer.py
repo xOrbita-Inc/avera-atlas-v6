@@ -427,14 +427,24 @@ PC_SOURCE_COMPUTED = "computed"
 PC_SOURCE_UNAVAILABLE = "unavailable"
 
 
-def resolve_hard_body_radius(cap: SatelliteCapability) -> Tuple[float, str]:
+def resolve_hard_body_radius(
+    cap: SatelliteCapability,
+    secondary_radius_m: Optional[float] = None,
+) -> Tuple[float, str]:
     """Combined hard-body radius for this conjunction, and where it came from.
 
     Delegates to the shared convention so the planner and the propagator cannot
     disagree about the radius for the same event. See ADR-010 and the reasoning
     beside the constants in libs/aps_math/conventions.py.
+
+    SCRUM-489: a conjunction that states the secondary's real radius is scored
+    on the real combined radius rather than the 15 m screening floor. The floor
+    was never calibrated against the 1e-4 threshold (SCRUM-394) and inflated
+    every live Pc by roughly 17x; it now applies only when the secondary's size
+    is genuinely unknown. cap.radius_m is the primary's own radius, which on the
+    live path is the figure the CDM states for our asset.
     """
-    return conventions.combined_hbr_m(cap.radius_m)
+    return conventions.combined_hbr_m(cap.radius_m, secondary_radius_m)
 
 
 def compute_pc_from_geometry(
@@ -494,6 +504,7 @@ def resolve_pc(
     v_rel_km_s: Optional[np.ndarray],
     p_rel_km2: np.ndarray,
     pc_precomputed: Optional[float],
+    secondary_radius_m: Optional[float] = None,
 ) -> Tuple[Optional[float], str, float, str]:
     """Decide this event's Pc and record where it came from.
 
@@ -506,7 +517,7 @@ def resolve_pc(
     overriding it with our own would be arrogant. We compute one only when
     nobody has.
     """
-    hbr_m, hbr_source = resolve_hard_body_radius(cap)
+    hbr_m, hbr_source = resolve_hard_body_radius(cap, secondary_radius_m)
 
     if pc_precomputed is not None:
         return float(pc_precomputed), PC_SOURCE_SUPPLIED, hbr_m, hbr_source
@@ -979,6 +990,7 @@ def score_maneuver_candidates(
     miss_distance_km: Optional[float] = None,
     recovery_orbits: float = 1.0,
     v_rel_km_s: Optional[np.ndarray] = None,
+    secondary_radius_m: Optional[float] = None,
 ) -> ManeuverScoringResult:
     """Core APS 2.5 scoring function.
 
@@ -1045,7 +1057,8 @@ def score_maneuver_candidates(
 
     # --- SCRUM-389: establish this event's Pc and hard-body radius ---
     pc_pre, pc_source, hbr_m, hbr_source = resolve_pc(
-        cap, r_sat_km, v_sat_km_s, r_rel_km, v_rel_km_s, p_rel_km2, pc_precomputed
+        cap, r_sat_km, v_sat_km_s, r_rel_km, v_rel_km_s, p_rel_km2, pc_precomputed,
+        secondary_radius_m=secondary_radius_m,
     )
 
     # --- SCRUM-387: our own pre-maneuver Pc, needed even when one was supplied ---
@@ -1567,6 +1580,9 @@ def evaluate_conjunction_v25(
     v_rel_km_s = (
         _as_vec3(v_rel_raw, "conjunction.v_rel_km_s") if v_rel_raw is not None else None
     )
+    # SCRUM-489: the secondary's measured radius when the conjunction states it.
+    # A LeoLabs CDM always does; absent it, the screening floor still applies.
+    secondary_radius_m = conj_dict.get("secondary_radius_m")
 
     return score_maneuver_candidates(
         conjunction_id=conjunction_id,
@@ -1583,6 +1599,7 @@ def evaluate_conjunction_v25(
         miss_distance_km=miss_dist,
         recovery_orbits=recovery_orbits,
         v_rel_km_s=v_rel_km_s,
+        secondary_radius_m=secondary_radius_m,
     )
 
 

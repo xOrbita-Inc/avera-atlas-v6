@@ -217,6 +217,9 @@ def test_to_conjunction_state_contract(cdm):
     assert set(state) == {
         "obj_id", "t_ca_utc", "r_rel_km", "v_rel_km_s",
         "v_rel_source", "p_rel_km2", "pc_precomputed",
+        # SCRUM-489: the secondary's measured radius, so the scorer computes Pc
+        # on the real combined hard-body radius instead of the screening floor.
+        "secondary_radius_m",
     }
     assert state["obj_id"] == "L143957"
     assert state["t_ca_utc"] == "2026-08-30T10:24:48.130573Z"
@@ -224,8 +227,11 @@ def test_to_conjunction_state_contract(cdm):
     assert len(state["v_rel_km_s"]) == 3
     assert len(state["p_rel_km2"]) == 9
     assert state["v_rel_source"] == "state_vector_difference"
-    # The CDM Pc is a cross-check, not our Pc: the planner computes it from geometry.
+    # The CDM Pc is a cross-check, not our Pc: the planner computes it from
+    # geometry. SCRUM-489 changed the hard-body radius that goes into that
+    # computation, not where the Pc comes from.
     assert state["pc_precomputed"] is None
+    assert state["secondary_radius_m"] == parsed.secondary.radius_m
 
 
 def test_units_relative_position_km(cdm):

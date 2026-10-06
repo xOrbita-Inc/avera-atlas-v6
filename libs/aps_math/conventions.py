@@ -52,13 +52,24 @@ from __future__ import annotations
 # For comparison, the default-mode defect corrected in SCRUM-390 was 4.26x.
 #
 # The convention is only sound if pc_maneuver_threshold was calibrated against
-# the same convention, and there is currently no record of what 1e-4 was
-# calibrated against. SCRUM-394 carries that question. Until it is answered this
-# value is inherited, not validated. Do not change it on this ticket's authority.
+# the same convention. SCRUM-394 carried that question and answered it: 1e-4 is
+# a standard operational maneuver threshold applied in practice against
+# realistic sum-of-radii hard-body radii, not against a screening floor. So the
+# floor and the threshold were never calibrated together, and pairing them
+# inflated every Pc by roughly 17x to 56x -- screening-conservative flags rather
+# than calibrated risk.
 #
-# Changing it affects: every Pc the propagator publishes, every Pc the planner
-# computes, the demo risk levels, and whether SCRUM-391's tracked-secondary
-# presets still reach RED.
+# The answer is NOT to change this number. It is still the right value for what
+# it is: the radius to screen with when the secondary's size is genuinely
+# unknown. What changed is its SCOPE. A conjunction that supplies the
+# secondary's real radius -- which every LeoLabs CDM does -- is now scored on the
+# real combined radius instead, and this floor applies only to the unknown case.
+# See combined_hbr_m below.
+#
+# Changing this value still affects: every Pc computed for a conjunction whose
+# secondary size is unknown, the demo risk levels, and whether SCRUM-391's
+# tracked-secondary presets still reach RED. It no longer affects the live
+# LeoLabs path, which now carries real radii.
 DEFAULT_COMBINED_HBR_M: float = 15.0
 
 # Radius of a 6U CubeSat with deployed solar arrays, metres, used as the default
@@ -80,15 +91,34 @@ DEFAULT_PRIMARY_RADIUS_M: float = 0.60
 DEFAULT_SECONDARY_RADIUS_M: float = 2.0
 
 
-def combined_hbr_m(primary_radius_m: float) -> tuple:
+def combined_hbr_m(
+    primary_radius_m: float,
+    secondary_radius_m: float = None,
+) -> tuple:
     """Combined hard-body radius for a conjunction, and where it came from.
 
     Returns (hbr_m, source).
 
+    When the secondary's real radius is known
+    -----------------------------------------
+    Use it. primary + secondary is the sum-of-radii convention the 1e-4
+    threshold is actually applied against (SCRUM-394), and a CDM that states
+    both objects' measured sizes has told us the answer. The screening floor is
+    NOT applied on top: flooring a known 3.6 m pair up to 15 m inflates Pc by
+    (15/3.6)^2, about 17x, and that is the inflation this rule removes.
+
+    Both radii must be positive to take this branch. A CDM that omits one
+    reports it as zero, and a zero radius is the absence of a measurement, not a
+    point-sized object -- treating it as real would drive Pc toward zero and
+    suppress maneuvers, which is the one direction an error here must not go.
+
+    When it is not known
+    --------------------
     The screening convention acts as a FLOOR, not as a replacement for physics.
     DEFAULT_COMBINED_HBR_M is deliberately inflated to absorb attitude
     uncertainty and an unknown secondary, so for a small primary it dominates
-    and the physical sum never gets a look in. That is intended.
+    and the physical sum never gets a look in. That is intended, and it is the
+    right behaviour precisely because the secondary's size is unknown.
 
     But a genuinely large primary must not be screened as though it were small.
     A 14 m-radius spacecraft plus an upper-stage-scale secondary is physically
@@ -100,6 +130,15 @@ def combined_hbr_m(primary_radius_m: float) -> tuple:
     correct for a spacecraft we do not fly yet, rather than correct by accident
     for the one we do.
     """
+    if (
+        secondary_radius_m is not None
+        and float(secondary_radius_m) > 0.0
+        and float(primary_radius_m) > 0.0
+    ):
+        return (
+            float(primary_radius_m) + float(secondary_radius_m),
+            "cdm_object_radii",
+        )
     physical = float(primary_radius_m) + DEFAULT_SECONDARY_RADIUS_M
     if physical > DEFAULT_COMBINED_HBR_M:
         return physical, "physical_sum"
