@@ -21,9 +21,14 @@ import { dirname, join } from 'node:path';
 const here = dirname(fileURLToPath(import.meta.url));
 const template = readFileSync(join(here, '..', 'app', 'templates', 'index.html'), 'utf8');
 
+// SCRUM-492: pollSecondaryScreen now also propagates the resolved verdict to the
+// decision badge and the MAF mode, so the real propagation is extracted too
+// rather than stubbed away. That keeps this harness exercising the actual
+// poll-to-headline wiring, which is the integration the ticket creates.
 const NAMES = ['_ar', 'secondaryScreenIsClear', 'cancelSecondaryScreenPoll',
   'armSecondaryScreenPoll', 'refreshPostManeuverPanel', 'pollSecondaryScreen',
-  'renderPostManeuverProjection'];
+  'propagateSecondaryScreenResolution', 'refreshVerificationPanel',
+  'renderVerificationResult', 'renderPostManeuverProjection'];
 
 const sources = NAMES.map(name => {
   const re = new RegExp('^(?:async )?function ' + name + '\\(.*?^\\}', 'ms');
@@ -32,10 +37,22 @@ const sources = NAMES.map(name => {
   return m[0];
 });
 
-// --- stub DOM, just enough for the row ---
+// The mode constant lives at module scope in the template, so it is lifted out
+// by value rather than redeclared here; a copy would be free to drift.
+const HOLD_MODE_SRC = template.match(/^const SECONDARY_HOLD_MAF_MODE = '[^']*';/m);
+if (!HOLD_MODE_SRC) throw new Error('could not extract SECONDARY_HOLD_MAF_MODE');
+
+// --- stub DOM, just enough for the row and the headline fields it now writes ---
 const els = {
   postManeuverBody: { innerHTML: '' },
   'portlet-post-maneuver-projection': { style: {} },
+  decisionBadge: {
+    textContent: 'GO', className: 'decision-badge badge-go',
+    classList: { contains(c) { return els.decisionBadge.className.split(' ').includes(c); } },
+  },
+  dMafMode: { textContent: 'M1' },
+  verificationBody: { innerHTML: '' },
+  verifyOverallBadge: { innerHTML: '', textContent: '', style: {} },
 };
 globalThis.document = { getElementById: id => els[id] || null };
 
@@ -55,6 +72,8 @@ ctx.isClear = secondaryScreenIsClear;
 ctx.arm = armSecondaryScreenPoll;
 ctx.cancel = cancelSecondaryScreenPoll;
 ctx.poll = pollSecondaryScreen;
+ctx.propagate = propagateSecondaryScreenResolution;
+ctx.renderVerification = renderVerificationResult;
 ctx.setSeq = v => { evalSeq = v; };
 ctx.getSeq = () => evalSeq;
 ctx.setState = v => { secondaryScreen = v; };
@@ -68,6 +87,7 @@ new Function('ctx', 'document', 'AbortController', 'fetch', 'setTimeout',
        secondaryScreenTimer=null, currentPlannerResult=null;
    const SECONDARY_POLL_INTERVAL_MS=${SECONDARY_POLL_INTERVAL_MS};
    const SECONDARY_POLL_CAP_MS=${SECONDARY_POLL_CAP_MS};
+   ${HOLD_MODE_SRC[0]}
    ${body}`
 )(ctx, globalThis.document, globalThis.AbortController,
   (...a) => globalThis.__fetch(...a), globalThis.setTimeout, globalThis.clearTimeout);
@@ -269,6 +289,188 @@ ctx.arm({ post_maneuver: { secondary_conflict: {
   screen_pending: true, screen_job_id: null } } }, 20);
 ok(ctx.getState() === null, 'arm does nothing without a job id');
 ctx.cancel();
+
+// SCRUM-492: the resolved verdict reaches the headline, not just the A4 row.
+//
+// The defect was that only A4 updated, so the card could read GO with the MAF
+// row at its evaluate-time mode while A4 directly below said the post-burn
+// screen was NOT CLEAR. These check the three states the operator can see.
+console.log('\n8. the resolution reaches the decision headline');
+function headline(badgeText, badgeCls, mode){
+  els.decisionBadge.textContent = badgeText;
+  els.decisionBadge.className = 'decision-badge ' + badgeCls;
+  els.dMafMode.textContent = mode;
+}
+const HOLD_MODE = HOLD_MODE_SRC[0].match(/'([^']*)'/)[1];
+
+ctx.setSeq(30);
+ctx.setResult({ decision_state_machine: { to_mode: 'M1' } });
+
+headline('GO', 'badge-go', 'M1');
+ctx.setState({ seq: 30, phase: 'resolved', payload: { status: 'not_clear', clear: false } });
+ctx.propagate();
+ok(els.decisionBadge.textContent === 'SECONDARY HOLD',
+  'a resolved NOT CLEAR moves the badge off GO');
+ok(!els.decisionBadge.className.includes('badge-go'),
+  'and it no longer carries the GO style');
+ok(els.dMafMode.textContent === HOLD_MODE,
+  'and the MAF mode escalates to ' + HOLD_MODE);
+
+headline('GO', 'badge-go', 'M1');
+ctx.setState({ seq: 30, phase: 'resolved', payload: { status: 'clear', clear: true } });
+ctx.propagate();
+ok(els.decisionBadge.textContent === 'GO', 'a resolved CLEAR keeps GO');
+ok(els.dMafMode.textContent === 'M1', 'and restores the evaluate-time MAF mode');
+
+headline('GO', 'badge-go', 'M1');
+ctx.setState({ seq: 30, phase: 'screening', payload: null });
+ctx.propagate();
+ok(els.decisionBadge.textContent === 'GO' && els.dMafMode.textContent === 'M1',
+  'a screen still running leaves the headline alone');
+
+headline('GO', 'badge-go', 'M1');
+ctx.setState({ seq: 30, phase: 'failed', payload: null });
+ctx.propagate();
+ok(els.decisionBadge.textContent === 'SECONDARY HOLD' && els.dMafMode.textContent === HOLD_MODE,
+  'a screen that could not be read holds, the same as NOT CLEAR');
+
+// The SCRUM-449 rule applies here too: a screen for a superseded decision must
+// never paint the headline of the one now on screen.
+headline('GO', 'badge-go', 'M1');
+ctx.setState({ seq: 29, phase: 'resolved', payload: { status: 'not_clear', clear: false } });
+ctx.propagate();
+ok(els.decisionBadge.textContent === 'GO' && els.dMafMode.textContent === 'M1',
+  'a stale screen does not touch the current headline');
+
+headline('WATCH', 'badge-nogo', 'M1');
+ctx.setState({ seq: 30, phase: 'resolved', payload: { status: 'not_clear', clear: false } });
+ctx.propagate();
+ok(els.decisionBadge.textContent === 'WATCH',
+  'a badge that was never GO is left as it is');
+
+// Through the REAL poll, not by calling propagate directly. Everything above
+// would still pass if pollSecondaryScreen simply never called it, which would
+// leave the whole feature dead and the suite green.
+ctx.setSeq(31);
+ctx.setResult({ atlas_artifact: { post_maneuver: PM_PENDING },
+                decision_state_machine: { to_mode: 'M1' } });
+globalThis.__fetch = async () => ({ json: async () => (
+  { status: 'not_clear', clear: false, screening_id: '603659',
+    verdict: { clear: false, evaluated: 1223, breaches: [] } }) });
+headline('GO', 'badge-go', 'M1');
+ctx.setState({ seq: 31, jobId: 'job-1', phase: 'screening', payload: null,
+  note: null, startedAt: Date.now(), polls: 0 });
+await ctx.poll();
+ok(els.decisionBadge.textContent === 'SECONDARY HOLD',
+  'the poll itself carries a NOT CLEAR through to the badge');
+ok(els.dMafMode.textContent === HOLD_MODE,
+  'and through to the MAF mode');
+
+globalThis.__fetch = async () => ({ json: async () => (
+  { status: 'clear', clear: true, screening_id: '603660',
+    verdict: { clear: true, evaluated: 1223, breaches: [] } }) });
+headline('GO', 'badge-go', 'M1');
+ctx.setState({ seq: 31, jobId: 'job-1', phase: 'screening', payload: null,
+  note: null, startedAt: Date.now(), polls: 0 });
+await ctx.poll();
+ok(els.decisionBadge.textContent === 'GO',
+  'and a CLEAR through the poll leaves GO standing');
+
+// SCRUM-492: the DEMO path reaches the same propagation as the live poll.
+//
+// OBJ-DEMO-FLIP resolves its screen synchronously when the scenario renders,
+// never going through pollSecondaryScreen, so before this it was the one path
+// that could still show a GO badge above a verification row reading FAIL. It is
+// also the path most likely to be demonstrated, which is why it is driven here
+// end to end rather than trusted to the shared function.
+console.log('\n9. the demo not-clear path reaches all three panels');
+
+// The payload the demo fixture actually emits for OBJ-DEMO-FLIP.
+const DEMO_NOT_CLEAR = {
+  status: 'not_clear', clear: false, pending: false,
+  catalog_screened: 'Controlled demo catalog', screening_id: 'DEMO-HELD',
+  conjunctions_total: 1, conjunctions_truncated: false,
+  conjunctions: [{ object_id: 'DEMO-HELD-SECONDARY', secondary_norad: 90002,
+    tca_utc: new Date(Date.now() + 3600e3).toISOString(),
+    miss_distance_km: 0.4, pc: 1.2e-4,
+    covariance_repaired: false, covariance_untrusted: false }],
+  verdict: { clear: false, evaluated: 1, breaches: ['miss_distance'] },
+  operator_note: 'Controlled demo fixture: post-burn secondary screen NOT CLEAR.',
+};
+const VERIFICATION = {
+  passed: true, risk_reduced: true, utility_positive: true,
+  secondary_clear: true, budget_within_limits: true,
+  recovery_within_limits: true, verification_note: null,
+};
+
+ctx.setSeq(40);
+ctx.setResult({
+  atlas_artifact: {
+    post_maneuver: PM_PENDING, recommendation: { direction: 'prograde' },
+    verification: VERIFICATION,
+  },
+  decision_state_machine: { to_mode: 'M1' },
+});
+headline('GO', 'badge-go', 'M1');
+els.verificationBody.innerHTML = '';
+// Exactly what the scenario path does: set the resolved payload, then propagate.
+ctx.setState({ seq: 40, jobId: null, phase: 'resolved', payload: DEMO_NOT_CLEAR,
+  note: null, startedAt: Date.now(), polls: 0 });
+ctx.propagate();
+
+ok(els.decisionBadge.textContent === 'SECONDARY HOLD',
+  'demo NOT CLEAR moves the badge off GO');
+ok(!els.decisionBadge.className.includes('badge-go'),
+  'demo NOT CLEAR drops the GO style');
+ok(els.dMafMode.textContent === HOLD_MODE,
+  'demo NOT CLEAR escalates the MAF mode to ' + HOLD_MODE);
+
+// The verification row, read out of the rendered markup rather than inferred.
+const secondaryRow = els.verificationBody.innerHTML
+  .split('verify-check')
+  .find(chunk => chunk.includes('Secondary conflict clear'));
+ok(!!secondaryRow, 'the verification panel rendered a secondary-conflict row');
+ok(!!secondaryRow && secondaryRow.includes('FAIL'),
+  'and that row reads the resolved FAIL');
+ok(!!secondaryRow && !secondaryRow.includes('PASS'),
+  'and does not still read PASS from the evaluate-time artifact');
+
+// The clear demo fixture must not be dragged along with it.
+ctx.setResult({
+  atlas_artifact: {
+    post_maneuver: PM_PENDING, recommendation: { direction: 'prograde' },
+    verification: VERIFICATION,
+  },
+  decision_state_machine: { to_mode: 'M1' },
+});
+headline('GO', 'badge-go', 'M1');
+ctx.setState({ seq: 40, jobId: null, phase: 'resolved',
+  payload: { status: 'clear', clear: true, catalog_screened: 'Controlled demo catalog' },
+  note: null, startedAt: Date.now(), polls: 0 });
+ctx.propagate();
+ok(els.decisionBadge.textContent === 'GO', 'a clear demo screen keeps GO');
+ok(els.dMafMode.textContent === 'M1', 'and leaves the MAF mode at its evaluate value');
+
+// SCRUM-492: both call sites exist.
+//
+// Everything above drives propagateSecondaryScreenResolution directly, so it all
+// still passes if a call site is deleted and the function is simply never
+// reached -- which is the exact way this feature could die silently. The poll
+// path is covered behaviourally in section 8; the demo call site sits inside
+// evaluateConjunction, which pulls in the whole evaluate pipeline and cannot be
+// driven here, so it is pinned at the wiring level instead.
+//
+// A source assertion is weaker than a behavioural one and is used only because
+// the alternative is no coverage at all for a line whose deletion is invisible.
+console.log('\n10. both call sites are wired');
+const pollSrc = template.match(/^async function pollSecondaryScreen\(.*?^\}/ms);
+ok(!!pollSrc, 'pollSecondaryScreen is in the template');
+ok(!!pollSrc && (pollSrc[0].match(/propagateSecondaryScreenResolution\(\)/g) || []).length >= 2,
+  'the poll propagates from every terminal branch, not just one');
+ok(/if\(demoScreen\)\s*propagateSecondaryScreenResolution\(\);/.test(template),
+  'the demo scenario path propagates too');
+ok((template.match(/function propagateSecondaryScreenResolution\(/g) || []).length === 1,
+  'and there is one implementation of the rule, not a demo fork of it');
 
 console.log(`\n${checks - failures}/${checks} checks passed`);
 process.exit(failures ? 1 : 0);

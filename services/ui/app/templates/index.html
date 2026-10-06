@@ -2174,6 +2174,84 @@ function refreshPostManeuverPanel(){
   if(pm) renderPostManeuverProjection(pm);
 }
 
+// Re-draw the verification panel from the result already on screen, the same way
+// refreshPostManeuverPanel re-draws A4. renderVerificationResult reads the
+// resolved screen itself, so this needs no arguments beyond the artifact.
+function refreshVerificationPanel(){
+  const a = currentPlannerResult && currentPlannerResult.atlas_artifact;
+  if(!a) return;
+  renderVerificationResult(
+    a.verification,
+    a.recommendation != null,
+    !!(a.post_maneuver
+       && a.post_maneuver.secondary_conflict
+       && a.post_maneuver.secondary_conflict.screen_deferred)
+  );
+}
+
+// The MAF mode a resolved NOT CLEAR secondary screen puts the decision into.
+//
+// SCRUM-492: this is NOT read off the poll response. The resolved payload
+// carries the screen's own verdict -- status, clear, secondary_check_performed,
+// secondary_conjunction_clear -- but no mode field, and the planner does not
+// re-run the state machine after the screen resolves, so there is no updated
+// to_mode to copy. M4 is the documented MAF rule for this exact condition:
+// safety_monitor escalates on performed-and-not-clear (section 4.2), and a
+// planner test pins that transition to M4_SAFE_HOLD. Named here rather than
+// written inline so it is obvious this is a rule the UI is applying, not a value
+// it received.
+const SECONDARY_HOLD_MAF_MODE = 'M4';
+
+// SCRUM-492: when the screen resolves, carry its verdict up to the three panels
+// that were still showing the evaluate-time answer.
+//
+// A4 already re-rendered from the resolved result, so the dashboard could read
+// "MANEUVER REQUIRED / GO" with M1 in the MAF row and a provisional verification
+// note, while A4 directly below said a share of the screened conjunctions breach
+// and the decision needs a safe hold. The backend was right throughout; the top
+// line disagreed with it, and the top line is what an operator acts on.
+//
+// This is an OVERRIDE applied only once the screen resolves. The pre-screen GO
+// logic in updateDecisionCard is untouched, so a decision reaches GO exactly as
+// it did before and is only moved off it by a screen that actually came back not
+// clear.
+function propagateSecondaryScreenResolution(){
+  const st = secondaryScreen;
+  // Same staleness rule the rest of the poll uses: a screen for a superseded
+  // decision must never paint over the one now on screen.
+  if(!st || st.seq !== evalSeq) return;
+  // Still running: leave every panel in its pending state.
+  if(st.phase !== 'resolved' && st.phase !== 'failed') return;
+
+  // A screen that could not be read is not a clear screen. 'failed' reaches here
+  // with no payload and resolves false, which matches what A4 already says.
+  const isClear = st.phase === 'resolved' && secondaryScreenIsClear(st.payload);
+
+  const badge = document.getElementById('decisionBadge');
+  const modeEl = document.getElementById('dMafMode');
+
+  if(!isClear){
+    // Move the badge off GO only. Any other state -- NO ACTION, WATCH, STANDBY,
+    // ANALYZING -- was not claiming the burn was cleared to fly, so there is
+    // nothing to withdraw and overwriting it would lose information. The status
+    // line is deliberately left alone: the primary conjunction still requires a
+    // maneuver, and that has not changed.
+    if(badge && badge.classList.contains('badge-go')){
+      badge.className = 'decision-badge badge-standby';
+      badge.textContent = 'SECONDARY HOLD';
+    }
+    if(modeEl) modeEl.textContent = SECONDARY_HOLD_MAF_MODE;
+  }else{
+    // Cleared: the evaluate-time mode is the right one again. Read back from the
+    // response rather than remembered, so this cannot drift from what the state
+    // machine actually decided.
+    const dsm = (currentPlannerResult && currentPlannerResult.decision_state_machine) || {};
+    if(modeEl) modeEl.textContent = dsm.to_mode || dsm.mode || '--';
+  }
+
+  refreshVerificationPanel();
+}
+
 async function pollSecondaryScreen(){
   const st = secondaryScreen;
   // Superseded between the timer firing and now.
@@ -2185,6 +2263,7 @@ async function pollSecondaryScreen(){
       + Math.round(SECONDARY_POLL_CAP_MS/1000) + ' s, beyond the planner\'s own '
       + 'screening budget. Safety could not be established, so this reads NOT CLEAR.';
     refreshPostManeuverPanel();
+    propagateSecondaryScreenResolution();
     return;
   }
 
@@ -2222,6 +2301,7 @@ async function pollSecondaryScreen(){
     st.payload = payload;
   }
   refreshPostManeuverPanel();
+  propagateSecondaryScreenResolution();
 }
 
 async function evaluateConjunction(conj,idx){
@@ -2355,6 +2435,16 @@ async function evaluateConjunction(conj,idx){
     // "screening in progress" on its first frame.
     if(result.atlas_artifact)armSecondaryScreenPoll(result.atlas_artifact,seq);
     if(result.atlas_artifact)renderAtlasArtifact(result.atlas_artifact);
+    // SCRUM-492: the demo fixture resolves its screen synchronously here instead
+    // of through the poll, so it never reached the propagation the live path gets
+    // from pollSecondaryScreen. OBJ-DEMO-FLIP returns status:'not_clear', which
+    // left the demo showing a GO badge above a verification row reading FAIL --
+    // the same defect as live, on the path most likely to be demonstrated.
+    //
+    // Same function, not a second copy: a forked version of this rule would be
+    // free to disagree with the live one about what NOT CLEAR means. Runs after
+    // the artifact render so it corrects the painted card rather than racing it.
+    if(demoScreen)propagateSecondaryScreenResolution();
     // SCRUM-421: the Space-Track published-Pc lookup follows the source too --
     // the live asset and the scored secondary in live mode, the CDM-ops pair
     // otherwise.
@@ -5642,14 +5732,21 @@ function renderVerificationResult(vr, maneuverRecommended, secondaryDeferred) {
 
   // SCRUM-443: when the controlled Demo scenario supplies an explicit simulated
   // secondary-screen result, use that same result in Verification so A4 and the
-  // verification checklist cannot disagree. Live mode is unchanged and continues
-  // to use the real async poll payload.
-  const demoScreen = (
+  // verification checklist cannot disagree.
+  //
+  // SCRUM-492: the same now applies to a LIVE resolved screen. This used to be
+  // gated on the demo catalog, so on the live path the secondary-clear row kept
+  // the evaluate-time value -- which is necessarily provisional, because the
+  // screen had not finished when the artifact was built. A resolved NOT CLEAR
+  // left this row reading PASS beside an A4 that said the opposite.
+  //
+  // Only a RESOLVED screen is read. While it is pending the row falls through to
+  // the artifact value and the deferred handling below, exactly as before.
+  const resolvedScreen = (
     secondaryScreen
     && secondaryScreen.seq === evalSeq
     && secondaryScreen.phase === 'resolved'
     && secondaryScreen.payload
-    && secondaryScreen.payload.catalog_screened === 'Controlled demo catalog'
   ) ? secondaryScreen.payload : null;
 
   const el = document.getElementById('verificationBody');
@@ -5663,7 +5760,7 @@ function renderVerificationResult(vr, maneuverRecommended, secondaryDeferred) {
     return;
   }
 
-  const passed = demoScreen ? (vr.passed && secondaryScreenIsClear(demoScreen)) : vr.passed;
+  const passed = resolvedScreen ? (vr.passed && secondaryScreenIsClear(resolvedScreen)) : vr.passed;
   badge.innerHTML = passed
     ? '<span style="color:var(--green);font-size:8px;letter-spacing:1px">PASSED</span>'
     : '<span style="color:var(--red);font-size:8px;letter-spacing:1px">FAILED</span>';
@@ -5680,11 +5777,11 @@ function renderVerificationResult(vr, maneuverRecommended, secondaryDeferred) {
     // verdict already excludes it, so showing a red FAIL row beside a PASSED
     // banner would tell an operator the opposite of what the result says.
     // Rendered with the existing skipped vocabulary.
-    const deferred = c.key === 'secondary_clear' && secondaryDeferred && !demoScreen;
+    const deferred = c.key === 'secondary_clear' && secondaryDeferred && !resolvedScreen;
     const val = deferred
       ? null
-      : (demoScreen && c.key === 'secondary_clear'
-        ? secondaryScreenIsClear(demoScreen)
+      : (resolvedScreen && c.key === 'secondary_clear'
+        ? secondaryScreenIsClear(resolvedScreen)
         : vr[c.key]);
     const cls = val == null ? 'skip' : val ? 'pass' : 'fail';
     const icon = val == null ? '\u2014' : val ? '\u2713' : '\u2717';
@@ -5695,8 +5792,8 @@ function renderVerificationResult(vr, maneuverRecommended, secondaryDeferred) {
       '<span class="verify-verdict">' + verdict + '</span>' +
       '</div>';
   });
-  const verificationNote = demoScreen
-    ? (demoScreen.operator_note || null)
+  const verificationNote = resolvedScreen
+    ? (resolvedScreen.operator_note || null)
     : vr.verification_note;
   if (verificationNote) {
     html += '<div style="margin-top:6px;padding:5px 6px;background:var(--bg-panel);border-radius:3px;font-size:9px;color:var(--text-dim);line-height:1.4">' + verificationNote + '</div>';
