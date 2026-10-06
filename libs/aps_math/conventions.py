@@ -55,9 +55,14 @@ from __future__ import annotations
 # the same convention. SCRUM-394 carried that question and answered it: 1e-4 is
 # a standard operational maneuver threshold applied in practice against
 # realistic sum-of-radii hard-body radii, not against a screening floor. So the
-# floor and the threshold were never calibrated together, and pairing them
-# inflated every Pc by roughly 17x to 56x -- screening-conservative flags rather
-# than calibrated risk.
+# floor and the threshold were never calibrated together. The per-event factor
+# is (floor/real) squared -- 17x to 56x for a small 2 to 3.6 m pair -- but that
+# is not the typical live case. A read-only census of 175 SWARM A/C CDMs found
+# the real combined radius clusters near 14 m, so moving the live path to real
+# radii shifts the median Pc by about 13%, in both directions (some events up to
+# 1.57x higher), not a one-directional collapse. The floor yields screening-
+# conservative flags on small pairs rather than calibrated risk; the payoff of
+# the real CDM radii is agreement with LeoLabs' own published Pc, not deflation.
 #
 # The answer is NOT to change this number. It is still the right value for what
 # it is: the radius to screen with when the secondary's size is genuinely
