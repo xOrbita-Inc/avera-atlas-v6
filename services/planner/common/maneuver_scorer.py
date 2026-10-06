@@ -1352,12 +1352,67 @@ def score_maneuver_candidates(
                     risk_exchange_rate(policy) * pc_pre * reduction_fraction
                 )
                 basis = UTILITY_BASIS_PC
+            elif pc_pre is not None and pc_pre > 0.0:
+                # SCRUM-487: a usable Pc exists, but OUR geometric Pc underflows
+                # to zero, so the exact ratio above is 0/0 and unusable.
+                #
+                # This is the externally-supplied Pc case: an authority states a
+                # real, above-threshold probability while our own geometry puts
+                # it below floating-point. SCRUM-485 correctly still recommends a
+                # maneuver there -- the supplied Pc is real -- but the burn was
+                # priced on the unbounded fallback below, so the commanded
+                # delta-v was simply the policy's cap rather than anything sized
+                # to buy that risk down.
+                #
+                # The fix keeps the SCRUM-387 structure exactly: the LEVEL stays
+                # the authority's supplied Pc, and the FRACTION a burn removes
+                # comes from our geometry. Only the fraction is evaluated in
+                # Mahalanobis space instead of as a ratio of two probabilities:
+                #
+                #     Pc ~ k * exp(-m^2 / 2)   for a fixed hard-body radius,
+                #     so  Pc_post / Pc_pre  ~  exp(-(m2_post - m2_pre) / 2)
+                #     and the prefactor k cancels, leaving
+                #     reduction_fraction = 1 - exp(-delta_C_v25 / 2).
+                #
+                # That is the leading-order form of the exact ratio -- it is what
+                # the ratio becomes once the prefactor cancels -- and it stays
+                # well defined and bounded in [0, 1) precisely where the ratio
+                # dies, because m2_pre and m2_post are finite and already
+                # computed for this candidate even when both probabilities have
+                # underflowed to exactly zero. A test pins it against the exact
+                # ratio on an event where both are computable.
+                #
+                # The exponential is NOT evaluated for a worsening burn. It is
+                # clamped to zero there, matching the exact-ratio clamp above --
+                # and that clamp is also what keeps this safe, because
+                # delta_C_v25 can be large and negative and exp() of half that
+                # overflows rather than returning a large number.
+                if delta_C_v25 > 0.0:
+                    reduction_fraction = (
+                        1.0 if math.isinf(delta_C_v25)
+                        else 1.0 - math.exp(-delta_C_v25 / 2.0)
+                    )
+                else:
+                    # A worsening burn, or no finite separation gain, buys
+                    # nothing. A non-finite delta_C_v25 lands here too, which is
+                    # the conservative direction: no benefit claimed.
+                    reduction_fraction = 0.0
+                risk_benefit = (
+                    risk_exchange_rate(policy) * pc_pre * reduction_fraction
+                )
+                basis = UTILITY_BASIS_PC
             else:
-                # Fallback, and it is the live path until every producer supplies
-                # a relative velocity. Carries both defects described above. Kept
-                # rather than replaced by a no-go because a no-go here would mean
-                # a no-go on every event with no Pc, and the alternative is not
-                # scoring events we can still say something useful about.
+                # Fallback, for an event with NO usable Pc at all -- none
+                # supplied and none computable. Carries both defects described
+                # above, and is why the burn it prices is always the policy cap.
+                #
+                # SCRUM-485 refuses to recommend a maneuver on exactly that
+                # condition (pc_pre None or zero), and SCRUM-487 moved the
+                # supplied-Pc case to the branch above, so this basis no longer
+                # sizes any burn that gets commanded. It is kept because the
+                # candidates are still scored and reported, and because a no-go
+                # here would mean a no-go on every event with no Pc rather than
+                # not scoring events we can still say something useful about.
                 risk_benefit = delta_C_v25
                 basis = UTILITY_BASIS_DELTA_C
 
