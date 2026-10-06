@@ -2609,6 +2609,27 @@ function updateDecisionCard(result,conj){
   updateMafDecisionFields(result);
 }
 
+// SCRUM-491: the planner emits delta_C in the v2.4 convention, m2_pre - m2_post,
+// which is NEGATIVE for a burn that reduces risk. Every label around it in this
+// panel reads the other way -- "Risk reduction", "Risk gain", green for better --
+// so the recommended burns were rendering as large negative numbers and the
+// longest RED bars while carrying the highest utility.
+//
+// The number was right and its sign contradicted its own label. Displays now show
+// the Mahalanobis GAIN, m2_post - m2_pre, so a risk-reducing burn reads positive
+// and green. This is a DISPLAY conversion only: the emitted delta_C field keeps
+// the v2.4 sign, and the one place that reconstructs m2_post from it
+// (activeM2Post, below) still reads the raw value and must keep doing so.
+//
+// Defined once rather than negated inline at each of the seven render sites,
+// because a single missed sign among them would be invisible and would put one
+// bar on the wrong side of the axis. Normalises -0 to 0 so a no-burn candidate
+// does not render as "-0.000".
+function dcGain(delta_C){
+  const gain = -(delta_C || 0);
+  return gain === 0 ? 0 : gain;
+}
+
 function updateCandidatesTable(candidates,bestDir,fuelCost){
   const tbody=document.getElementById('candidatesBody');
   if(!candidates||!candidates.length){
@@ -2622,7 +2643,7 @@ function updateCandidatesTable(candidates,bestDir,fuelCost){
     const prefix=sel?'\u25C9 ':(best?'\u25B6 ':'');
     const dv=Math.sqrt(c.dv_eci_km_s.reduce((s,v)=>s+v*v,0))*1000;
     const rowCls=sel?'selected':'';
-    return'<tr class="'+rowCls+'" onclick="selectCandidate(\''+c.direction+'\')" style="cursor:pointer"><td class="'+cls+'">'+prefix+c.direction+'</td><td class="'+cls+'">'+c.delta_C.toFixed(3)+'</td><td>'+dv.toFixed(1)+'</td><td class="'+cls+'">'+c.utility.toFixed(3)+'</td></tr>'
+    return'<tr class="'+rowCls+'" onclick="selectCandidate(\''+c.direction+'\')" style="cursor:pointer"><td class="'+cls+'">'+prefix+c.direction+'</td><td class="'+cls+'">'+dcGain(c.delta_C).toFixed(3)+'</td><td>'+dv.toFixed(1)+'</td><td class="'+cls+'">'+c.utility.toFixed(3)+'</td></tr>'
   }).join('');
   renderFuelRiskChart(candidates,bestDir,fuelCost);
 }
@@ -2999,21 +3020,25 @@ function renderFuelRiskChart(candidates,bestDir,fuelCost){
     // Bar area from 48% to 96%, center at 72%
     const barCx=0.72; // center fraction
     const barHalfW=0.22; // half width fraction
-    const dcNorm=c.delta_C/maxAbsDC; // -1 to 1
-    const dcColor=c.delta_C>=0?'#3ddc84':'#ff3b5c';
+    // SCRUM-491: bar length, colour, side and label all read the displayed gain,
+    // so they cannot disagree with each other. maxAbsDC is a magnitude and is
+    // unaffected by the sign change.
+    const dcShown=dcGain(c.delta_C);
+    const dcNorm=dcShown/maxAbsDC; // -1 to 1
+    const dcColor=dcShown>=0?'#3ddc84':'#ff3b5c';
     const dcOp=isBest?'0.75':'0.3';
 
     // Center tick
     html+='<line x1="72%" y1="'+y+'" x2="72%" y2="'+(y+barH)+'" stroke="#2a3060" stroke-width="1"/>';
 
-    if(c.delta_C>=0){
+    if(dcShown>=0){
       const bw=Math.max(dcNorm*barHalfW*100,0.5);
       html+='<rect x="72%" y="'+(y+2)+'" width="'+bw+'%" height="'+(barH-4)+'" rx="2" fill="'+dcColor+'" opacity="'+dcOp+'"/>';
-      html+='<text x="'+(72+bw+1)+'%" y="'+ty+'" fill="'+dcColor+'" font-size="8" font-family="JetBrains Mono" opacity="'+(isBest?'1':'0.7')+'">'+c.delta_C.toFixed(3)+'</text>';
+      html+='<text x="'+(72+bw+1)+'%" y="'+ty+'" fill="'+dcColor+'" font-size="8" font-family="JetBrains Mono" opacity="'+(isBest?'1':'0.7')+'">'+dcShown.toFixed(3)+'</text>';
     }else{
       const bw=Math.max(Math.abs(dcNorm)*barHalfW*100,0.5);
       html+='<rect x="'+(72-bw)+'%" y="'+(y+2)+'" width="'+bw+'%" height="'+(barH-4)+'" rx="2" fill="'+dcColor+'" opacity="'+dcOp+'"/>';
-      html+='<text x="'+(72-bw-1)+'%" y="'+ty+'" fill="'+dcColor+'" font-size="8" font-family="JetBrains Mono" text-anchor="end" opacity="'+(isBest?'1':'0.7')+'">'+c.delta_C.toFixed(3)+'</text>';
+      html+='<text x="'+(72-bw-1)+'%" y="'+ty+'" fill="'+dcColor+'" font-size="8" font-family="JetBrains Mono" text-anchor="end" opacity="'+(isBest?'1':'0.7')+'">'+dcShown.toFixed(3)+'</text>';
     }
   });
   html+='</svg>';
@@ -5377,11 +5402,23 @@ function renderRiskSummary(rs) {
     cq.replace('_', ' ').toUpperCase() + '</span>';
   let html = '';
   if (rs.pc_pre != null) html += _ar('Pc pre-maneuver (APS)', rs.pc_pre > 0 ? rs.pc_pre.toExponential(2) : '0.00', rs.pc_pre > 1e-4 ? 'red' : rs.pc_pre > 1e-5 ? 'amber' : 'green');
-  // SCRUM-350: published Pc from the source CDM (Space-Track), shown next to the
-  // APS-computed value above and styled distinctly. The value is filled in by
+  // SCRUM-350: published Pc from the source CDM, shown next to the APS-computed
+  // value above and styled distinctly. The value is filled in by
   // updatePublishedPc after this render; it reads "not provided" until then and
   // on any miss (no NORAD ids, no CDM record, null Pc, or fetch failure).
-  html += _ar('Published Pc (Space-Track)', '<span id="pcSpaceTrackVal">' + pcSpaceTrackDisplay + '</span>', 'pc-published');
+  //
+  // SCRUM-491: the label said "Space-Track" and that is no longer where this
+  // comes from. The value is the originating CDM's own COLLISION_PROBABILITY,
+  // stored verbatim, and on the live feed the originating CDM is a LeoLabs one
+  // (Alfano-2005). Space-Track was retired in SCRUM-419/431. It mattered because
+  // this is the row carrying the accuracy claim -- it is what an APS Pc gets
+  // compared against -- so attributing it to a source we no longer use
+  // misstated the comparison.
+  //
+  // Label text only. pc_space_track is a legacy COLUMN name on the ingest side
+  // and the element id below is read by updatePublishedPc; renaming either is a
+  // migration and is deliberately not part of this change.
+  html += _ar('Published Pc (LeoLabs)', '<span id="pcSpaceTrackVal">' + pcSpaceTrackDisplay + '</span>', 'pc-published');
   if (rs.miss_distance_km != null) html += _ar('Miss distance', (rs.miss_distance_km * 1000).toFixed(0) + ' m');
   html += _ar('Mahalanobis pre', rs.mahalanobis_pre != null ? rs.mahalanobis_pre.toFixed(3) : '--');
   html += _ar('Covariance quality', cq.replace('_', ' ').toUpperCase(), cqColor);
@@ -5447,7 +5484,7 @@ function renderDecisionRationale(rat) {
   if (!el) return;
   let html = '';
   html += _ar('Utility score', rat.utility_score != null ? rat.utility_score.toFixed(4) : '--', 'accent');
-  html += _ar('Risk reduction (\u0394C)', rat.delta_C != null ? rat.delta_C.toFixed(4) : '--');
+  html += _ar('Risk reduction (\u0394C)', rat.delta_C != null ? dcGain(rat.delta_C).toFixed(4) : '--');
   html += _ar('\u03BBv \u00b7 \u0394v cost', rat.dv_cost_term != null ? rat.dv_cost_term.toFixed(4) : '--');
   html += _ar('\u03BBL \u00b7 lifetime', rat.lifetime_cost_term != null ? rat.lifetime_cost_term.toFixed(4) : '--');
   html += _ar('\u03BBs \u00b7 slot', rat.slot_cost_term != null ? rat.slot_cost_term.toFixed(4) : '--');
@@ -5458,7 +5495,7 @@ function renderDecisionRationale(rat) {
   }
   // Human readable
   if (rat.utility_score != null) {
-    const ratText = 'Utility: ' + rat.utility_score.toFixed(4) + '. Risk gain: ' + (rat.delta_C || 0).toFixed(3) + '. Fuel: ' + (rat.dv_cost_term || 0).toFixed(3) + '. Lifetime: ' + (rat.lifetime_cost_term || 0).toFixed(3) + '. Slot: ' + (rat.slot_cost_term || 0).toFixed(3) + '.';
+    const ratText = 'Utility: ' + rat.utility_score.toFixed(4) + '. Risk gain: ' + dcGain(rat.delta_C).toFixed(3) + '. Fuel: ' + (rat.dv_cost_term || 0).toFixed(3) + '. Lifetime: ' + (rat.lifetime_cost_term || 0).toFixed(3) + '. Slot: ' + (rat.slot_cost_term || 0).toFixed(3) + '.';
     html += '<div style="margin-top:8px;padding:6px;background:var(--bg-panel);border-radius:3px;font-size:9px;color:var(--text-dim);line-height:1.5">' + ratText + '</div>';
   }
   el.innerHTML = html;
