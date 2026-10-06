@@ -1793,10 +1793,35 @@ def analyze_conjunction_modes(req: Dict[str, Any]) -> Dict[str, Any]:
             scoring.pc_pre, miss_km, utility=scoring.utility,
             pc_usable=pc_usable,
         )
+        # SCRUM-488: the burn MAGNITUDE is gated for every mode, not just the
+        # APS verdict.
+        #
+        # A flight rule fires on pc >= threshold OR miss < the proximity floor,
+        # so a zero-Pc event with a sub-kilometre miss still legitimately
+        # requires a maneuver through that floor. That verdict is correct and is
+        # a real difference from APS; it is left exactly as it was.
+        #
+        # What is wrong is the size. burn_dv is taken once from the single
+        # highest-utility candidate, and for a zero-Pc event that candidate sits
+        # on the unbounded delta_c_legacy basis, so burn_dv is simply the largest
+        # burn the policy permits. Reporting it in a flight-rule column states a
+        # delta-v that was never sized against anything -- on the reference
+        # window roughly 99% of the baseline delta-v was this artifact.
+        #
+        # So such a maneuver is UNPRICED rather than fabricated: required stays
+        # true, the count is unchanged, and the delta-v drops out of the mode's
+        # total through the unpriced machinery the portfolio already has.
+        if not required:
+            dv_m_s, pricing_available = 0.0, True
+        elif best_burn is None or not pc_usable:
+            dv_m_s, pricing_available = None, False
+        else:
+            dv_m_s, pricing_available = burn_dv, True
+
         modes[mode] = {
             "maneuver_required": bool(required),
-            "dv_m_s": burn_dv if required else 0.0,
-            "pricing_available": not required or best_burn is not None,
+            "dv_m_s": dv_m_s,
+            "pricing_available": pricing_available,
         }
         # The state is APS-specific. A flight-rule mode decides on a fixed Pc
         # threshold and has no notion of a utility basis, so reporting a

@@ -512,8 +512,18 @@ class OperatorPolicy:
         silently cleared.
 
         Flight-rule modes are untouched by this and ignore pc_usable: they key
-        off the fixed Pc threshold and the miss-distance floor, and these
-        events are Pc zero, so they never fired on them in the first place.
+        off the fixed Pc threshold and the miss-distance floor.
+
+        An earlier version of this paragraph went on to claim those modes "never
+        fired on them in the first place" for zero-Pc events. That is false, and
+        worth stating plainly because it misled. The condition below is a Pc
+        threshold OR a miss-distance floor, so a zero-Pc event with a
+        sub-kilometre miss DOES require a flight-rule maneuver, through the
+        proximity floor. That verdict is legitimate and deliberately unchanged.
+        What SCRUM-488 corrected is not the verdict but the delta-v reported
+        beside it, which was taken from the same unbounded fallback candidate
+        and so was the largest burn the policy allowed rather than anything
+        sized against the event.
         """
         if self.decision_mode == "aps":
             return pc_usable and utility > 0.0

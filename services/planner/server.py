@@ -2668,6 +2668,24 @@ async def post_evaluate(request: Request):
             and not _eval_pc_usable
             and scoring.is_maneuver_recommended()
         )
+        # SCRUM-488: a flight-rule mode fires on the proximity floor regardless
+        # of Pc, so a zero-Pc event under a kilometre legitimately requires a
+        # maneuver -- and the delta-v reported beside it came from the same
+        # unbounded fallback candidate, which means it is the policy's largest
+        # permitted burn rather than anything sized against the event.
+        #
+        # The A/B marks such a burn unpriced. This response cannot simply null
+        # it: the authorization path builds its execute payload from the scoring
+        # directly, not from this block, so nulling here would make the response
+        # disagree with what the system would actually fly. Sizing the burn
+        # properly is the follow-on; until then the number is reported as the
+        # scorer produced it and labelled as unpriced, so a reader is told it
+        # was never sized rather than being quietly handed the cap.
+        _eval_dv_unpriced = (
+            not _aps_refuses_burn
+            and not _eval_pc_usable
+            and scoring.is_maneuver_recommended()
+        )
 
         result: Dict[str, Any] = {
             "conjunction_id": scoring.conjunction_id,
@@ -2693,6 +2711,10 @@ async def post_evaluate(request: Request):
                 # zero burn and has no way to tell why.
                 "utility_basis":       scoring.utility_basis,
                 "aps_state":           _eval_aps_state,
+                # SCRUM-488: true when the reported delta-v came from the
+                # unbounded fallback basis and so was never sized against this
+                # event. The maneuver verdict beside it is unaffected.
+                "dv_unpriced":         bool(_eval_dv_unpriced),
                 "hbr_m":               scoring.hbr_m,
                 "risk_gate":           scoring.risk_gate,
                 "risk_surrogate_post": scoring.risk_surrogate_post,
